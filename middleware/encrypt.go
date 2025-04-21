@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/cloudflare/circl/hpke"
 	"github.com/cloudflare/circl/kem"
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/stransport/identity"
@@ -57,27 +58,26 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 			sendError(w, err, "failed to setup decryption", http.StatusInternalServerError)
 			return
 		}
-		// Decrypt request body
-		requestBody, err := io.ReadAll(r.Body)
-		if err != nil {
-			sendError(w, err, "failed to read request body", http.StatusInternalServerError)
-			return
-		}
-		decrypted, err := opener.Open(requestBody, nil)
-		if err != nil {
-			sendError(w, err, "failed to decrypt request body", http.StatusInternalServerError)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewBuffer(decrypted))
 
-		// Create a response writer that captures the response body
-		responseWriter := &responseWriter{
-			ResponseWriter: w,
-			body:           &bytes.Buffer{},
+		// Only decrypt request body if it exists and has content
+		if r.Body != nil && r.ContentLength != 0 {
+			log.Debug("Decrypting request body")
+			requestBody, err := io.ReadAll(r.Body)
+			if err != nil {
+				sendError(w, err, "failed to read request body", http.StatusInternalServerError)
+				return
+			}
+			decrypted, err := opener.Open(requestBody, nil)
+			if err != nil {
+				sendError(w, err, "failed to decrypt request body", http.StatusInternalServerError)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewBuffer(decrypted))
+		} else {
+			log.Debug("No request body to decrypt")
 		}
-		next.ServeHTTP(responseWriter, r)
 
-		// Setup encryption
+		// Setup encryption for response
 		sender, err := identity.Suite().NewSender(clientPubKey, nil)
 		if err != nil {
 			sendError(w, err, "failed to create encryption context", http.StatusInternalServerError)
@@ -89,26 +89,47 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 			return
 		}
 
-		// Encrypt the response body
-		encrypted, err := sealer.Seal(responseWriter.body.Bytes(), nil)
-		if err != nil {
-			sendError(w, err, "failed to encrypt response body", http.StatusInternalServerError)
-			return
-		}
-
-		// Send to client
-		w.Header().Set("Content-Type", "application/octet-stream")
+		// Set the encapsulated key header
 		w.Header().Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(encapKey))
-		w.Write(encrypted)
+
+		// Create a streaming response writer
+		log.Debug("Passing to next handler")
+		responseWriter := &streamingResponseWriter{
+			ResponseWriter: w,
+			sealer:         sealer,
+		}
+		next.ServeHTTP(responseWriter, r)
 	})
 }
 
-// responseWriter captures the response body
-type responseWriter struct {
+// streamingResponseWriter handles streaming encrypted data
+type streamingResponseWriter struct {
 	http.ResponseWriter
-	body *bytes.Buffer
+	sealer hpke.Sealer
 }
 
-func (w *responseWriter) Write(b []byte) (int, error) {
-	return w.body.Write(b)
+func (w *streamingResponseWriter) Write(data []byte) (int, error) {
+	// Encrypt the chunk of data
+	encrypted, err := w.sealer.Seal(data, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to encrypt data: %w", err)
+	}
+
+	// Write the encrypted data
+	n, err := w.ResponseWriter.Write(encrypted)
+	if err != nil {
+		log.Errorf("Failed to write encrypted data: %v", err)
+		return 0, err
+	}
+	log.Debugf("Wrote %d bytes of encrypted data", n)
+
+	// Return the number of bytes we actually wrote
+	return n, nil
+}
+
+// Flush implements http.Flusher
+func (w *streamingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
