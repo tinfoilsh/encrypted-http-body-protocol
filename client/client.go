@@ -6,26 +6,43 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/cloudflare/circl/kem"
 	"github.com/tinfoilsh/stransport/identity"
 )
 
 type SecureClient struct {
-	identity *identity.Identity
-	serverPK kem.PublicKey
+	clientIdentity *identity.Identity
+	serverHost     string
+	serverPK       kem.PublicKey
 }
 
-func NewSecureClient(serverURL string, identity *identity.Identity) (*SecureClient, error) {
-	serverPK, err := getServerPublicKey(serverURL)
+var _ http.RoundTripper = (*SecureClient)(nil)
+
+func NewSecureClient(serverURL string, clientIdentity *identity.Identity) (*SecureClient, error) {
+	server, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server URL: %v", err)
+	}
+
+	c := &SecureClient{
+		clientIdentity: clientIdentity,
+		serverHost:     server.Host,
+	}
+
+	c.serverPK, err = getServerPublicKey(server)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server public key: %v", err)
 	}
-	return &SecureClient{identity: identity, serverPK: serverPK}, nil
+
+	return c, nil
 }
 
-func getServerPublicKey(serverURL string) (kem.PublicKey, error) {
-	resp, err := http.Get(fmt.Sprintf("%s/.well-known/tinfoil-public-key", serverURL))
+func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
+	serverURL.Path = "/.well-known/tinfoil-public-key"
+
+	resp, err := http.Get(serverURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get server public key: %v", err)
 	}
@@ -47,7 +64,7 @@ func getServerPublicKey(serverURL string) (kem.PublicKey, error) {
 	return pk, nil
 }
 
-func (c *SecureClient) Do(req *http.Request) (*http.Response, error) {
+func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	sender, err := identity.Suite().NewSender(c.serverPK, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender context: %v", err)
@@ -56,6 +73,8 @@ func (c *SecureClient) Do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup encryption: %v", err)
 	}
+
+	req.Host = c.serverHost
 
 	// Encrypt request body
 	var encrypted []byte
@@ -80,7 +99,7 @@ func (c *SecureClient) Do(req *http.Request) (*http.Response, error) {
 		newReq.Header[k] = v
 	}
 	newReq.Header.Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(clientEncapKey))
-	newReq.Header.Set("Tinfoil-Client-Public-Key", hex.EncodeToString(c.identity.MarshalPublicKey()))
+	newReq.Header.Set("Tinfoil-Client-Public-Key", hex.EncodeToString(c.clientIdentity.MarshalPublicKey()))
 	newReq.Header.Set("Content-Type", "application/octet-stream")
 
 	// Make request
@@ -94,7 +113,7 @@ func (c *SecureClient) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
 
-	receiver, err := identity.Suite().NewReceiver(c.identity.PrivateKey(), nil)
+	receiver, err := identity.Suite().NewReceiver(c.clientIdentity.PrivateKey(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create receiver: %v", err)
 	}

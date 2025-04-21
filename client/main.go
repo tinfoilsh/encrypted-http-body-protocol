@@ -34,11 +34,15 @@ func main() {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
 
+	httpClient := &http.Client{
+		Transport: secureClient,
+	}
+
 	req, err := http.NewRequest("POST", fmt.Sprintf("%s/secure", *serverURL), bytes.NewBuffer([]byte("nate")))
 	if err != nil {
 		log.Fatalf("failed to create request: %v", err)
 	}
-	resp, err := secureClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Fatalf("failed to make secure request: %v", err)
 	}
