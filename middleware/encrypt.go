@@ -69,7 +69,7 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 			}
 			decrypted, err := opener.Open(requestBody, nil)
 			if err != nil {
-				sendError(w, err, "failed to decrypt request body", http.StatusInternalServerError)
+				sendError(w, err, "failed to decrypt request body", http.StatusBadRequest)
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewBuffer(decrypted))
