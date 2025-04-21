@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/cloudflare/circl/kem"
+	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/stransport/identity"
 )
 
@@ -28,38 +29,43 @@ func getClientPubKey(r *http.Request) (kem.PublicKey, error) {
 	return pk, nil
 }
 
+func sendError(w http.ResponseWriter, err error, text string, status int) {
+	log.Errorf("error: %s: %v", text, err)
+	http.Error(w, text, status)
+}
+
 // EncryptMiddleware wraps an HTTP handler to encrypt the response body
 func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientPubKey, err := getClientPubKey(r)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			sendError(w, err, "invalid client public key", http.StatusBadRequest)
 			return
 		}
 		clientEncapKey, err := hex.DecodeString(r.Header.Get("Tinfoil-Encapsulated-Key"))
 		if err != nil {
-			http.Error(w, "Failed to decode encapsulated key", http.StatusBadRequest)
+			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
 		}
 		receiver, err := identity.Suite().NewReceiver(serverIdentity.PrivateKey(), nil)
 		if err != nil {
-			http.Error(w, "Failed to create receiver", http.StatusInternalServerError)
+			sendError(w, err, "failed to create receiver", http.StatusInternalServerError)
 			return
 		}
 		opener, err := receiver.Setup(clientEncapKey)
 		if err != nil {
-			http.Error(w, "Failed to setup decryption", http.StatusInternalServerError)
+			sendError(w, err, "failed to setup decryption", http.StatusInternalServerError)
 			return
 		}
 		// Decrypt request body
 		requestBody, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			sendError(w, err, "failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		decrypted, err := opener.Open(requestBody, nil)
 		if err != nil {
-			http.Error(w, "Failed to decrypt request body", http.StatusInternalServerError)
+			sendError(w, err, "failed to decrypt request body", http.StatusInternalServerError)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewBuffer(decrypted))
@@ -74,19 +80,19 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 		// Setup encryption
 		sender, err := identity.Suite().NewSender(clientPubKey, nil)
 		if err != nil {
-			http.Error(w, "Failed to create encryption context", http.StatusInternalServerError)
+			sendError(w, err, "failed to create encryption context", http.StatusInternalServerError)
 			return
 		}
 		encapKey, sealer, err := sender.Setup(nil)
 		if err != nil {
-			http.Error(w, "Failed to setup encryption", http.StatusInternalServerError)
+			sendError(w, err, "failed to setup encryption", http.StatusInternalServerError)
 			return
 		}
 
 		// Encrypt the response body
 		encrypted, err := sealer.Seal(responseWriter.body.Bytes(), nil)
 		if err != nil {
-			http.Error(w, "Failed to encrypt response body", http.StatusInternalServerError)
+			sendError(w, err, "failed to encrypt response body", http.StatusInternalServerError)
 			return
 		}
 
