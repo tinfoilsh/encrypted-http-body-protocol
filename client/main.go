@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"os"
 
 	log "github.com/sirupsen/logrus"
+
+	"github.com/openai/openai-go"
 
 	"github.com/tinfoilsh/stransport/identity"
 )
@@ -41,6 +44,7 @@ func main() {
 
 	testSecureEndpoint(httpClient)
 	testStreamEndpoint(httpClient)
+	testOpenAI()
 }
 
 func testSecureEndpoint(httpClient *http.Client) {
@@ -93,5 +97,29 @@ func testStreamEndpoint(httpClient *http.Client) {
 			log.Errorf("Error reading stream: %v", err)
 			break
 		}
+	}
+}
+
+func testOpenAI() {
+	openaiClient := NewOpenAIClient(*serverURL, *identityFile)
+	stream := openaiClient.Chat.Completions.NewStreaming(
+		context.Background(),
+		openai.ChatCompletionNewParams{
+			Model: "qwen:0.5b",
+			Messages: []openai.ChatCompletionMessageParamUnion{
+				openai.SystemMessage("You are a helpful assistant."),
+				openai.UserMessage("Tell me a short story about aluminum foil."),
+			},
+		},
+	)
+
+	for stream.Next() {
+		chunk := stream.Current()
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			fmt.Print(chunk.Choices[0].Delta.Content)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		log.Fatalf("Stream error: %v", err)
 	}
 }
