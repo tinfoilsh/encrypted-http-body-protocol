@@ -8,47 +8,59 @@ import (
 	"net/http"
 
 	"github.com/cloudflare/circl/hpke"
-	"github.com/cloudflare/circl/kem"
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/stransport/identity"
 )
-
-func getClientPubKey(r *http.Request) (kem.PublicKey, error) {
-	header := "Tinfoil-Client-Public-Key"
-	keyHex := r.Header.Get(header)
-	if keyHex == "" {
-		return nil, fmt.Errorf("missing %s header", header)
-	}
-	keyBytes, err := hex.DecodeString(keyHex)
-	if err != nil {
-		return nil, fmt.Errorf("invalid %s header", header)
-	}
-	pk, err := identity.KEMScheme().UnmarshalBinaryPublicKey(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid %s public key", header)
-	}
-	return pk, nil
-}
 
 func sendError(w http.ResponseWriter, err error, text string, status int) {
 	log.Errorf("error: %s: %v", text, err)
 	http.Error(w, text, status)
 }
 
+type SecureServer struct {
+	identity        *identity.Identity
+	permitPlaintext bool
+}
+
+func NewSecureServer(identity *identity.Identity, permitPlaintext bool) *SecureServer {
+	return &SecureServer{
+		identity:        identity,
+		permitPlaintext: permitPlaintext,
+	}
+}
+
 // EncryptMiddleware wraps an HTTP handler to encrypt the response body
-func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) http.Handler {
+func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientPubKey, err := getClientPubKey(r)
-		if err != nil {
-			sendError(w, err, "invalid client public key", http.StatusBadRequest)
+		header := "Tinfoil-Client-Public-Key"
+		keyHex := r.Header.Get(header)
+		if keyHex == "" {
+			if s.permitPlaintext {
+				log.Debugf("missing %s header", header)
+				w.Header().Set("Tinfoil-Server-Error", "MissingClientPublicKey")
+				next.ServeHTTP(w, r)
+				return
+			}
+			sendError(w, nil, "missing client public key", http.StatusBadRequest)
 			return
 		}
+		keyBytes, err := hex.DecodeString(keyHex)
+		if err != nil {
+			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
+			return
+		}
+		clientPubKey, err := identity.KEMScheme().UnmarshalBinaryPublicKey(keyBytes)
+		if err != nil {
+			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
+			return
+		}
+
 		clientEncapKey, err := hex.DecodeString(r.Header.Get("Tinfoil-Encapsulated-Key"))
 		if err != nil {
 			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
 		}
-		receiver, err := identity.Suite().NewReceiver(serverIdentity.PrivateKey(), nil)
+		receiver, err := identity.Suite().NewReceiver(s.identity.PrivateKey(), nil)
 		if err != nil {
 			sendError(w, err, "failed to create receiver", http.StatusInternalServerError)
 			return
@@ -73,6 +85,7 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewBuffer(decrypted))
+			r.ContentLength = int64(len(decrypted))
 		} else {
 			log.Debug("No request body to decrypt")
 		}
@@ -92,11 +105,17 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 		// Set the encapsulated key header
 		w.Header().Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(encapKey))
 
+		// Set transfer encoding to chunked and remove any Content-Length header
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.Header().Del("Content-Length")
+
 		// Create a streaming response writer
 		log.Debug("Passing to next handler")
 		responseWriter := &streamingResponseWriter{
 			ResponseWriter: w,
 			sealer:         sealer,
+			headers:        make(http.Header),
+			wroteHeader:    false,
 		}
 		next.ServeHTTP(responseWriter, r)
 	})
@@ -105,10 +124,34 @@ func EncryptMiddleware(serverIdentity *identity.Identity, next http.Handler) htt
 // streamingResponseWriter handles streaming encrypted data
 type streamingResponseWriter struct {
 	http.ResponseWriter
-	sealer hpke.Sealer
+	sealer      hpke.Sealer
+	headers     http.Header
+	wroteHeader bool
+	statusCode  int
+}
+
+// WriteHeader captures the status code and delegates to the underlying ResponseWriter
+func (w *streamingResponseWriter) WriteHeader(statusCode int) {
+	if !w.wroteHeader {
+		// Remove Content-Length as encryption will change the size
+		w.ResponseWriter.Header().Del("Content-Length")
+		w.statusCode = statusCode
+		w.ResponseWriter.WriteHeader(statusCode)
+		w.wroteHeader = true
+	}
+}
+
+// Header returns the headers map to allow headers to be set before WriteHeader is called
+func (w *streamingResponseWriter) Header() http.Header {
+	return w.ResponseWriter.Header()
 }
 
 func (w *streamingResponseWriter) Write(data []byte) (int, error) {
+	// Ensure headers are written
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+
 	// Encrypt the chunk of data
 	encrypted, err := w.sealer.Seal(data, nil)
 	if err != nil {
@@ -116,15 +159,14 @@ func (w *streamingResponseWriter) Write(data []byte) (int, error) {
 	}
 
 	// Write the encrypted data
-	n, err := w.ResponseWriter.Write(encrypted)
+	_, err = w.ResponseWriter.Write(encrypted)
 	if err != nil {
 		log.Errorf("Failed to write encrypted data: %v", err)
 		return 0, err
 	}
-	log.Debugf("Wrote %d bytes of encrypted data", n)
 
-	// Return the number of bytes we actually wrote
-	return n, nil
+	// Return the original data length, not the encrypted length
+	return len(data), nil
 }
 
 // Flush implements http.Flusher

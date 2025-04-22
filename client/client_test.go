@@ -20,6 +20,8 @@ func TestSecureClient(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
 
+	secureServer := middleware.NewSecureServer(serverIdentity, false)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/.well-known/tinfoil-public-key", func(w http.ResponseWriter, r *http.Request) {
@@ -27,7 +29,7 @@ func TestSecureClient(t *testing.T) {
 		fmt.Fprintf(w, "%x", serverIdentity.MarshalPublicKey())
 	})
 
-	mux.Handle("/secure", middleware.EncryptMiddleware(serverIdentity, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -40,7 +42,7 @@ func TestSecureClient(t *testing.T) {
 		}
 	})))
 
-	mux.Handle("/stream", middleware.EncryptMiddleware(serverIdentity, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/stream", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
 

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 
@@ -101,9 +102,7 @@ func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	for k, v := range req.Header {
-		newReq.Header[k] = v
-	}
+	maps.Copy(newReq.Header, req.Header)
 	newReq.Header.Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(clientEncapKey))
 	newReq.Header.Set("Tinfoil-Client-Public-Key", hex.EncodeToString(c.clientIdentity.MarshalPublicKey()))
 	newReq.Header.Set("Content-Type", "application/octet-stream")
@@ -115,8 +114,12 @@ func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+		log.Warnf("Server returned non-OK status: %d", resp.StatusCode)
+	}
+
+	encapKeyHeader := resp.Header.Get("Tinfoil-Encapsulated-Key")
+	if encapKeyHeader == "" {
+		return nil, fmt.Errorf("missing Tinfoil-Encapsulated-Key header")
 	}
 
 	receiver, err := identity.Suite().NewReceiver(c.clientIdentity.PrivateKey(), nil)
@@ -125,7 +128,7 @@ func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to create receiver: %v", err)
 	}
 
-	serverEncapKey, err := hex.DecodeString(resp.Header.Get("Tinfoil-Encapsulated-Key"))
+	serverEncapKey, err := hex.DecodeString(encapKeyHeader)
 	if err != nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("failed to decode encapsulated key: %v", err)
@@ -163,7 +166,7 @@ func (r *streamingDecryptReader) Read(p []byte) (int, error) {
 	}
 
 	// Read encrypted data
-	encBuf := make([]byte, 4096) // Fixed buffer size for encrypted data
+	encBuf := make([]byte, 4096)
 	n, err := r.reader.Read(encBuf)
 	if n == 0 {
 		if err == io.EOF {
