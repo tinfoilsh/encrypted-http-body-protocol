@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	suite     = hpke.NewSuite(hpke.KEM_X25519_HKDF_SHA256, hpke.KDF_HKDF_SHA256, hpke.AEAD_AES128GCM)
+	suite     = hpke.NewSuite(hpke.KEM_X25519_HKDF_SHA256, hpke.KDF_HKDF_SHA256, hpke.AEAD_AES256GCM)
 	k, _, _   = suite.Params()
 	kemScheme = k.Scheme()
 )

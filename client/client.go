@@ -54,9 +54,13 @@ func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
 		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
 
-	pkBytes, err := io.ReadAll(resp.Body)
+	pkHexBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+	pkBytes, err := hex.DecodeString(string(pkHexBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode public key: %v", err)
 	}
 
 	pk, err := identity.KEMScheme().UnmarshalBinaryPublicKey(pkBytes)

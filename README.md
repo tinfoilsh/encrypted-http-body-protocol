@@ -16,8 +16,8 @@ EHBP operates as a middleware layer that intercepts HTTP requests and responses,
 ### 3.1 Server Public Key Distribution
 
 Servers MUST expose their public key at the well-known URI `/.well-known/tinfoil-public-key`. The response MUST:
-- Have Content-Type: application/octet-stream
-- Contain the server's public key in binary format
+- Have Content-Type: text/plan
+- Contain the server's public key, hex encoded
 
 ## 4. Protocol Messages
 

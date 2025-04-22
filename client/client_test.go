@@ -23,8 +23,8 @@ func TestSecureClient(t *testing.T) {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/.well-known/tinfoil-public-key", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Write(serverIdentity.MarshalPublicKey())
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "%x", serverIdentity.MarshalPublicKey())
 	})
 
 	mux.Handle("/secure", middleware.EncryptMiddleware(serverIdentity, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
