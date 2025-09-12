@@ -38,10 +38,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/.well-known/tinfoil-public-key", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "%x", serverIdentity.MarshalPublicKey())
-	})
+	mux.HandleFunc("/.well-known/ohttp-keys", serverIdentity.ConfigHandler)
 
 	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)

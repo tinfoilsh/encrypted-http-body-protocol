@@ -13,6 +13,7 @@ import (
 	"github.com/cloudflare/circl/kem"
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/stransport/identity"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 type SecureClient struct {
@@ -43,7 +44,7 @@ func NewSecureClient(serverURL string, clientIdentity *identity.Identity) (*Secu
 }
 
 func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
-	serverURL.Path = "/.well-known/tinfoil-public-key"
+	serverURL.Path = "/.well-known/ohttp-keys"
 
 	resp, err := http.Get(serverURL.String())
 	if err != nil {
@@ -55,24 +56,24 @@ func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
 		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
 
-	pkHexBytes, err := io.ReadAll(resp.Body)
+	if resp.Header.Get("Content-Type") != "application/ohttp-keys" {
+		return nil, fmt.Errorf("server returned invalid content type: %s", resp.Header.Get("Content-Type"))
+	}
+
+	ohttpKeys, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
-	pkBytes, err := hex.DecodeString(string(pkHexBytes))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode public key: %v", err)
-	}
 
-	pk, err := identity.KEMScheme().UnmarshalBinaryPublicKey(pkBytes)
+	serverIdentity, err := identity.UnmarshalPublicConfig(ohttpKeys)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal public key: %v", err)
 	}
-	return pk, nil
+	return serverIdentity.PublicKey(), nil
 }
 
 func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
-	sender, err := identity.Suite().NewSender(c.serverPK, nil)
+	sender, err := c.clientIdentity.Suite().NewSender(c.serverPK, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender context: %v", err)
 	}
@@ -103,8 +104,8 @@ func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	maps.Copy(newReq.Header, req.Header)
-	newReq.Header.Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(clientEncapKey))
-	newReq.Header.Set("Tinfoil-Client-Public-Key", hex.EncodeToString(c.clientIdentity.MarshalPublicKey()))
+	newReq.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(clientEncapKey))
+	newReq.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(c.clientIdentity.MarshalPublicKey()))
 	newReq.Header.Set("Content-Type", "application/octet-stream")
 
 	// Make request
@@ -117,12 +118,12 @@ func (c *SecureClient) RoundTrip(req *http.Request) (*http.Response, error) {
 		log.Warnf("Server returned non-OK status: %d", resp.StatusCode)
 	}
 
-	encapKeyHeader := resp.Header.Get("Tinfoil-Encapsulated-Key")
+	encapKeyHeader := resp.Header.Get(protocol.EncapsulatedKeyHeader)
 	if encapKeyHeader == "" {
-		return nil, fmt.Errorf("missing Tinfoil-Encapsulated-Key header")
+		return nil, fmt.Errorf("missing %s header", protocol.EncapsulatedKeyHeader)
 	}
 
-	receiver, err := identity.Suite().NewReceiver(c.clientIdentity.PrivateKey(), nil)
+	receiver, err := c.clientIdentity.Suite().NewReceiver(c.clientIdentity.PrivateKey(), nil)
 	if err != nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("failed to create receiver: %v", err)

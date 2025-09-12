@@ -10,6 +10,7 @@ import (
 	"github.com/cloudflare/circl/hpke"
 	log "github.com/sirupsen/logrus"
 	"github.com/tinfoilsh/stransport/identity"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 func sendError(w http.ResponseWriter, err error, text string, status int) {
@@ -18,26 +19,25 @@ func sendError(w http.ResponseWriter, err error, text string, status int) {
 }
 
 type SecureServer struct {
-	identity        *identity.Identity
-	permitPlaintext bool
+	identity                *identity.Identity
+	permitPlaintextFallback bool
 }
 
-func NewSecureServer(identity *identity.Identity, permitPlaintext bool) *SecureServer {
+func NewSecureServer(identity *identity.Identity, permitPlaintextFallback bool) *SecureServer {
 	return &SecureServer{
-		identity:        identity,
-		permitPlaintext: permitPlaintext,
+		identity:                identity,
+		permitPlaintextFallback: permitPlaintextFallback,
 	}
 }
 
 // EncryptMiddleware wraps an HTTP handler to encrypt the response body
 func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := "Tinfoil-Client-Public-Key"
-		keyHex := r.Header.Get(header)
+		keyHex := r.Header.Get(protocol.ClientPublicKeyHeader)
 		if keyHex == "" {
-			if s.permitPlaintext {
-				log.Debugf("missing %s header", header)
-				w.Header().Set("Tinfoil-Server-Error", "MissingClientPublicKey")
+			if s.permitPlaintextFallback {
+				log.Debugf("missing %s header", protocol.ClientPublicKeyHeader)
+				w.Header().Set("EHBP-Fallback", "1")
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -49,18 +49,18 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
 		}
-		clientPubKey, err := identity.KEMScheme().UnmarshalBinaryPublicKey(keyBytes)
+		clientPubKey, err := s.identity.KEMScheme().UnmarshalBinaryPublicKey(keyBytes)
 		if err != nil {
 			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
 		}
 
-		clientEncapKey, err := hex.DecodeString(r.Header.Get("Tinfoil-Encapsulated-Key"))
+		clientEncapKey, err := hex.DecodeString(r.Header.Get(protocol.EncapsulatedKeyHeader))
 		if err != nil {
 			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
 		}
-		receiver, err := identity.Suite().NewReceiver(s.identity.PrivateKey(), nil)
+		receiver, err := s.identity.Suite().NewReceiver(s.identity.PrivateKey(), nil)
 		if err != nil {
 			sendError(w, err, "failed to create receiver", http.StatusInternalServerError)
 			return
@@ -91,7 +91,7 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Setup encryption for response
-		sender, err := identity.Suite().NewSender(clientPubKey, nil)
+		sender, err := s.identity.Suite().NewSender(clientPubKey, nil)
 		if err != nil {
 			sendError(w, err, "failed to create encryption context", http.StatusInternalServerError)
 			return
@@ -103,7 +103,7 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Set the encapsulated key header
-		w.Header().Set("Tinfoil-Encapsulated-Key", hex.EncodeToString(encapKey))
+		w.Header().Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 
 		// Set transfer encoding to chunked and remove any Content-Length header
 		w.Header().Set("Transfer-Encoding", "chunked")

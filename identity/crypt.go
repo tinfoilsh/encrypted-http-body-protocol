@@ -6,12 +6,12 @@ import (
 
 // Encrypt the plaintext with the provided aad for the given public key
 func (i *Identity) Encrypt(receipientPk, plaintext, aad []byte) ([]byte, []byte, error) {
-	pk, err := kemScheme.UnmarshalBinaryPublicKey(receipientPk)
+	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(receipientPk)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	sender, err := suite.NewSender(pk, nil)
+	sender, err := i.Suite().NewSender(pk, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -28,7 +28,7 @@ func (i *Identity) Encrypt(receipientPk, plaintext, aad []byte) ([]byte, []byte,
 
 // Decrypt ciphertext with the provided info and aad
 func (i *Identity) Decrypt(encap, ciphertext, aad []byte) ([]byte, error) {
-	recv, err := suite.NewReceiver(i.sk, nil)
+	recv, err := i.Suite().NewReceiver(i.sk, nil)
 	if err != nil {
 		return nil, err
 	}
