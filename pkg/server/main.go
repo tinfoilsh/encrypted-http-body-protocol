@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -20,7 +21,7 @@ import (
 
 var (
 	listenAddr      = flag.String("l", ":8080", "listen address")
-	identityFile    = flag.String("i", "identity.json", "identity file")
+	identityFile    = flag.String("i", "server_identity.json", "identity file")
 	verbose         = flag.Bool("v", false, "verbose logging")
 	permitPlaintext = flag.Bool("p", false, "permit plaintext requests")
 )
@@ -29,13 +30,20 @@ func main() {
 	flag.Parse()
 	if *verbose {
 		logrus.SetLevel(logrus.DebugLevel)
+		logrus.Debug("Verbose logging enabled")
 	}
 
 	serverIdentity, err := identity.FromFile(*identityFile)
 	if err != nil {
 		logrus.Fatalf("Failed to get identity: %v", err)
 	}
+
 	secureServer := middleware.NewSecureServer(serverIdentity, *permitPlaintext)
+
+	logrus.WithFields(logrus.Fields{
+		"public_key_hex":   hex.EncodeToString(serverIdentity.MarshalPublicKey()),
+		"permit_plaintext": *permitPlaintext,
+	}).Info("Server identity")
 
 	mux := http.NewServeMux()
 

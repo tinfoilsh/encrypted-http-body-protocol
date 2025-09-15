@@ -2,23 +2,23 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 
+	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/openai/openai-go"
-
+	"github.com/tinfoilsh/stransport/client"
 	"github.com/tinfoilsh/stransport/identity"
 )
 
 var (
 	serverURL    = flag.String("s", "http://localhost:8080", "server URL")
-	identityFile = flag.String("i", "identity.json", "client identity file")
+	identityFile = flag.String("i", "client_identity.json", "client identity file")
 	verbose      = flag.Bool("v", false, "verbose logging")
 )
 
@@ -26,6 +26,7 @@ func main() {
 	flag.Parse()
 	if *verbose {
 		log.SetLevel(log.DebugLevel)
+		log.Debug("Verbose logging enabled")
 	}
 
 	clientIdentity, err := identity.FromFile(*identityFile)
@@ -33,18 +34,21 @@ func main() {
 		log.Fatalf("failed to get client identity: %v", err)
 	}
 
-	secureClient, err := NewSecureClient(*serverURL, clientIdentity)
+	log.WithFields(logrus.Fields{
+		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
+	}).Info("Client identity")
+
+	secureTransport, err := client.NewTransport(*serverURL, clientIdentity)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
 
 	httpClient := &http.Client{
-		Transport: secureClient,
+		Transport: secureTransport,
 	}
 
 	testSecureEndpoint(httpClient)
 	testStreamEndpoint(httpClient)
-	testOpenAI()
 }
 
 func testSecureEndpoint(httpClient *http.Client) {
@@ -97,29 +101,5 @@ func testStreamEndpoint(httpClient *http.Client) {
 			log.Errorf("Error reading stream: %v", err)
 			break
 		}
-	}
-}
-
-func testOpenAI() {
-	openaiClient := NewOpenAIClient(*serverURL, *identityFile)
-	stream := openaiClient.Chat.Completions.NewStreaming(
-		context.Background(),
-		openai.ChatCompletionNewParams{
-			Model: "qwen:0.5b",
-			Messages: []openai.ChatCompletionMessageParamUnion{
-				openai.SystemMessage("You are a helpful assistant."),
-				openai.UserMessage("Tell me a short story about aluminum foil."),
-			},
-		},
-	)
-
-	for stream.Next() {
-		chunk := stream.Current()
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-			fmt.Print(chunk.Choices[0].Delta.Content)
-		}
-	}
-	if err := stream.Err(); err != nil {
-		log.Fatalf("Stream error: %v", err)
 	}
 }

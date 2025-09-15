@@ -1,4 +1,4 @@
-package main
+package client
 
 import (
 	"bytes"
@@ -64,11 +64,10 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureClient, err := NewSecureClient(server.URL, clientIdentity)
+	secureTransport, err := NewTransport(server.URL, clientIdentity)
 	assert.NoError(t, err)
-
 	httpClient := &http.Client{
-		Transport: secureClient,
+		Transport: secureTransport,
 	}
 
 	t.Run("secure endpoint", func(t *testing.T) {

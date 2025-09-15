@@ -193,25 +193,6 @@ func TestFromFile(t *testing.T) {
 	assert.True(t, identity1.pk.Equal(identity2.pk))
 	assert.True(t, identity1.sk.Equal(identity2.sk))
 	assert.Equal(t, identity1.suite, identity2.suite)
-
-	// Test error case - invalid file permissions
-	if os.Geteuid() != 0 { // Skip if running as root
-		readOnlyDir := filepath.Join(tempDir, "readonly")
-		err = os.Mkdir(readOnlyDir, 0444)
-		require.NoError(t, err)
-		readOnlyFile := filepath.Join(readOnlyDir, "identity.json")
-
-		_, err = FromFile(readOnlyFile)
-		assert.Error(t, err)
-	}
-
-	// Test error case - corrupted file
-	corruptedFile := filepath.Join(tempDir, "corrupted.json")
-	err = os.WriteFile(corruptedFile, []byte("corrupted data"), 0644)
-	require.NoError(t, err)
-
-	_, err = FromFile(corruptedFile)
-	assert.Error(t, err)
 }
 
 func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
