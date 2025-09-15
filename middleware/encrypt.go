@@ -55,7 +55,12 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		clientEncapKey, err := hex.DecodeString(r.Header.Get(protocol.EncapsulatedKeyHeader))
+		encapKeyHex := r.Header.Get(protocol.EncapsulatedKeyHeader)
+		if encapKeyHex == "" {
+			sendError(w, nil, "missing encapsulated key", http.StatusBadRequest)
+			return
+		}
+		clientEncapKey, err := hex.DecodeString(encapKeyHex)
 		if err != nil {
 			sendError(w, err, "invalid encapsulated key", http.StatusBadRequest)
 			return
