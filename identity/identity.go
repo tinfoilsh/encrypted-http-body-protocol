@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudflare/circl/hpke"
 	"github.com/cloudflare/circl/kem"
+	"github.com/tinfoilsh/stransport/protocol"
 	"golang.org/x/crypto/cryptobyte"
 )
 
@@ -124,7 +125,7 @@ func (i *Identity) MarshalConfig() ([]byte, error) {
 
 // ConfigHandler is a HTTP handler that returns the identity's configuration
 func (i *Identity) ConfigHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/ohttp-keys")
+	w.Header().Set("Content-Type", protocol.KeysMediaType)
 	configs, err := i.MarshalConfig()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -133,7 +134,7 @@ func (i *Identity) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(configs)
 }
 
-// UnmarshalPublicConfig unmarshals a ohttp-keys config into an identity
+// UnmarshalPublicConfig unmarshals a keys config into an identity
 //
 // Per https://github.com/chris-wood/ohttp-go/blob/main/ohttp.go
 func UnmarshalPublicConfig(data []byte) (*Identity, error) {

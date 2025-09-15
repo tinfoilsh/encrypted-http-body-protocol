@@ -118,7 +118,7 @@ func TestConfigHandler(t *testing.T) {
 
 	// Verify response
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "application/ohttp-keys", w.Header().Get("Content-Type"))
+	assert.Equal(t, protocol.KeysMediaType, w.Header().Get("Content-Type"))
 	assert.NotEmpty(t, w.Body.Bytes())
 
 	// Verify we can parse the response

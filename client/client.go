@@ -44,7 +44,7 @@ func NewSecureClient(serverURL string, clientIdentity *identity.Identity) (*Secu
 }
 
 func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
-	serverURL.Path = "/.well-known/ohttp-keys"
+	serverURL.Path = protocol.KeysPath
 
 	resp, err := http.Get(serverURL.String())
 	if err != nil {
@@ -56,7 +56,7 @@ func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
 		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
 
-	if resp.Header.Get("Content-Type") != "application/ohttp-keys" {
+	if resp.Header.Get("Content-Type") != protocol.KeysMediaType {
 		return nil, fmt.Errorf("server returned invalid content type: %s", resp.Header.Get("Content-Type"))
 	}
 
