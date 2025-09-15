@@ -15,6 +15,7 @@ import (
 
 	"github.com/tinfoilsh/stransport/identity"
 	"github.com/tinfoilsh/stransport/middleware"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 var (
@@ -38,7 +39,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/.well-known/ohttp-keys", serverIdentity.ConfigHandler)
+	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
 
 	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)

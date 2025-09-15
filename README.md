@@ -15,7 +15,7 @@ EHBP operates as a middleware layer that intercepts HTTP requests and responses,
 
 ### 3.1 Key Format
 
-Servers MUST expose their keys at the well-known URI `/.well-known/ohttp-keys`. The response MUST:
+Servers MUST expose their keys at the well-known URI `/.well-known/hpke-keys`. The response MUST:
 - Have Content-Type: application/ohttp-keys  
 - Contain one or more key configurations in the format specified in [RFC 9458 Section 3](https://www.ietf.org/rfc/rfc9458.html#section-3)
 

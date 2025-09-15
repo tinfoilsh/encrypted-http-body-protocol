@@ -11,6 +11,7 @@ import (
 	"github.com/cloudflare/circl/hpke"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 func TestIdentityExportImport(t *testing.T) {
@@ -109,7 +110,7 @@ func TestConfigHandler(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a test request
-	req := httptest.NewRequest("GET", "/.well-known/ohttp-keys", nil)
+	req := httptest.NewRequest("GET", protocol.KeysPath, nil)
 	w := httptest.NewRecorder()
 
 	// Call the handler

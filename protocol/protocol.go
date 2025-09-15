@@ -4,4 +4,5 @@ const (
 	EncapsulatedKeyHeader = "EHBP-Encapsulated-Key"
 	ClientPublicKeyHeader = "EHBP-Client-Public-Key"
 	KeysMediaType         = "application/ohttp-keys"
+	KeysPath              = "/.well-known/hpke-keys"
 )
