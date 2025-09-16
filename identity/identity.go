@@ -228,6 +228,10 @@ func Import(identityJSONBytes []byte) (*Identity, error) {
 		return nil, err
 	}
 
+	if identityStore.KEM == 0 || identityStore.KDF == 0 || identityStore.AEAD == 0 {
+		return nil, fmt.Errorf("invalid identity HPKE configuration")
+	}
+
 	suite := hpke.NewSuite(identityStore.KEM, identityStore.KDF, identityStore.AEAD)
 
 	var i Identity
