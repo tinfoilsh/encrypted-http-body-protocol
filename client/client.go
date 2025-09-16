@@ -70,13 +70,12 @@ func getServerPublicKey(serverURL *url.URL) (kem.PublicKey, error) {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Host = t.serverHost
-
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
+	newReq.Host = t.serverHost
 
 	// Encrypt request body using streaming encryption
-	if req.Body != nil {
+	if newReq.Body != nil {
 		serverPubKeyBytes, err := t.serverPK.MarshalBinary()
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal server public key: %v", err)
