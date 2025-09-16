@@ -53,7 +53,12 @@ func main() {
 		Transport: secureTransport,
 	}
 
-	req, err := http.NewRequest(*requestMethod, url, strings.NewReader(*data))
+	var body io.Reader
+	if *data != "" {
+		body = strings.NewReader(*data)
+	}
+
+	req, err := http.NewRequest(*requestMethod, url, body)
 	if err != nil {
 		log.Fatalf("failed to create request: %v", err)
 	}
