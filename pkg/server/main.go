@@ -15,7 +15,6 @@ import (
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/stransport/identity"
-	"github.com/tinfoilsh/stransport/middleware"
 	"github.com/tinfoilsh/stransport/protocol"
 )
 
@@ -55,7 +54,7 @@ func main() {
 		logrus.Fatalf("Failed to get identity: %v", err)
 	}
 
-	secureServer := middleware.NewSecureServer(serverIdentity, *permitPlaintext)
+	middleware := serverIdentity.Middleware(*permitPlaintext)
 
 	logrus.WithFields(logrus.Fields{
 		"public_key_hex":   hex.EncodeToString(serverIdentity.MarshalPublicKey()),
@@ -66,7 +65,7 @@ func main() {
 
 	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
 
-	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			logrus.Errorf("Failed to read request body: %v", err)
@@ -85,7 +84,7 @@ func main() {
 		logrus.Debug("Response sent successfully")
 	})))
 
-	mux.Handle("/stream", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/stream", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logrus.Debug("Received stream request")
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
@@ -118,7 +117,7 @@ func main() {
 	proxy := httputil.NewSingleHostReverseProxy(proxyUpstream)
 	proxy.ErrorLog = log.New(os.Stderr, "proxy: ", log.LstdFlags)
 
-	mux.Handle("/", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(w, r)
 	})))
 

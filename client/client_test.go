@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tinfoilsh/stransport/identity"
-	"github.com/tinfoilsh/stransport/middleware"
 	"github.com/tinfoilsh/stransport/protocol"
 )
 
@@ -21,13 +20,13 @@ func TestSecureClient(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
 
-	secureServer := middleware.NewSecureServer(serverIdentity, false)
+	middleware := serverIdentity.Middleware(false)
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
 
-	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -40,7 +39,7 @@ func TestSecureClient(t *testing.T) {
 		}
 	})))
 
-	mux.Handle("/stream", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/stream", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.Header().Set("Transfer-Encoding", "chunked")
 
