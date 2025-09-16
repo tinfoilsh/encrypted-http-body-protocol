@@ -33,22 +33,21 @@ func NewTransport(server string, clientIdentity *identity.Identity, insecureSkip
 		},
 	}
 
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse server URL: %v", err)
-	}
-
-	if err := t.syncServerPublicKey(serverURL); err != nil {
+	if err := t.syncServerPublicKey(server); err != nil {
 		return nil, fmt.Errorf("failed to sync server public key: %v", err)
 	}
 
 	return t, nil
 }
 
-func (t *Transport) syncServerPublicKey(serverURL *url.URL) error {
-	serverURL.Path = protocol.KeysPath
+func (t *Transport) syncServerPublicKey(server string) error {
+	keysURL, err := url.Parse(server)
+	if err != nil {
+		return fmt.Errorf("failed to parse server URL: %v", err)
+	}
+	keysURL.Path = protocol.KeysPath
 
-	resp, err := t.httpClient.Get(serverURL.String())
+	resp, err := t.httpClient.Get(keysURL.String())
 	if err != nil {
 		return fmt.Errorf("failed to get server public key: %v", err)
 	}
