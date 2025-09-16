@@ -188,6 +188,10 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 		return nil, fmt.Errorf("unmarshal public key: %v", err)
 	}
 
+	if len(suites) == 0 {
+		return nil, fmt.Errorf("no cipher suites found in config")
+	}
+
 	return &Identity{
 		suite: suites[0],
 		pk:    pk,
