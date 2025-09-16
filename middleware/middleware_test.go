@@ -147,7 +147,7 @@ func TestPlaintextFallback(t *testing.T) {
 		middleware.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Equal(t, "1", w.Header().Get("EHBP-Fallback"))
+		assert.Equal(t, "1", w.Header().Get(protocol.FallbackHeader))
 		assert.Equal(t, "Hello, test", w.Body.String())
 	})
 }

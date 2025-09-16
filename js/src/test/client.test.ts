@@ -1,6 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { Identity, Transport } from '../index.js';
+import { PROTOCOL } from '../protocol.js';
 
 describe('Transport', () => {
   let clientIdentity: Identity;
@@ -32,8 +33,8 @@ describe('Transport', () => {
     const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
     
     // Check that headers are set
-    assert(encryptedRequest.headers.get('EHBP-Client-Public-Key'), 'Client public key header should be set');
-    assert(encryptedRequest.headers.get('EHBP-Encapsulated-Key'), 'Encapsulated key header should be set');
+    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
+    assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
     
     // Check that body is encrypted (different from original)
     const encryptedBody = await encryptedRequest.arrayBuffer();
@@ -50,7 +51,7 @@ describe('Transport', () => {
     const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
     
     // Check that only client public key header is set
-    assert(encryptedRequest.headers.get('EHBP-Client-Public-Key'), 'Client public key header should be set');
-    assert(!encryptedRequest.headers.get('EHBP-Encapsulated-Key'), 'Encapsulated key header should not be set for empty body');
+    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
+    assert(!encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should not be set for empty body');
   });
 });

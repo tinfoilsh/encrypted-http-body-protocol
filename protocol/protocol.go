@@ -1,8 +1,9 @@
 package protocol
 
 const (
-	EncapsulatedKeyHeader = "EHBP-Encapsulated-Key"
-	ClientPublicKeyHeader = "EHBP-Client-Public-Key"
+	EncapsulatedKeyHeader = "Ehbp-Encapsulated-Key"
+	ClientPublicKeyHeader = "Ehbp-Client-Public-Key"
+	FallbackHeader        = "Ehbp-Fallback"
 	KeysMediaType         = "application/ohttp-keys"
 	KeysPath              = "/.well-known/hpke-keys"
 )

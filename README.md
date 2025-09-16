@@ -28,13 +28,13 @@ The "application/ohttp-keys" media type identifies a collection of server keys a
 ### 4.1 Request Headers
 
 Clients MUST include the following headers in encrypted requests:
-- `EHBP-Client-Public-Key`: Hex-encoded client public key
-- `EHBP-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+- `Ehbp-Client-Public-Key`: Hex-encoded client public key
+- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
 
 ### 4.2 Response Headers
 
 Servers MUST include the following headers in encrypted responses:
-- `EHBP-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
 
 ## 5. Message Processing
 

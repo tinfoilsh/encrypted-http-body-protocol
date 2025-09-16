@@ -32,7 +32,7 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 		if clientPubKeyHex == "" {
 			if s.permitPlaintextFallback {
 				log.Debugf("missing %s header", protocol.ClientPublicKeyHeader)
-				w.Header().Set("EHBP-Fallback", "1")
+				w.Header().Set(protocol.FallbackHeader, "1")
 				next.ServeHTTP(w, r)
 				return
 			}
