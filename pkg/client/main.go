@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/stransport/client"
@@ -34,7 +33,7 @@ func main() {
 		log.Fatalf("failed to get client identity: %v", err)
 	}
 
-	log.WithFields(logrus.Fields{
+	log.WithFields(log.Fields{
 		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
 	}).Info("Client identity")
 
