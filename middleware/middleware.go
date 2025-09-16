@@ -51,14 +51,22 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 		if r.Body != nil && r.Body != http.NoBody {
 			err := s.identity.DecryptRequest(r)
 			if err != nil {
-				sendError(w, err, "failed to decrypt request", http.StatusBadRequest)
+				status := http.StatusInternalServerError
+				if identity.IsClientError(err) {
+					status = http.StatusBadRequest
+				}
+				sendError(w, err, "failed to decrypt request", status)
 				return
 			}
 		}
 
 		encryptedWriter, err := s.identity.SetupResponseEncryption(w, clientPubKeyHex)
 		if err != nil {
-			sendError(w, err, "failed to setup response encryption", http.StatusInternalServerError)
+			status := http.StatusInternalServerError
+			if identity.IsClientError(err) {
+				status = http.StatusBadRequest
+			}
+			sendError(w, err, "failed to setup response encryption", status)
 			return
 		}
 

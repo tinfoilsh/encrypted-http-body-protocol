@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,30 @@ import (
 	"github.com/cloudflare/circl/hpke"
 	"github.com/tinfoilsh/stransport/protocol"
 )
+
+// ClientError represents an error caused by invalid client input
+type ClientError struct {
+	Err error
+}
+
+func (e ClientError) Error() string {
+	return e.Err.Error()
+}
+
+func (e ClientError) Unwrap() error {
+	return e.Err
+}
+
+// NewClientError wraps an error as a client-caused error
+func NewClientError(err error) error {
+	return ClientError{Err: err}
+}
+
+// IsClientError determines if an error is caused by invalid client input
+func IsClientError(err error) bool {
+	var clientErr ClientError
+	return errors.As(err, &clientErr)
+}
 
 // EncryptedResponseWriter wraps an http.ResponseWriter for streaming encryption
 type EncryptedResponseWriter struct {
@@ -274,13 +299,13 @@ func (i *Identity) DecryptRequest(req *http.Request) error {
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
 
 	if clientPubKeyHex == "" || encapKeyHex == "" {
-		return fmt.Errorf("missing encryption headers")
+		return NewClientError(fmt.Errorf("missing encryption headers"))
 	}
 
 	// Decrypt
 	encapKey, err := hex.DecodeString(encapKeyHex)
 	if err != nil {
-		return fmt.Errorf("invalid encapsulated key: %w", err)
+		return NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
 	}
 	receiver, err := i.Suite().NewReceiver(i.sk, nil)
 	if err != nil {
@@ -288,7 +313,7 @@ func (i *Identity) DecryptRequest(req *http.Request) error {
 	}
 	opener, err := receiver.Setup(encapKey)
 	if err != nil {
-		return fmt.Errorf("failed to setup decryption: %w", err)
+		return NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
 	}
 
 	streamingReader := &StreamingDecryptReader{
@@ -308,12 +333,12 @@ func (i *Identity) DecryptRequest(req *http.Request) error {
 func (i *Identity) SetupResponseEncryption(w http.ResponseWriter, clientPubKeyHex string) (*EncryptedResponseWriter, error) {
 	clientPubKeyBytes, err := hex.DecodeString(clientPubKeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid client public key: %w", err)
+		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
 	}
 
 	clientPubKey, err := i.KEMScheme().UnmarshalBinaryPublicKey(clientPubKeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid client public key: %w", err)
+		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
 	}
 
 	sender, err := i.Suite().NewSender(clientPubKey, nil)
