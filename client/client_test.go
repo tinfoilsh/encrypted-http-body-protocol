@@ -1,4 +1,4 @@
-package main
+package client
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tinfoilsh/stransport/identity"
 	"github.com/tinfoilsh/stransport/middleware"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 func TestSecureClient(t *testing.T) {
@@ -24,10 +25,7 @@ func TestSecureClient(t *testing.T) {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/.well-known/tinfoil-public-key", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "%x", serverIdentity.MarshalPublicKey())
-	})
+	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
 
 	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -66,11 +64,10 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureClient, err := NewSecureClient(server.URL, clientIdentity)
+	secureTransport, err := NewTransport(server.URL, clientIdentity)
 	assert.NoError(t, err)
-
 	httpClient := &http.Client{
-		Transport: secureClient,
+		Transport: secureTransport,
 	}
 
 	t.Run("secure endpoint", func(t *testing.T) {

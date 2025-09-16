@@ -1,4 +1,4 @@
-# Encrypted HTTP Body Protocol (EHBP) v1.0
+# Encrypted HTTP Body Protocol (EHBP)
 
 ## 1. Introduction
 
@@ -11,26 +11,30 @@ EHBP operates as a middleware layer that intercepts HTTP requests and responses,
 1. Client-side middleware that encrypts requests and decrypts responses
 2. Server-side middleware that decrypts requests and encrypts responses
 
-## 3. Key Exchange
+## 3. Server Key Distribution
 
-### 3.1 Server Public Key Distribution
+### 3.1 Key Format
 
-Servers MUST expose their public key at the well-known URI `/.well-known/tinfoil-public-key`. The response MUST:
-- Have Content-Type: text/plan
-- Contain the server's public key, hex encoded
+Servers MUST expose their keys at the well-known URI `/.well-known/hpke-keys`. The response MUST:
+- Have Content-Type: application/ohttp-keys  
+- Contain one or more key configurations in the format specified in [RFC 9458 Section 3](https://www.ietf.org/rfc/rfc9458.html#section-3)
+
+### 3.2 Media Type
+
+The "application/ohttp-keys" media type identifies a collection of server keys as defined in [RFC 9458 Section 3](https://www.ietf.org/rfc/rfc9458.html#section-3).
 
 ## 4. Protocol Messages
 
 ### 4.1 Request Headers
 
 Clients MUST include the following headers in encrypted requests:
-- `Tinfoil-Client-Public-Key`: Hex-encoded client public key
-- `Tinfoil-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+- `Ehbp-Client-Public-Key`: Hex-encoded client public key
+- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
 
 ### 4.2 Response Headers
 
 Servers MUST include the following headers in encrypted responses:
-- `Tinfoil-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
 
 ## 5. Message Processing
 
@@ -45,9 +49,9 @@ Servers MUST include the following headers in encrypted responses:
 ### 5.2 Response Processing
 
 1. Server generates an encapsulated key and shared secret using the client's public key
-2. Server encrypts the response body using the shared secret
-3. Server sends the encrypted response with required headers
-4. Client decrypts the response body using the encapsulated key and its private key
+2. Server encrypts the response body using streaming encryption as data is written
+3. Server sends the encrypted response with required headers and chunked transfer encoding
+4. Client decrypts the response body as it reads from the stream
 5. If decryption fails, client MUST treat the response as invalid
 
 ## 6. Security Considerations
@@ -63,6 +67,7 @@ Servers MUST include the following headers in encrypted responses:
 - The protocol provides end-to-end encryption for message payloads ONLY
 - HTTP headers remain unencrypted for routing purposes
 - Each message exchange uses a fresh key encapsulation
+- Servers MAY support plaintext fallback mode
 
 ## 7. References
 

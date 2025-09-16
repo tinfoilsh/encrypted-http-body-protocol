@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -15,33 +16,55 @@ import (
 
 	"github.com/tinfoilsh/stransport/identity"
 	"github.com/tinfoilsh/stransport/middleware"
+	"github.com/tinfoilsh/stransport/protocol"
 )
 
 var (
 	listenAddr      = flag.String("l", ":8080", "listen address")
-	identityFile    = flag.String("i", "identity.json", "identity file")
+	identityFile    = flag.String("i", "server_identity.json", "identity file")
 	verbose         = flag.Bool("v", false, "verbose logging")
 	permitPlaintext = flag.Bool("p", false, "permit plaintext requests")
 )
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Client-Public-Key, Ehbp-Encapsulated-Key")
+		w.Header().Set("Access-Control-Expose-Headers", "Ehbp-Encapsulated-Key, Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
 
 func main() {
 	flag.Parse()
 	if *verbose {
 		logrus.SetLevel(logrus.DebugLevel)
+		logrus.Debug("Verbose logging enabled")
 	}
 
 	serverIdentity, err := identity.FromFile(*identityFile)
 	if err != nil {
 		logrus.Fatalf("Failed to get identity: %v", err)
 	}
+
 	secureServer := middleware.NewSecureServer(serverIdentity, *permitPlaintext)
+
+	logrus.WithFields(logrus.Fields{
+		"public_key_hex":   hex.EncodeToString(serverIdentity.MarshalPublicKey()),
+		"permit_plaintext": *permitPlaintext,
+	}).Info("Server identity")
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/.well-known/tinfoil-public-key", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "%x", serverIdentity.MarshalPublicKey())
-	})
+	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
 
 	mux.Handle("/secure", secureServer.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -100,5 +123,5 @@ func main() {
 	})))
 
 	logrus.Printf("Listening on %s", *listenAddr)
-	logrus.Fatal(http.ListenAndServe(*listenAddr, mux))
+	logrus.Fatal(http.ListenAndServe(*listenAddr, corsMiddleware(mux)))
 }

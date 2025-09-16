@@ -1,2 +1,3 @@
 .idea/
-identity.json
+stransport
+*identity.json
