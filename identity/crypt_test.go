@@ -39,11 +39,13 @@ func TestStreamingEncryption(t *testing.T) {
 		buffer := make([]byte, 8192) // 8KB buffer
 		for {
 			n, err := req.Body.Read(buffer)
+			if n > 0 {
+				encryptedData = append(encryptedData, buffer[:n]...)
+			}
 			if err == io.EOF {
 				break
 			}
 			require.NoError(t, err)
-			encryptedData = append(encryptedData, buffer[:n]...)
 		}
 
 		assert.Greater(t, len(encryptedData), int(originalLength))
@@ -119,11 +121,13 @@ func TestStreamingEncryption(t *testing.T) {
 
 		for {
 			n, err := req.Body.Read(buffer)
+			if n > 0 {
+				encryptedData = append(encryptedData, buffer[:n]...)
+			}
 			if err == io.EOF {
 				break
 			}
 			require.NoError(t, err)
-			encryptedData = append(encryptedData, buffer[:n]...)
 		}
 
 		assert.Greater(t, len(encryptedData), len(testData))
