@@ -265,7 +265,7 @@ func (r *StreamingDecryptReader) Close() error {
 
 // DecryptRequest creates a streaming decryption reader for the request body
 func (i *Identity) DecryptRequest(req *http.Request) error {
-	if req.Body == nil || req.ContentLength == 0 {
+	if req.Body == nil || req.Body == http.NoBody {
 		return nil // Nothing to decrypt
 	}
 

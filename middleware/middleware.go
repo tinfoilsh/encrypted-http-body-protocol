@@ -48,7 +48,7 @@ func (s *SecureServer) Middleware(next http.Handler) http.Handler {
 		}
 
 		// Decrypt request body
-		if r.Body != nil && r.ContentLength != 0 {
+		if r.Body != nil && r.Body != http.NoBody {
 			err := s.identity.DecryptRequest(r)
 			if err != nil {
 				sendError(w, err, "failed to decrypt request", http.StatusBadRequest)
