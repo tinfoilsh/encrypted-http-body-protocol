@@ -37,7 +37,7 @@ func main() {
 		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
 	}).Info("Client identity")
 
-	secureTransport, err := client.NewTransport(*serverURL, clientIdentity)
+	secureTransport, err := client.NewTransport(*serverURL, clientIdentity, false)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
