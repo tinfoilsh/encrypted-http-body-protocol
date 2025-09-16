@@ -8,7 +8,7 @@ import (
 )
 
 func sendError(w http.ResponseWriter, err error, text string, status int) {
-	log.Errorf("error: %s: %v", text, err)
+	log.Debugf("ehbp middleware error: %s: %v", text, err)
 	http.Error(w, text, status)
 }
 
