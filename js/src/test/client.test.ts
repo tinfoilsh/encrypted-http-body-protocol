@@ -54,4 +54,38 @@ describe('Transport', () => {
     assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
     assert(!encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should not be set for empty body');
   });
+
+  it('should connect to actual server and POST to /secure endpoint', async (t) => {
+    const serverURL = 'http://localhost:8080';
+    
+    try {
+      const keysResponse = await fetch(`${serverURL}${PROTOCOL.KEYS_PATH}`);
+      if (!keysResponse.ok) {
+        t.skip('Server not running at localhost:8080');
+        return;
+      }
+    } catch (error) {
+      t.skip('Server not running at localhost:8080');
+      return;
+    }
+
+    // Create transport that will connect to the real server
+    const { createTransport } = await import('../index.js');
+    const transport = await createTransport(serverURL, clientIdentity);
+    
+    const testName = 'Integration Test User';
+    
+    // Make actual POST request to /secure endpoint
+    const response = await transport.post(`${serverURL}/secure`, testName, {
+      headers: { 'Content-Type': 'text/plain' }
+    });
+    
+    // Verify response
+    assert(response.ok, `Response should be ok, got status: ${response.status}`);
+    
+    const responseText = await response.text();
+    assert.strictEqual(responseText, `Hello, ${testName}`, 'Server should respond with Hello, {name}');
+    
+    console.log(`✓ Integration test passed: ${responseText}`);
+  });
 });
