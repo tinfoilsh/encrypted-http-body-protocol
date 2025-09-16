@@ -19,6 +19,9 @@ type SecureServer struct {
 }
 
 func NewSecureServer(identity *identity.Identity, permitPlaintextFallback bool) *SecureServer {
+	if identity == nil {
+		log.Fatal("identity cannot be nil")
+	}
 	return &SecureServer{
 		identity:                identity,
 		permitPlaintextFallback: permitPlaintextFallback,
@@ -27,6 +30,10 @@ func NewSecureServer(identity *identity.Identity, permitPlaintextFallback bool) 
 
 // Middleware wraps an HTTP handler to encrypt/decrypt requests and responses
 func (s *SecureServer) Middleware(next http.Handler) http.Handler {
+	if s.identity == nil {
+		panic("server identity not configured")
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientPubKeyHex := r.Header.Get(protocol.ClientPublicKeyHeader)
 		if clientPubKeyHex == "" {
