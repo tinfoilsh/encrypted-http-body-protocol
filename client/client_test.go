@@ -63,7 +63,7 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureTransport, err := NewTransport(server.URL, clientIdentity)
+	secureTransport, err := NewTransport(server.URL, clientIdentity, false)
 	assert.NoError(t, err)
 	httpClient := &http.Client{
 		Transport: secureTransport,
