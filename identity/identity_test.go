@@ -166,7 +166,8 @@ func TestExportImportErrorCases(t *testing.T) {
 		KDF:       hpke.KDF_HKDF_SHA256,
 		AEAD:      hpke.AEAD_AES256GCM,
 	}
-	malformedJSON, _ := json.Marshal(malformedData)
+	malformedJSON, err := json.Marshal(malformedData)
+	require.NoError(t, err)
 	_, err = Import(malformedJSON)
 	assert.Error(t, err)
 }
