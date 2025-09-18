@@ -43,6 +43,20 @@ export class Transport {
   }
 
   /**
+   * Get the server public key
+   */
+  async getServerPublicKey(): Promise<CryptoKey> {
+    return this.serverPublicKey;
+  }
+
+  /**
+   * Get the client public key
+   */
+  async getClientPublicKey(): Promise<CryptoKey> {
+    return this.clientIdentity.getPublicKey();
+  }
+
+  /**
    * Make an encrypted HTTP request
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
