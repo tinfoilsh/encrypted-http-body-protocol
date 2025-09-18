@@ -46,26 +46,45 @@ export class Transport {
    * Make an encrypted HTTP request
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    let request: Request;
-
+    // Extract body from init or original request before creating Request object
+    let requestBody: BodyInit | null = null;
+    
     if (input instanceof Request) {
-      request = input;
+      // If input is a Request, extract its body
+      if (input.body) {
+        requestBody = await input.arrayBuffer();
+      }
     } else {
-      request = new Request(input, init);
+      // If input is URL/string, get body from init
+      requestBody = init?.body || null;
     }
 
-    // Set the correct host
-    const url = new URL(request.url);
+    // Create the URL with correct host
+    let url: URL;
+    let method: string;
+    let headers: HeadersInit;
+
+    if (input instanceof Request) {
+      url = new URL(input.url);
+      method = input.method;
+      headers = input.headers;
+    } else {
+      url = new URL(input);
+      method = init?.method || 'GET';
+      headers = init?.headers || {};
+    }
+
     url.host = this.serverHost;
-    request = new Request(url.toString(), {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
+    
+    let request = new Request(url.toString(), {
+      method,
+      headers,
+      body: requestBody,
       duplex: 'half'
     } as RequestInit);
 
-    // Encrypt request body if present
-    if (request.body) {
+    // Encrypt request body if present (check the original requestBody, not request.body)
+    if (requestBody !== null && requestBody !== undefined) {
       request = await this.clientIdentity.encryptRequest(request, this.serverPublicKey);
     } else {
       // No body, just set client public key header

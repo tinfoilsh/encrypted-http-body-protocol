@@ -99,8 +99,8 @@
         </div>
 
         <div class="test-section">
-            <h3>Test 1: GET /secure</h3>
-            <button id="test1Btn" onclick="runTest1()">Run GET /secure Test</button>
+            <h3>Test 1: POST to /secure</h3>
+            <button id="test1Btn" onclick="runTest1()">Run POST Test</button>
             <button class="clear-btn" onclick="clearOutput('test1Output')">Clear</button>
             <div id="test1Output" class="output"></div>
         </div>
@@ -161,7 +161,11 @@
             
             btn.disabled = true;
             clearOutput('test1Output');
-            appendOutput('test1Output', 'Starting GET /secure test...\n');
+
+            let endpoint = '/secure';
+            const exampleName = 'John Doe';
+
+            appendOutput('test1Output', 'Starting POST ' + endpoint + ' test...\n');
             
             try {
                 if (!transport) {
@@ -172,20 +176,33 @@
                 const serverUrl = document.getElementById('serverUrl').value;
                 
                 try {
-                    const response1 = await transport.get(`${serverUrl}/secure`);
+                    const testBody = "John Doe";
+                    appendOutput('test1Output', `Sending POST request with body: ${testBody}\n`);
+                    
+                    const response1 = await transport.post(`${serverUrl}${endpoint}`, testBody, {
+                        headers: {
+                            'Content-Type': 'text/plain'
+                        }
+                    });
+                    
                     appendOutput('test1Output', `Response status: ${response1.status}\n`);
                     if (response1.ok) {
                         const responseText = await response1.text();
                         appendOutput('test1Output', `Response body: ${responseText}\n`);
-                        appendOutput('test1Output', '✓ Basic GET test passed\n\n');
+                        if (responseText !== "Hello, "+exampleName) {
+                            appendOutput('test1Output', '✗ Basic POST test failed with response: '+responseText+'\n\n');
+                            return;
+                        } else {
+                            appendOutput('test1Output', '✓ Basic POST test passed\n\n');
+                        }
                     } else {
-                        appendOutput('test1Output', `✗ Basic GET test failed with status: ${response1.status}\n\n`);
+                        appendOutput('test1Output', `✗ Basic POST test failed with status: ${response1.status}\n\n`);
                     }
                 } catch (error) {
-                    appendOutput('test1Output', `✗ Basic GET test failed with error: ${error.message}\n\n`);
+                    appendOutput('test1Output', `✗ Basic POST test failed with error: ${error.message}\n\n`);
                 }
 
-                appendOutput('test1Output', 'GET /secure test completed!\n');
+                appendOutput('test1Output', 'POST ' + endpoint + ' test completed!\n');
             } catch (error) {
                 appendOutput('test1Output', `Error: ${error.message}\n`);
             } finally {
