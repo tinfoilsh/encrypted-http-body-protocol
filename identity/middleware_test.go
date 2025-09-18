@@ -174,7 +174,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 	wrapped := middleware(streamHandler)
 
 	t.Run("streaming response", func(t *testing.T) {
-		// Setup encryption from client side
+		// Set up encryption from the client side
 		sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
 		require.NoError(t, err)
 		clientEncapKey, _, err := sender.Setup(nil)
@@ -337,7 +337,7 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 
 	wrapped := middleware(testHandler)
 
-	// Setup encryption from client side
+	// Set up encryption from the client side
 	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
 	require.NoError(b, err)
 	clientEncapKey, sealer, err := sender.Setup(nil)

@@ -79,7 +79,7 @@ func TestStreamingEncryption(t *testing.T) {
 	t.Run("chunked response decryption", func(t *testing.T) {
 		testData := "chunk1chunk2chunk3"
 
-		// Setup encryption
+		// Set up encryption
 		sender, err := serverIdentity.Suite().NewSender(clientIdentity.PublicKey(), nil)
 		require.NoError(t, err)
 		encapKey, sealer, err := sender.Setup(nil)
