@@ -177,7 +177,7 @@ func (i *Identity) EncryptRequest(req *http.Request, recipientPubKey []byte) err
 		return nil // Nothing to encrypt
 	}
 
-	// Setup encryption
+	// Set up encryption
 	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
 	if err != nil {
 		return fmt.Errorf("invalid recipient public key: %w", err)

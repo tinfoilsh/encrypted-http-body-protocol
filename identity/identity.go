@@ -102,7 +102,7 @@ func (i *Identity) MarshalPublicKey() []byte {
 	return pkM
 }
 
-// MarhsalConfig returns a binary representation of the identity compatible with RFC9458 application/ohttp-keys
+// MarshalConfig returns a binary representation of the identity compatible with RFC9458 application/ohttp-keys
 func (i *Identity) MarshalConfig() ([]byte, error) {
 	pkBytes, err := i.pk.MarshalBinary()
 	if err != nil {
@@ -123,7 +123,7 @@ func (i *Identity) MarshalConfig() ([]byte, error) {
 	return b.Bytes()
 }
 
-// ConfigHandler is a HTTP handler that returns the identity's configuration
+// ConfigHandler is an HTTP handler that returns the identity's configuration
 func (i *Identity) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", protocol.KeysMediaType)
 	configs, err := i.MarshalConfig()
