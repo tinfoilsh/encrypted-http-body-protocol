@@ -189,7 +189,12 @@
                     if (response1.ok) {
                         const responseText = await response1.text();
                         appendOutput('test1Output', `Response body: ${responseText}\n`);
-                        appendOutput('test1Output', '✓ Basic POST test passed\n\n');
+                        if (responseText !== "Hello, "+exampleName) {
+                            appendOutput('test1Output', '✗ Basic POST test failed with response: '+responseText+'\n\n');
+                            return;
+                        } else {
+                            appendOutput('test1Output', '✓ Basic POST test passed\n\n');
+                        }
                     } else {
                         appendOutput('test1Output', `✗ Basic POST test failed with status: ${response1.status}\n\n`);
                     }
