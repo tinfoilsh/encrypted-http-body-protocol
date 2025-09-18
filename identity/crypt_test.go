@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 func TestStreamingEncryption(t *testing.T) {

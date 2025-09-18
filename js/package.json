@@ -1,6 +1,6 @@
 {
-  "name": "stransport-js",
-  "version": "1.0.0",
+  "name": "@tinfoilsh/ehbp",
+  "version": "0.0.1",
   "description": "JavaScript client for Encrypted HTTP Body Protocol (EHBP)",
   "main": "dist/index.js",
   "type": "module",
@@ -21,7 +21,14 @@
     "security",
     "ehbp"
   ],
-  "author": "",
+  "author": "Tinfoil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tinfoilsh/encrypted-http-body-protocol.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "license": "MIT",
   "dependencies": {
     "@hpke/core": "^1.7.4",
@@ -33,6 +40,6 @@
     "typescript": "^5.0.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=20.0.0"
   }
 }

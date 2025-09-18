@@ -9,8 +9,8 @@ import (
 	"net/url"
 
 	"github.com/cloudflare/circl/kem"
-	"github.com/tinfoilsh/stransport/identity"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 type Transport struct {

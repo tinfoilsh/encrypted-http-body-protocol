@@ -8,7 +8,7 @@ import (
 
 	"github.com/cloudflare/circl/hpke"
 	"github.com/cloudflare/circl/kem"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 	"golang.org/x/crypto/cryptobyte"
 )
 
