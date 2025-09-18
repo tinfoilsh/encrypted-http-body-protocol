@@ -1,5 +1,5 @@
 {
-  "name": "ehbp",
+  "name": "@tinfoilsh/ehbp",
   "version": "0.0.1",
   "description": "JavaScript client for Encrypted HTTP Body Protocol (EHBP)",
   "main": "dist/index.js",
@@ -25,6 +25,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tinfoilsh/encrypted-http-body-protocol.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "license": "MIT",
   "dependencies": {
