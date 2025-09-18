@@ -1,74 +1,121 @@
 # Encrypted HTTP Body Protocol (EHBP)
 
-## 1. Introduction
+EHBP (Encrypted HTTP Body Protocol) encrypts the HTTP message body while leaving the rest of the message unmodified.
+Proxies can inspect and route upon request metadata without seeing the body.
 
-EHBP (Encrypted HTTP Body Protocol) is designed to provide secure, encrypted communication between HTTP clients and servers. It uses HPKE [RFC9180] to establish secure channels and encrypt message payloads. The protocol is implemented as a middleware layer that can be added to existing HTTP applications.
+The protocol uses HPKE, with a Go reference implementation (server middleware and client transport) and a JS client.
+For protocol specifications, see [SPEC.md](SPEC.md).
 
-## 2. Protocol Overview
+## Motivation
+EHBP makes it practical to add body encryption without needing to rethink existing HTTP stacks.
+All HTTP metadata (method, URL, headers, query parameters) stays routable, only the message body is sealed.
+This ensures that EHBP keeps streaming semantics intact and can be used as a drop-in replacement for HTTP.
 
-EHBP operates as a middleware layer that intercepts HTTP requests and responses, encrypting the payloads while preserving the HTTP protocol structure. The protocol consists of two main components:
+## Requirements
 
-1. Client-side middleware that encrypts requests and decrypts responses
-2. Server-side middleware that decrypts requests and encrypts responses
+- Go 1.24+
+- Optional JS client: Node 20+
 
-## 3. Server Key Distribution
+## Quickstart (Go)
 
-### 3.1 Key Format
+1. Run the example server:
 
-Servers MUST expose their keys at the well-known URI `/.well-known/hpke-keys`. The response MUST:
-- Have Content-Type: application/ohttp-keys  
-- Contain one or more key configurations in the format specified in [RFC 9458 Section 3](https://www.ietf.org/rfc/rfc9458.html#section-3)
+   ```sh
+   go run ./cmd/example/server -l :8080 -i server_identity.json -v
+   ```
 
-### 3.2 Media Type
+   _The server writes `server_identity.json` on first run if it is absent._
 
-The "application/ohttp-keys" media type identifies a collection of server keys as defined in [RFC 9458 Section 3](https://www.ietf.org/rfc/rfc9458.html#section-3).
+2. Run the example client:
 
-## 4. Protocol Messages
+   ```sh
+   go run ./cmd/example/client -s http://localhost:8080 -i client_identity.json -v
+   ```
 
-### 4.1 Request Headers
+   _The client likewise materializes `client_identity.json` the first time it runs._
 
-Clients MUST include the following headers in encrypted requests:
-- `Ehbp-Client-Public-Key`: Hex-encoded client public key
-- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+3. Use the curl-like fetcher (sends encrypted requests and decrypts responses):
 
-### 4.2 Response Headers
+   ```sh
+   go run ./cmd/fetch -i client_identity.json -X POST -d 'hello' http://localhost:8080/secure
+   ```
 
-Servers MUST include the following headers in encrypted responses:
-- `Ehbp-Encapsulated-Key`: Hex-encoded encapsulated key from HPKE setup
+4. Enable server plaintext fallback (for testing):
 
-## 5. Message Processing
+   ```sh
+   go run ./cmd/example/server -p -v
+   ```
 
-### 5.1 Request Processing
 
-1. Client generates an encapsulated key and shared secret using the server's public key
-2. Client encrypts the request body using the shared secret
-3. Client sends the encrypted request with required headers
-4. Server decrypts the request body using the encapsulated key and its private key
-5. If decryption fails, server MUST return HTTP 400 with appropriate error message
+## Go Usage
 
-### 5.2 Response Processing
+### Server middleware
 
-1. Server generates an encapsulated key and shared secret using the client's public key
-2. Server encrypts the response body using streaming encryption as data is written
-3. Server sends the encrypted response with required headers and chunked transfer encoding
-4. Client decrypts the response body as it reads from the stream
-5. If decryption fails, client MUST treat the response as invalid
+```go
+package main
 
-## 6. Security Considerations
+import (
+  "log"
+  "net/http"
+  "os"
 
-### 6.1 Key Management
+  "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+  "github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
+)
 
-- Private keys MUST be stored securely and never transmitted
-- Public keys SHOULD be verified through a trusted mechanism
-- Key pairs SHOULD be rotated periodically
+func main() {
+  id, err := identity.FromFile("server_identity.json")
+  if err != nil {
+    log.Fatalf("server exited: %v", err)
+  }
 
-### 6.2 Protocol Security
+  mux := http.NewServeMux()
+  mux.HandleFunc(protocol.KeysPath, id.ConfigHandler)
+  mux.Handle("/secure", id.Middleware(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.Write([]byte("ok"))
+  })))
 
-- The protocol provides end-to-end encryption for message payloads ONLY
-- HTTP headers remain unencrypted for routing purposes
-- Each message exchange uses a fresh key encapsulation
-- Servers MAY support plaintext fallback mode
+  if err := http.ListenAndServe(":8080", mux); err != nil {
+    log.Fatalf("server exited: %v", err)
+  }
+}
+```
 
-## 7. References
+### Client transport
 
-- [RFC9180] Hybrid Public Key Encryption
+```go
+package main
+
+import (
+  "bytes"
+  "log"
+  "net/http"
+  "os"
+
+  "github.com/tinfoilsh/encrypted-http-body-protocol/client"
+  "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+)
+
+func main() {
+  id, err := identity.FromFile("client_identity.json")
+  if err != nil {
+    log.Fatalf("client exited: %v", err)
+  }
+
+  tr, err := client.NewTransport("http://localhost:8080", id, false)
+  if err != nil {
+    log.Fatalf("client exited: %v", err)
+  }
+
+  httpClient := &http.Client{Transport: tr}
+  resp, err := httpClient.Post("http://localhost:8080/secure", "text/plain", bytes.NewBufferString("hi"))
+  if err != nil {
+    log.Fatalf("client exited: %v", err)
+  }
+  defer resp.Body.Close()
+}
+```
+
+## License
+
+MIT (see LICENSE)
