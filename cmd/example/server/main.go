@@ -14,8 +14,8 @@ import (
 
 	logrus "github.com/sirupsen/logrus"
 
-	"github.com/tinfoilsh/stransport/identity"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 var (

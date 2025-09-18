@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	log "github.com/sirupsen/logrus"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 func sendError(w http.ResponseWriter, err error, text string, status int) {

@@ -11,7 +11,7 @@ import (
 	"net/http"
 
 	"github.com/cloudflare/circl/hpke"
-	"github.com/tinfoilsh/stransport/protocol"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 // ClientError represents an error caused by invalid client input
