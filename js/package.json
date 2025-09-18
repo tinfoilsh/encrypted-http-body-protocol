@@ -21,7 +21,11 @@
     "security",
     "ehbp"
   ],
-  "author": "",
+  "author": "Tinfoil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tinfoilsh/encrypted-http-body-protocol.git"
+  },
   "license": "MIT",
   "dependencies": {
     "@hpke/core": "^1.7.4",
@@ -33,6 +37,6 @@
     "typescript": "^5.0.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=20.0.0"
   }
 }
