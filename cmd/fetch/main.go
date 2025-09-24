@@ -43,7 +43,7 @@ func main() {
 
 	log.WithFields(log.Fields{
 		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
-	}).Debug("Identity")
+	}).Debug("Client Identity")
 
 	secureTransport, err := client.NewTransport(url, clientIdentity, *insecure)
 	if err != nil {
@@ -52,6 +52,11 @@ func main() {
 	httpClient := &http.Client{
 		Transport: secureTransport,
 	}
+
+	log.WithFields(log.Fields{
+		"public_key_hex": secureTransport.ServerIdentity().MarshalPublicKeyHex(),
+		"hpke_suite":     secureTransport.ServerIdentity().Suite(),
+	}).Debug("Server Identity")
 
 	var body io.Reader
 	if *data != "" {
@@ -78,7 +83,7 @@ func main() {
 		log.Debugf("Set header: %s = %s", name, value)
 	}
 
-	log.Debugf("Making request %+v", req)
+	log.Debugf("Making request %s %s", req.Method, req.URL)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
