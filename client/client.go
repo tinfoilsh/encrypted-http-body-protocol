@@ -8,14 +8,13 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/cloudflare/circl/kem"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 type Transport struct {
 	clientIdentity *identity.Identity
-	serverPK       kem.PublicKey
+	serverIdentity *identity.Identity
 	httpClient     *http.Client
 }
 
@@ -70,9 +69,13 @@ func (t *Transport) syncServerPublicKey(server string) error {
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal public key: %v", err)
 	}
+	t.serverIdentity = serverIdentity
 
-	t.serverPK = serverIdentity.PublicKey()
 	return nil
+}
+
+func (t *Transport) ServerIdentity() *identity.Identity {
+	return t.serverIdentity
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -81,12 +84,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Encrypt request body using streaming encryption
 	if newReq.Body != nil {
-		serverPubKeyBytes, err := t.serverPK.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal server public key: %v", err)
-		}
-		err = t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes)
-		if err != nil {
+		serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
+		if err := t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes); err != nil {
 			return nil, fmt.Errorf("failed to encrypt request: %v", err)
 		}
 	} else {

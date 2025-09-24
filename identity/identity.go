@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -100,6 +101,11 @@ func (i *Identity) MarshalPublicKey() []byte {
 		panic("code error: invalid pk: " + err.Error())
 	}
 	return pkM
+}
+
+// MarshalPublicKeyHex returns a hex string representation of the public key
+func (i *Identity) MarshalPublicKeyHex() string {
+	return hex.EncodeToString(i.MarshalPublicKey())
 }
 
 // MarshalConfig returns a binary representation of the identity compatible with RFC9458 application/ohttp-keys
