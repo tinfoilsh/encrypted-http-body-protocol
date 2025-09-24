@@ -45,14 +45,25 @@ export class Transport {
   /**
    * Get the server public key
    */
-  async getServerPublicKey(): Promise<CryptoKey> {
+  getServerPublicKey(): CryptoKey {
     return this.serverPublicKey;
+  }
+
+  /**
+   * Get the server public key as hex string
+   */
+  async getServerPublicKeyHex(): Promise<string> {
+    const exported = await crypto.subtle.exportKey('raw', this.serverPublicKey);
+    const keyBytes = new Uint8Array(exported);
+    return Array.from(keyBytes)
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
   }
 
   /**
    * Get the client public key
    */
-  async getClientPublicKey(): Promise<CryptoKey> {
+  getClientPublicKey(): CryptoKey {
     return this.clientIdentity.getPublicKey();
   }
 

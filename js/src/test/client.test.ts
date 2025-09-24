@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { Identity, Transport } from '../index.js';
+import { Identity, Transport, createTransport } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 
 describe('Transport', () => {
@@ -70,11 +70,13 @@ describe('Transport', () => {
     }
 
     // Create transport that will connect to the real server
-    const { createTransport } = await import('../index.js');
     const transport = await createTransport(serverURL, clientIdentity);
     
     const testName = 'Integration Test User';
-    
+
+    const serverPubKeyHex = await transport.getServerPublicKeyHex();
+    assert.strictEqual(serverPubKeyHex.length, 64, 'Server public key should be 64 bytes');
+
     // Make actual POST request to /secure endpoint
     const response = await transport.post(`${serverURL}/secure`, testName, {
       headers: { 'Content-Type': 'text/plain' }
