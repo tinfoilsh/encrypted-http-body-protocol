@@ -2,16 +2,26 @@
   "name": "ehbp",
   "version": "0.0.2",
   "description": "JavaScript client for Encrypted HTTP Body Protocol (EHBP)",
-  "main": "dist/index.js",
-  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js",
+      "types": "./dist/esm/index.d.ts"
+    }
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.esm.json && echo '{\"type\":\"module\"}' > dist/esm/package.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "build:browser": "node build-browser.js",
     "build:all": "npm run build && npm run build:browser",
     "dev": "tsc --watch",
-    "test": "node --test dist/test/*.test.js",
-    "example": "node dist/example.js",
-    "streaming": "node dist/streaming-test.js",
+    "test": "node --test dist/esm/test/*.test.js",
+    "example": "node dist/esm/example.js",
+    "streaming": "node dist/esm/streaming-test.js",
     "serve": "node serve.js"
   },
   "keywords": [
