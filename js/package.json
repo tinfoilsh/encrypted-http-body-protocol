@@ -1,6 +1,6 @@
 {
   "name": "ehbp",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "JavaScript client for Encrypted HTTP Body Protocol (EHBP)",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
