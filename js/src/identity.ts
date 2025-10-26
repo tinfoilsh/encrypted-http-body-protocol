@@ -294,7 +294,8 @@ export class Identity {
 
                 // Check if we have the complete chunk
                 if (offset + chunkLength > buffer.length) {
-                  // Not enough data yet, wait for more
+                  // Not enough data yet, rewind offset and wait for more
+                  offset -= 4;
                   break;
                 }
 
