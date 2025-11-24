@@ -71,6 +71,12 @@ export class Transport {
    * Make an encrypted HTTP request
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    // Skip EHBP for data: URLs (e.g., used for FormData detection)
+    const inputUrl = input instanceof Request ? input.url : String(input);
+    if (inputUrl.startsWith('data:')) {
+      return fetch(input, init);
+    }
+
     // Extract body from init or original request before creating Request object
     let requestBody: BodyInit | null = null;
     
