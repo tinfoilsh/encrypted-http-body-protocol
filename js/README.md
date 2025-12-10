@@ -201,6 +201,12 @@ npm run build:browser
 
 For the complete protocol specification, see [SPEC.md](../SPEC.md) in the root of the repository.
 
-## License
+## Reporting Vulnerabilities
 
-MIT
+Please report security vulnerabilities by either:
+
+- Emailing [security@tinfoil.sh](mailto:security@tinfoil.sh)
+
+- Opening an issue on GitHub on this repository
+
+We aim to respond to (legitimate) security reports within 24 hours.
