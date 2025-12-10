@@ -71,9 +71,9 @@ export class Transport {
    * Make an encrypted HTTP request
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    // Skip EHBP for data: URLs (e.g., used for FormData detection)
+    // Skip EHBP for non-network URLs (data:, blob:)
     const inputUrl = input instanceof Request ? input.url : String(input);
-    if (inputUrl.startsWith('data:')) {
+    if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) {
       return fetch(input, init);
     }
 
