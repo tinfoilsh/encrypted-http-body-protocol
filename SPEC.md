@@ -48,16 +48,16 @@ Clients MUST parse the first `key_config` and use its public key and suite. Addi
 
 Clients MUST set:
 
-- `Ehbp-Client-Public-Key`: hex (lowercase, no prefix) of the client’s KEM public key. Required for any request that expects an encrypted response, including requests without a body.
+- `Ehbp-Client-Public-Key`: hex (lowercase, no prefix) of the client's KEM public key. Required for any request that expects an encrypted response, including requests without a body.
 - `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the request sealer. Required if and only if the request body is encrypted (i.e., a non‑empty body is present).
-- `Transfer-Encoding: chunked`: set when sending an encrypted body. Content-Length MUST be omitted.
+- `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding. Note: In browser environments, this header cannot be set explicitly due to browser restrictions; browsers handle chunked encoding automatically when Content-Length is omitted.
 
 ### 4.2 Response Headers
 
 Servers MUST set for encrypted responses:
 
 - `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the response sealer.
-- `Transfer-Encoding: chunked`: set when sending an encrypted body. Content-Length MUST be omitted.
+- `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding.
 
 Servers that accept plaintext fallback (Section 5.3) MUST set:
 
@@ -109,7 +109,7 @@ Servers MAY support plaintext fallback. If enabled and `Ehbp-Client-Public-Key` 
 
 Fallback is not used for malformed headers; if `Ehbp-Client-Public-Key` is present but invalid, the handler returns HTTP 400.
 
-The reference client does not implement fallback consumption and requires encrypted responses.
+Client implementations MAY support consuming plaintext fallback responses. The reference Go client does not implement fallback consumption and requires encrypted responses. The reference JavaScript client supports plaintext fallback: when `Ehbp-Fallback: 1` is present on the response, it returns the response without attempting decryption.
 
 ## 6. Security Considerations
 
