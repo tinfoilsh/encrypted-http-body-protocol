@@ -135,6 +135,12 @@ export class Transport {
       console.warn(`Server returned non-OK status: ${response.status}`);
     }
 
+    // Check for fallback header - if set, server returned unencrypted response
+    const fallbackHeader = response.headers.get(PROTOCOL.FALLBACK_HEADER);
+    if (fallbackHeader === '1') {
+      return response;
+    }
+
     // Check for encapsulated key header
     const encapKeyHeader = response.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
     if (!encapKeyHeader) {
