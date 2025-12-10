@@ -141,6 +141,11 @@ export class Transport {
       throw new Error(`Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} encapsulated key header`);
     }
 
+    // Validate hex encoding
+    if (!/^[0-9a-fA-F]+$/.test(encapKeyHeader) || encapKeyHeader.length % 2 !== 0) {
+      throw new Error(`Invalid ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header: must be valid hex string with even length`);
+    }
+
     // Decode encapsulated key
     const serverEncapKey = new Uint8Array(
       encapKeyHeader.match(/.{2}/g)!.map(byte => parseInt(byte, 16))
