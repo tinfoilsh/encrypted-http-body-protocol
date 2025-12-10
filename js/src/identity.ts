@@ -172,13 +172,28 @@ export class Identity {
     // Read Cipher Suites Length
     const cipherSuitesLength = (data[offset++] << 8) | data[offset++];
 
-    // Read KDF ID
-    const kdfId = (data[offset++] << 8) | data[offset++];
+    // Parse all cipher suites (each suite is 4 bytes: 2 for KDF, 2 for AEAD)
+    const suites = [];
+    const cipherSuitesEnd = offset + cipherSuitesLength;
+    while (offset < cipherSuitesEnd) {
+      const kdfId = (data[offset++] << 8) | data[offset++];
+      const aeadId = (data[offset++] << 8) | data[offset++];
+      suites.push({ kdfId, aeadId });
+    }
 
-    // Read AEAD ID
-    const aeadId = (data[offset++] << 8) | data[offset++];
+    if (suites.length === 0) {
+      throw new Error('No cipher suites found in config');
+    }
 
-    // Create suite (assuming X25519 for now)
+    // Use the first cipher suite
+    const firstSuite = suites[0];
+
+    // Validate that we support this cipher suite
+    if (firstSuite.kdfId !== HPKE_CONFIG.KDF || firstSuite.aeadId !== HPKE_CONFIG.AEAD) {
+      throw new Error(`Unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`);
+    }
+
+    // Create cipher suite (currently only supports X25519/HKDF-SHA256/AES-256-GCM)
     const suite = new CipherSuite({
       kem: new DhkemX25519HkdfSha256(),
       kdf: new HkdfSha256(),
