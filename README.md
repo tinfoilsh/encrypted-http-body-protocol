@@ -3,8 +3,10 @@
 EHBP (Encrypted HTTP Body Protocol) encrypts the HTTP message body while leaving the rest of the message unmodified.
 Proxies can inspect and route upon request metadata without seeing the body.
 
-The protocol uses HPKE, with a Go reference implementation (server middleware and client transport) and a JS client.
-For protocol specifications, see [SPEC.md](SPEC.md).
+The protocol uses HPKE, with a Go reference implementation (server middleware and client transport) and a JavaScript/TypeScript client.
+
+- Protocol specification: [SPEC.md](SPEC.md)
+- JavaScript client: [js/README.md](js/README.md)
 
 ## Motivation
 EHBP makes it practical to add body encryption without needing to rethink existing HTTP stacks.
@@ -13,8 +15,7 @@ This ensures that EHBP keeps streaming semantics intact and can be used as a dro
 
 ## Requirements
 
-- Go 1.24+
-- Optional JS client: Node 20+
+- Go 1.24.0+
 
 ## Quickstart (Go)
 
@@ -57,7 +58,6 @@ package main
 import (
   "log"
   "net/http"
-  "os"
 
   "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
   "github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
@@ -90,7 +90,6 @@ import (
   "bytes"
   "log"
   "net/http"
-  "os"
 
   "github.com/tinfoilsh/encrypted-http-body-protocol/client"
   "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
@@ -116,6 +115,12 @@ func main() {
 }
 ```
 
-## License
+## Reporting Vulnerabilities
 
-MIT (see LICENSE)
+Please report security vulnerabilities by either:
+
+- Emailing [security@tinfoil.sh](mailto:security@tinfoil.sh)
+
+- Opening an issue on GitHub on this repository
+
+We aim to respond to (legitimate) security reports within 24 hours.
