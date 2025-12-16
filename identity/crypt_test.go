@@ -170,10 +170,9 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 		aead, err := km.NewResponseAEAD()
 		require.NoError(t, err)
 
-		// Decrypt chunks
+		// Decrypt chunks (aead.Open auto-increments the sequence)
 		var result bytes.Buffer
 		reader := bytes.NewReader(w.Body.Bytes())
-		seq := uint64(0)
 
 		for reader.Len() > 0 {
 			var chunkLen uint32
@@ -192,10 +191,7 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 			_, err = io.ReadFull(reader, encryptedChunk)
 			require.NoError(t, err)
 
-			nonce := km.ComputeNonce(seq)
-			seq++
-
-			decrypted, err := aead.Open(nil, nonce, encryptedChunk, nil)
+			decrypted, err := aead.Open(encryptedChunk, nil)
 			require.NoError(t, err)
 
 			result.Write(decrypted)
@@ -248,8 +244,7 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 		_, err = io.ReadFull(reader, encryptedChunk)
 		require.NoError(t, err)
 
-		nonce := km.ComputeNonce(0)
-		decrypted, err := aead.Open(nil, nonce, encryptedChunk, nil)
+		decrypted, err := aead.Open(encryptedChunk, nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, responseData, string(decrypted))

@@ -1,7 +1,6 @@
 package identity
 
 import (
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -205,9 +204,7 @@ type ResponseContext struct {
 // using keys derived from the request's HPKE context.
 type DerivedResponseWriter struct {
 	http.ResponseWriter
-	aead        cipher.AEAD
-	nonceBase   []byte
-	seq         uint64
+	aead        *ResponseAEAD
 	wroteHeader bool
 	statusCode  int
 }
@@ -224,7 +221,7 @@ func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
 
 // Write encrypts data as chunks and writes them to the underlying ResponseWriter.
 // Each chunk is encrypted with AES-256-GCM using a nonce derived from the base nonce
-// XORed with the sequence number.
+// XORed with the sequence number. The sequence is automatically incremented.
 func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
@@ -234,16 +231,8 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 		return 0, nil
 	}
 
-	// Compute nonce for this chunk: nonceBase XOR seq
-	nonce := make([]byte, AESGCMNonceLength)
-	copy(nonce, w.nonceBase)
-	for i := 0; i < 8; i++ {
-		nonce[AESGCMNonceLength-1-i] ^= byte(w.seq >> (i * 8))
-	}
-
-	// Encrypt the chunk
-	encrypted := w.aead.Seal(nil, nonce, data, nil)
-	w.seq++
+	// Encrypt the chunk (nonce is computed and sequence incremented automatically)
+	encrypted := w.aead.Seal(data, nil)
 
 	// Write chunk header (4 bytes big-endian length)
 	chunkHeader := make([]byte, 4)
@@ -362,8 +351,6 @@ func (i *Identity) SetupDerivedResponseEncryption(
 	return &DerivedResponseWriter{
 		ResponseWriter: w,
 		aead:           aead,
-		nonceBase:      km.NonceBase,
-		seq:            0,
 		wroteHeader:    false,
 	}, nil
 }
@@ -493,12 +480,10 @@ func (i *Identity) DecryptResponseWithContext(
 
 	// Wrap response body with streaming decryption
 	resp.Body = &DerivedStreamingDecryptReader{
-		reader:    resp.Body,
-		aead:      aead,
-		nonceBase: km.NonceBase,
-		seq:       0,
-		buffer:    nil,
-		eof:       false,
+		reader: resp.Body,
+		aead:   aead,
+		buffer: nil,
+		eof:    false,
 	}
 	resp.ContentLength = -1
 
@@ -508,12 +493,10 @@ func (i *Identity) DecryptResponseWithContext(
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
 // It implements io.ReadCloser for use as an http.Response.Body.
 type DerivedStreamingDecryptReader struct {
-	reader    io.Reader
-	aead      cipher.AEAD
-	nonceBase []byte
-	seq       uint64
-	buffer    []byte
-	eof       bool
+	reader io.Reader
+	aead   *ResponseAEAD
+	buffer []byte
+	eof    bool
 }
 
 // Read implements io.Reader, decrypting chunks as they are read.
@@ -552,16 +535,8 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
 	}
 
-	// Compute nonce for this chunk: nonceBase XOR seq
-	nonce := make([]byte, AESGCMNonceLength)
-	copy(nonce, r.nonceBase)
-	for i := 0; i < 8; i++ {
-		nonce[AESGCMNonceLength-1-i] ^= byte(r.seq >> (i * 8))
-	}
-	r.seq++
-
-	// Decrypt chunk
-	decryptedChunk, err := r.aead.Open(nil, nonce, encryptedChunk, nil)
+	// Decrypt chunk (nonce is computed and sequence incremented automatically)
+	decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
 	}

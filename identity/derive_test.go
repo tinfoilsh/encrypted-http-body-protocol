@@ -92,22 +92,29 @@ func TestDeriveResponseKeys(t *testing.T) {
 	}
 }
 
-func TestComputeNonce(t *testing.T) {
+func TestNonceComputation(t *testing.T) {
+	// Create a ResponseAEAD with a known nonce base
 	km := &ResponseKeyMaterial{
+		Key:       make([]byte, 32), // Valid AES-256 key
 		NonceBase: make([]byte, 12),
 	}
 	for i := range km.NonceBase {
 		km.NonceBase[i] = 0xFF
 	}
 
+	aead, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("NewResponseAEAD failed: %v", err)
+	}
+
 	// Sequence 0 should return the base nonce
-	nonce0 := km.ComputeNonce(0)
+	nonce0 := aead.NonceForSeq(0)
 	if !bytes.Equal(nonce0, km.NonceBase) {
 		t.Error("Sequence 0 should return base nonce")
 	}
 
 	// Sequence 1 should differ in the last byte
-	nonce1 := km.ComputeNonce(1)
+	nonce1 := aead.NonceForSeq(1)
 	if nonce1[11] != 0xFE { // 0xFF XOR 0x01
 		t.Errorf("Expected last byte to be 0xFE, got 0x%02X", nonce1[11])
 	}
@@ -122,7 +129,7 @@ func TestComputeNonce(t *testing.T) {
 	// Verify all nonces are unique for first 1000 sequences
 	seen := make(map[string]bool)
 	for i := uint64(0); i < 1000; i++ {
-		nonce := km.ComputeNonce(i)
+		nonce := aead.NonceForSeq(i)
 		key := string(nonce)
 		if seen[key] {
 			t.Errorf("Duplicate nonce at sequence %d", i)
@@ -131,14 +138,20 @@ func TestComputeNonce(t *testing.T) {
 	}
 }
 
-func TestComputeNonceLargeSequence(t *testing.T) {
+func TestNonceLargeSequence(t *testing.T) {
 	km := &ResponseKeyMaterial{
+		Key:       make([]byte, 32), // Valid AES-256 key
 		NonceBase: make([]byte, 12),
+	}
+
+	aead, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("NewResponseAEAD failed: %v", err)
 	}
 
 	// Test with a large sequence number that uses multiple bytes
 	seq := uint64(0x0102030405060708)
-	nonce := km.ComputeNonce(seq)
+	nonce := aead.NonceForSeq(seq)
 
 	// Verify XOR was applied correctly to last 8 bytes
 	expected := []byte{0, 0, 0, 0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
@@ -250,14 +263,12 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 		t.Fatalf("Client NewResponseAEAD failed: %v", err)
 	}
 
-	// Server encrypts
+	// Server encrypts (sequence auto-increments internally)
 	plaintext := []byte("Hello, this is a secret response!")
-	nonce := serverKM.ComputeNonce(0)
-	ciphertext := serverAEAD.Seal(nil, nonce, plaintext, nil)
+	ciphertext := serverAEAD.Seal(plaintext, nil)
 
-	// Client decrypts
-	clientNonce := clientKM.ComputeNonce(0)
-	decrypted, err := clientAEAD.Open(nil, clientNonce, ciphertext, nil)
+	// Client decrypts (sequence auto-increments internally)
+	decrypted, err := clientAEAD.Open(ciphertext, nil)
 	if err != nil {
 		t.Fatalf("Decryption failed: %v", err)
 	}
@@ -277,12 +288,19 @@ func TestMultipleChunksRoundTrip(t *testing.T) {
 		t.Fatalf("DeriveResponseKeys failed: %v", err)
 	}
 
-	aead, err := km.NewResponseAEAD()
+	// Create separate AEAD instances for server and client
+	// (both derived from the same key material)
+	serverAEAD, err := km.NewResponseAEAD()
 	if err != nil {
-		t.Fatalf("NewResponseAEAD failed: %v", err)
+		t.Fatalf("Server NewResponseAEAD failed: %v", err)
 	}
 
-	// Encrypt multiple chunks
+	clientAEAD, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("Client NewResponseAEAD failed: %v", err)
+	}
+
+	// Encrypt multiple chunks (sequence auto-increments: 0, 1, 2)
 	chunks := [][]byte{
 		[]byte("First chunk of data"),
 		[]byte("Second chunk"),
@@ -290,22 +308,30 @@ func TestMultipleChunksRoundTrip(t *testing.T) {
 	}
 
 	var ciphertexts [][]byte
-	for i, chunk := range chunks {
-		nonce := km.ComputeNonce(uint64(i))
-		ct := aead.Seal(nil, nonce, chunk, nil)
+	for _, chunk := range chunks {
+		ct := serverAEAD.Seal(chunk, nil)
 		ciphertexts = append(ciphertexts, ct)
 	}
 
-	// Decrypt all chunks
+	// Verify server sequence is now 3
+	if serverAEAD.Seq() != 3 {
+		t.Errorf("Expected server sequence 3, got %d", serverAEAD.Seq())
+	}
+
+	// Decrypt all chunks (sequence auto-increments: 0, 1, 2)
 	for i, ct := range ciphertexts {
-		nonce := km.ComputeNonce(uint64(i))
-		decrypted, err := aead.Open(nil, nonce, ct, nil)
+		decrypted, err := clientAEAD.Open(ct, nil)
 		if err != nil {
 			t.Fatalf("Failed to decrypt chunk %d: %v", i, err)
 		}
 		if !bytes.Equal(decrypted, chunks[i]) {
 			t.Errorf("Chunk %d mismatch.\nExpected: %s\nGot: %s", i, chunks[i], decrypted)
 		}
+	}
+
+	// Verify client sequence is now 3
+	if clientAEAD.Seq() != 3 {
+		t.Errorf("Expected client sequence 3, got %d", clientAEAD.Seq())
 	}
 }
 
@@ -324,16 +350,20 @@ func TestWrongSequenceNumberFails(t *testing.T) {
 		t.Fatalf("NewResponseAEAD failed: %v", err)
 	}
 
-	// Encrypt with sequence 0
+	// Encrypt with sequence 0 (auto-incremented)
 	plaintext := []byte("Secret message")
-	nonce0 := km.ComputeNonce(0)
-	ciphertext := aead.Seal(nil, nonce0, plaintext, nil)
+	ciphertext := aead.Seal(plaintext, nil)
 
-	// Try to decrypt with wrong sequence number
-	nonce1 := km.ComputeNonce(1)
-	_, err = aead.Open(nil, nonce1, ciphertext, nil)
+	// Try to decrypt with wrong sequence number using OpenWithSeq
+	_, err = aead.OpenWithSeq(1, ciphertext, nil)
 	if err == nil {
 		t.Error("Decryption should fail with wrong sequence number")
+	}
+
+	// Verify correct sequence works
+	_, err = aead.OpenWithSeq(0, ciphertext, nil)
+	if err != nil {
+		t.Errorf("Decryption should succeed with correct sequence number: %v", err)
 	}
 }
 
@@ -373,14 +403,12 @@ func TestDifferentKeysCannotDecrypt(t *testing.T) {
 		t.Fatalf("Attacker NewResponseAEAD failed: %v", err)
 	}
 
-	// Server encrypts
+	// Server encrypts (sequence auto-increments)
 	plaintext := []byte("Secret response only for legitimate client")
-	nonce := serverKM.ComputeNonce(0)
-	ciphertext := serverAEAD.Seal(nil, nonce, plaintext, nil)
+	ciphertext := serverAEAD.Seal(plaintext, nil)
 
-	// Attacker tries to decrypt with their keys
-	attackerNonce := attackerKM.ComputeNonce(0)
-	_, err = attackerAEAD.Open(nil, attackerNonce, ciphertext, nil)
+	// Attacker tries to decrypt with their keys (using sequence 0)
+	_, err = attackerAEAD.Open(ciphertext, nil)
 	if err == nil {
 		t.Error("Attacker should not be able to decrypt with different keys")
 	}

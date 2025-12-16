@@ -94,10 +94,9 @@ func (c *v2TestClient) decryptResponse(t *testing.T, resp *httptest.ResponseReco
 	aead, err := km.NewResponseAEAD()
 	require.NoError(t, err)
 
-	// Decrypt chunks
+	// Decrypt chunks (aead.Open auto-increments the sequence)
 	var result bytes.Buffer
 	reader := bytes.NewReader(resp.Body.Bytes())
-	seq := uint64(0)
 
 	for reader.Len() > 0 {
 		// Read chunk length
@@ -118,12 +117,8 @@ func (c *v2TestClient) decryptResponse(t *testing.T, resp *httptest.ResponseReco
 		_, err = io.ReadFull(reader, encryptedChunk)
 		require.NoError(t, err)
 
-		// Compute nonce
-		nonce := km.ComputeNonce(seq)
-		seq++
-
 		// Decrypt
-		decrypted, err := aead.Open(nil, nonce, encryptedChunk, nil)
+		decrypted, err := aead.Open(encryptedChunk, nil)
 		require.NoError(t, err)
 
 		result.Write(decrypted)
@@ -446,8 +441,7 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 		encryptedChunk := make([]byte, chunkLen)
 		io.ReadFull(reader, encryptedChunk)
 
-		nonce := client2KM.ComputeNonce(0)
-		_, err := client2AEAD.Open(nil, nonce, encryptedChunk, nil)
+		_, err := client2AEAD.Open(encryptedChunk, nil)
 		assert.Error(t, err, "client 2 should not be able to decrypt client 1's response")
 	})
 }
