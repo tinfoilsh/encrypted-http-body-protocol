@@ -15,10 +15,12 @@ EHBP is a layered protocol implemented as:
 
 For each HTTP exchange:
 
-- Request body: If present, the client derives an HPKE context from the server’s public key and encrypts the body as a stream.
-- Response body: The server derives an HPKE context from the client’s public key and encrypts the body as a stream.
+- Request body: The client derives an HPKE sender context from the server's public key and encrypts the body as a stream. All requests MUST have a non-empty body; HTTP methods without bodies (e.g., GET, HEAD, DELETE) are not supported.
+- Response body: The server derives the response encryption key from the request's HPKE context using the Export interface (RFC 9180 Section 5.3), then encrypts the body as a stream.
 
-Both directions use a single HPKE setup per body and frame the ciphertext as a sequence of length‑prefixed chunks.
+This bidirectional encryption pattern (RFC 9180 Section 9.8) binds the response to the request, preventing MITM attacks where an attacker could substitute the client's identity to intercept responses.
+
+Both directions frame the ciphertext as a sequence of length‑prefixed chunks.
 
 ## 3. Server Key Distribution
 
@@ -48,16 +50,18 @@ Clients MUST parse the first `key_config` and use its public key and suite. Addi
 
 Clients MUST set:
 
-- `Ehbp-Client-Public-Key`: hex (lowercase, no prefix) of the client's KEM public key. Required for any request that expects an encrypted response, including requests without a body.
-- `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the request sealer. Required if and only if the request body is encrypted (i.e., a non‑empty body is present).
+- `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the request encryption context. REQUIRED on all requests.
 - `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding. Note: In browser environments, this header cannot be set explicitly due to browser restrictions; browsers handle chunked encoding automatically when Content-Length is omitted.
+
+All requests MUST include a non-empty body. HTTP methods that typically lack bodies (GET, HEAD, DELETE, OPTIONS) are not supported by EHBP.
 
 ### 4.2 Response Headers
 
 Servers MUST set for encrypted responses:
 
-- `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the response sealer.
 - `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding.
+
+Response encryption keys are derived from the request's HPKE context; no encapsulated key header is needed on responses.
 
 Servers that accept plaintext fallback (Section 5.3) MUST set:
 
@@ -81,33 +85,33 @@ Receivers MUST read a 4‑byte length, then exactly that many ciphertext bytes, 
 - Key acquisition: GET `/.well-known/hpke-keys` and parse the first `key_config` with Content-Type `application/ohttp-keys`.
 - Outbound request:
 
-  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key and stream‑encrypt using the chunk framing in Section 4.3 of this document. Set `Ehbp-Encapsulated-Key` and `Ehbp-Client-Public-Key`, and use chunked transfer encoding without a Content-Length.
-  - When the request has no payload body, attach `Ehbp-Client-Public-Key` so the server can encrypt the response; do not emit a request encapsulated key header.
-  - Requests explicitly constructed with a zero-length payload body are forwarded unchanged; clients that require an encrypted response MUST still include `Ehbp-Client-Public-Key`.
+  - Establish an HPKE sender context to the server public key. Stream‑encrypt the request body (or an empty body if no payload) using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length.
+  - Retain the HPKE sender context for response decryption.
 - Inbound response:
 
-  - Require `Ehbp-Encapsulated-Key`; derive the opener and stream‑decrypt the chunked body (Section 4.3 of this document). If the header is missing or invalid, treat the response as an error and fail the request.
+  - Derive response decryption key from the request's HPKE sender context using Export with context `"ehbp response"` and length 44 bytes (32-byte AES-256 key + 12-byte GCM nonce).
+  - Stream‑decrypt the chunked body using AES-256-GCM with the derived key and nonce. The nonce is XORed with an incrementing sequence number for each chunk.
 
 ### 5.2 Server
 
 - Request handling:
 
-  - The middleware first reads `Ehbp-Client-Public-Key`. If it is missing and plaintext fallback is disabled, the request is rejected with 400.
+  - The middleware first reads `Ehbp-Encapsulated-Key`. If it is missing and plaintext fallback is disabled, the request is rejected with 400.
   - With fallback enabled and the header missing, the server sets `Ehbp-Fallback: 1`, leaves the body untouched, and delegates to the next handler.
-  - When a non-empty payload body is present, both `Ehbp-Client-Public-Key` and `Ehbp-Encapsulated-Key` MUST be present. The body is decrypted as a chunked stream (Section 4.3). Client-caused errors (missing/invalid headers, invalid hex, HPKE setup failure) produce HTTP 400 responses; other failures return 500.
-  - If the request has no payload body, no decryption is attempted.
+  - All encrypted requests MUST have both `Ehbp-Encapsulated-Key` header and a body. The body is decrypted as a chunked stream (Section 4.3). Client-caused errors (missing/invalid headers, invalid hex, HPKE setup failure, missing body) produce HTTP 400 responses; other failures return 500.
+  - Retain the HPKE receiver context (opener) for response encryption.
 - Response handling:
 
-  - If `Ehbp-Client-Public-Key` is present, perform HPKE setup to the client public key and stream‑encrypt the response body. Set `Ehbp-Encapsulated-Key`. Use chunked transfer encoding and omit Content-Length.
+  - Derive response encryption key from the request's HPKE receiver context using Export with context `"ehbp response"` and length 44 bytes (32-byte AES-256 key + 12-byte GCM nonce).
+  - Stream‑encrypt the response body using AES-256-GCM with the derived key and nonce. The nonce is XORed with an incrementing sequence number for each chunk. Use chunked transfer encoding and omit Content-Length.
 
 ### 5.3 Plaintext Fallback (Server)
 
-Servers MAY support plaintext fallback. If enabled and `Ehbp-Client-Public-Key` is absent on the request, the server:
+Servers MAY support plaintext fallback. If enabled and `Ehbp-Encapsulated-Key` is absent on the request, the server:
 
 - MUST set `Ehbp-Fallback: 1` and pass the request/response through unencrypted.
-- MUST NOT send `Ehbp-Encapsulated-Key` on the response in this case.
 
-Fallback is not used for malformed headers; if `Ehbp-Client-Public-Key` is present but invalid, the handler returns HTTP 400.
+Fallback is not used for malformed headers; if `Ehbp-Encapsulated-Key` is present but invalid, or if the request body is missing, the handler returns HTTP 400.
 
 Client implementations MAY support consuming plaintext fallback responses. The reference Go client does not implement fallback consumption and requires encrypted responses. The reference JavaScript client supports plaintext fallback: when `Ehbp-Fallback: 1` is present on the response, it returns the response without attempting decryption.
 
@@ -116,15 +120,20 @@ Client implementations MAY support consuming plaintext fallback responses. The r
 ### 6.1 Scope of Protection
 
 - EHBP encrypts HTTP bodies only. HTTP headers remain in cleartext.
-- Each message direction uses a fresh HPKE setup (new encapsulated key) per HTTP exchange.
+- Each request uses a fresh HPKE setup (new encapsulated key). The response encryption key is derived from the request context, binding request and response together.
 - Streaming frame lengths (4‑byte prefixes) reveal ciphertext chunk sizes and boundaries.
 
-### 6.2 Keys and Suites
+### 6.2 Bidirectional Security
+
+Response encryption keys are derived from the request's HPKE context using the Export interface. This prevents MITM attacks where an attacker intercepts a request and substitutes identity information to redirect the encrypted response to themselves. Since the response key is derived from the shared secret established during request encryption, only the original client can decrypt the response.
+
+### 6.3 Keys and Suites
 
 - Private keys MUST be protected and never transmitted.
 - Public keys SHOULD be distributed and verified via a trusted channel.
 - Key configurations SHOULD be rotated periodically; clients may cache the advertised `key_config` until rotated.
 - The reference implementation uses KEM X25519_HKDF_SHA256, KDF HKDF_SHA256, AEAD AES_256_GCM; AAD is empty for all seals/opens.
+- Response encryption uses AES-256-GCM with key and nonce derived via HPKE Export.
 
 ## 7. References
 
