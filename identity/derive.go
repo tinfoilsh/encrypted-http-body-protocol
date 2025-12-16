@@ -79,8 +79,26 @@ func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*Resp
 	}, nil
 }
 
-// NewResponseAEAD creates an AES-256-GCM AEAD instance from the key material
-func (km *ResponseKeyMaterial) NewResponseAEAD() (cipher.AEAD, error) {
+// ResponseAEAD provides authenticated encryption with automatic nonce management.
+// It wraps cipher.AEAD and tracks the sequence number internally, computing
+// unique nonces for each operation by XORing the sequence with the nonce base.
+//
+// This follows the pattern from OHTTP (RFC 9458) where nonces are derived as:
+//
+//	nonce = nonce_base XOR sequence_number (big-endian in last 8 bytes)
+//
+// The sequence number is automatically incremented after each Seal/Open operation,
+// ensuring nonce uniqueness without requiring caller management.
+type ResponseAEAD struct {
+	aead      cipher.AEAD
+	nonceBase []byte
+	seq       uint64
+}
+
+// NewResponseAEAD creates an AES-256-GCM AEAD instance with automatic nonce management.
+// The returned ResponseAEAD tracks sequence numbers internally and computes
+// unique nonces for each Seal/Open operation.
+func (km *ResponseKeyMaterial) NewResponseAEAD() (*ResponseAEAD, error) {
 	block, err := aes.NewCipher(km.Key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
@@ -89,21 +107,77 @@ func (km *ResponseKeyMaterial) NewResponseAEAD() (cipher.AEAD, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCM: %w", err)
 	}
-	return aead, nil
+	// Copy nonceBase to avoid sharing the underlying array
+	nonceBase := make([]byte, len(km.NonceBase))
+	copy(nonceBase, km.NonceBase)
+	return &ResponseAEAD{
+		aead:      aead,
+		nonceBase: nonceBase,
+		seq:       0,
+	}, nil
 }
 
-// ComputeNonce computes the nonce for a given sequence number.
-// nonce = nonceBase XOR sequence_number (big-endian in the last 8 bytes)
-//
-// This ensures each chunk gets a unique nonce while maintaining
-// deterministic nonce generation for both sender and receiver.
-func (km *ResponseKeyMaterial) ComputeNonce(seq uint64) []byte {
-	nonce := make([]byte, AESGCMNonceLength)
-	copy(nonce, km.NonceBase)
+// Seal encrypts plaintext with the given additional authenticated data.
+// It automatically computes the nonce from the current sequence number
+// and increments the sequence for the next operation.
+func (r *ResponseAEAD) Seal(plaintext, aad []byte) []byte {
+	nonce := r.computeNonce()
+	r.seq++
+	return r.aead.Seal(nil, nonce, plaintext, aad)
+}
 
+// Open decrypts ciphertext with the given additional authenticated data.
+// It automatically computes the nonce from the current sequence number
+// and increments the sequence for the next operation.
+// Returns an error if authentication fails.
+func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
+	nonce := r.computeNonce()
+	r.seq++
+	return r.aead.Open(nil, nonce, ciphertext, aad)
+}
+
+// OpenWithSeq decrypts ciphertext using a specific sequence number without
+// affecting the internal sequence counter. This is primarily useful for testing.
+// Following the pattern from OHTTP's open_seq() function.
+func (r *ResponseAEAD) OpenWithSeq(seq uint64, ciphertext, aad []byte) ([]byte, error) {
+	nonce := r.nonceForSeq(seq)
+	return r.aead.Open(nil, nonce, ciphertext, aad)
+}
+
+// NonceForSeq returns the nonce that would be used for the given sequence number.
+// This does not affect the internal sequence counter. Useful for testing.
+func (r *ResponseAEAD) NonceForSeq(seq uint64) []byte {
+	return r.nonceForSeq(seq)
+}
+
+// computeNonce computes the nonce for the current sequence number.
+func (r *ResponseAEAD) computeNonce() []byte {
+	return r.nonceForSeq(r.seq)
+}
+
+// nonceForSeq computes the nonce for a given sequence number.
+// nonce = nonceBase XOR sequence_number (big-endian in the last 8 bytes)
+func (r *ResponseAEAD) nonceForSeq(seq uint64) []byte {
+	nonce := make([]byte, AESGCMNonceLength)
+	copy(nonce, r.nonceBase)
 	// XOR with sequence number in the last 8 bytes (big-endian)
 	for i := 0; i < 8; i++ {
 		nonce[AESGCMNonceLength-1-i] ^= byte(seq >> (i * 8))
 	}
 	return nonce
+}
+
+// NonceSize returns the nonce size of the underlying AEAD.
+func (r *ResponseAEAD) NonceSize() int {
+	return r.aead.NonceSize()
+}
+
+// Overhead returns the maximum difference between plaintext and ciphertext lengths.
+func (r *ResponseAEAD) Overhead() int {
+	return r.aead.Overhead()
+}
+
+// Seq returns the current sequence number. Useful for testing.
+func (r *ResponseAEAD) Seq() uint64 {
+	return r.seq
 }

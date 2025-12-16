@@ -178,10 +178,9 @@ func TestMitMCannotForgeResponse(t *testing.T) {
 		t.Fatalf("Attacker AEAD creation failed: %v", err)
 	}
 
-	// Attacker encrypts a forged message
+	// Attacker encrypts a forged message (sequence auto-increments)
 	forgedMessage := []byte("Malicious response from attacker - transfer $1M to Eve")
-	nonce := attackerKM.ComputeNonce(0)
-	forgedCiphertext := attackerAEAD.Seal(nil, nonce, forgedMessage, nil)
+	forgedCiphertext := attackerAEAD.Seal(forgedMessage, nil)
 
 	// Client tries to decrypt with the real keys
 	clientKM, err := DeriveResponseKeys(clientExported, requestEnc, forgedNonce)
@@ -192,10 +191,9 @@ func TestMitMCannotForgeResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Client AEAD creation failed: %v", err)
 	}
-	clientNonce := clientKM.ComputeNonce(0)
 
 	// Decryption MUST fail because keys don't match
-	_, err = clientAEAD.Open(nil, clientNonce, forgedCiphertext, nil)
+	_, err = clientAEAD.Open(forgedCiphertext, nil)
 	if err == nil {
 		t.Error("SECURITY FAILURE: Forged response was accepted!")
 	} else {
@@ -260,8 +258,7 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 	}
 
 	plaintext := []byte("Secret server response")
-	serverNonce := serverKM.ComputeNonce(0)
-	ciphertext := serverAEAD.Seal(nil, serverNonce, plaintext, nil)
+	ciphertext := serverAEAD.Seal(plaintext, nil)
 
 	// Simulate: Client has a MODIFIED enc (header was tampered)
 	modifiedEnc := make([]byte, len(originalEnc))
@@ -278,10 +275,9 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Client AEAD creation failed: %v", err)
 	}
-	clientNonce := clientKM.ComputeNonce(0)
 
 	// Decryption MUST fail
-	_, err = clientAEAD.Open(nil, clientNonce, ciphertext, nil)
+	_, err = clientAEAD.Open(ciphertext, nil)
 	if err == nil {
 		t.Error("SECURITY FAILURE: Decryption succeeded with modified enc!")
 	} else {
@@ -337,7 +333,7 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 	}
 
 	plaintext := []byte("Secret server response")
-	ciphertext := serverAEAD.Seal(nil, serverKM.ComputeNonce(0), plaintext, nil)
+	ciphertext := serverAEAD.Seal(plaintext, nil)
 
 	// Client receives but with MODIFIED nonce (header tampered)
 	modifiedNonce := make([]byte, ResponseNonceLength)
@@ -356,7 +352,7 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 	}
 
 	// Decryption MUST fail
-	_, err = clientAEAD.Open(nil, clientKM.ComputeNonce(0), ciphertext, nil)
+	_, err = clientAEAD.Open(ciphertext, nil)
 	if err == nil {
 		t.Error("SECURITY FAILURE: Decryption succeeded with modified nonce!")
 	} else {
