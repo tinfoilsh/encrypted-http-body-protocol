@@ -1,7 +1,6 @@
 package identity
 
 import (
-	"bytes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
@@ -37,65 +36,6 @@ func NewClientError(err error) error {
 func IsClientError(err error) bool {
 	var clientErr ClientError
 	return errors.As(err, &clientErr)
-}
-
-// EncryptedResponseWriter wraps an http.ResponseWriter for streaming encryption
-type EncryptedResponseWriter struct {
-	http.ResponseWriter
-	sealer      hpke.Sealer
-	wroteHeader bool
-	statusCode  int
-}
-
-// WriteHeader captures the status code and delegates to the underlying ResponseWriter
-func (w *EncryptedResponseWriter) WriteHeader(statusCode int) {
-	if !w.wroteHeader {
-		// Remove Content-Length as encryption will change the size
-		w.ResponseWriter.Header().Del("Content-Length")
-		w.statusCode = statusCode
-		w.ResponseWriter.WriteHeader(statusCode)
-		w.wroteHeader = true
-	}
-}
-
-// Write encrypts data as chunks and writes them to the underlying ResponseWriter
-func (w *EncryptedResponseWriter) Write(data []byte) (int, error) {
-	if !w.wroteHeader {
-		w.WriteHeader(http.StatusOK)
-	}
-
-	if len(data) == 0 {
-		return 0, nil
-	}
-
-	// Encrypt the chunk
-	encrypted, err := w.sealer.Seal(data, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to encrypt data: %w", err)
-	}
-
-	// Chunk length (4 bytes big-endian) header
-	chunkHeader := make([]byte, 4)
-	binary.BigEndian.PutUint32(chunkHeader, uint32(len(encrypted)))
-
-	_, err = w.ResponseWriter.Write(chunkHeader)
-	if err != nil {
-		return 0, err
-	}
-	_, err = w.ResponseWriter.Write(encrypted)
-	if err != nil {
-		return 0, err
-	}
-
-	// Return the original data length
-	return len(data), nil
-}
-
-// Flush implements http.Flusher
-func (w *EncryptedResponseWriter) Flush() {
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
 }
 
 // StreamingEncryptReader wraps an io.Reader for streaming encryption
@@ -169,45 +109,6 @@ func (r *StreamingEncryptReader) Close() error {
 	if closer, ok := r.reader.(io.Closer); ok {
 		return closer.Close()
 	}
-	return nil
-}
-
-// EncryptRequest creates a streaming encryption reader for the request body
-func (i *Identity) EncryptRequest(req *http.Request, recipientPubKey []byte) error {
-	if req.Body == nil || req.ContentLength == 0 {
-		return nil // Nothing to encrypt
-	}
-
-	// Set up encryption
-	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
-	if err != nil {
-		return fmt.Errorf("invalid recipient public key: %w", err)
-	}
-
-	sender, err := i.Suite().NewSender(pk, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create sender: %w", err)
-	}
-
-	encapKey, sealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		return fmt.Errorf("failed to setup encryption: %w", err)
-	}
-
-	streamingReader := &StreamingEncryptReader{
-		reader: req.Body,
-		sealer: sealer,
-		buffer: nil,
-		eof:    false,
-	}
-
-	req.Body = streamingReader
-	req.ContentLength = -1 // Unknown length
-
-	req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(i.MarshalPublicKey()))
-	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
-	req.Header.Set("Transfer-Encoding", "chunked")
-
 	return nil
 }
 
@@ -289,130 +190,8 @@ func (r *StreamingDecryptReader) Close() error {
 	return nil
 }
 
-// DecryptRequest creates a streaming decryption reader for the request body
-func (i *Identity) DecryptRequest(req *http.Request) error {
-	if req.Body == nil || req.Body == http.NoBody {
-		return nil // Nothing to decrypt
-	}
-
-	// Get encryption headers
-	clientPubKeyHex := req.Header.Get(protocol.ClientPublicKeyHeader)
-	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
-
-	if clientPubKeyHex == "" || encapKeyHex == "" {
-		return NewClientError(fmt.Errorf("missing encryption headers"))
-	}
-
-	// Decrypt
-	encapKey, err := hex.DecodeString(encapKeyHex)
-	if err != nil {
-		return NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
-	}
-	receiver, err := i.Suite().NewReceiver(i.sk, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create receiver: %w", err)
-	}
-	opener, err := receiver.Setup(encapKey)
-	if err != nil {
-		return NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
-	}
-
-	streamingReader := &StreamingDecryptReader{
-		reader: req.Body,
-		opener: opener,
-		buffer: nil,
-		eof:    false,
-	}
-
-	req.Body = streamingReader
-	req.ContentLength = -1 // Unknown length for streaming
-
-	return nil
-}
-
-// SetupResponseEncryption prepares an encrypted response writer for streaming encryption
-func (i *Identity) SetupResponseEncryption(w http.ResponseWriter, clientPubKeyHex string) (*EncryptedResponseWriter, error) {
-	clientPubKeyBytes, err := hex.DecodeString(clientPubKeyHex)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
-	}
-
-	clientPubKey, err := i.KEMScheme().UnmarshalBinaryPublicKey(clientPubKeyBytes)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
-	}
-
-	sender, err := i.Suite().NewSender(clientPubKey, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption context: %w", err)
-	}
-	encapKey, sealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to setup encryption: %w", err)
-	}
-
-	w.Header().Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
-	w.Header().Set("Transfer-Encoding", "chunked")
-	w.Header().Del("Content-Length")
-
-	return &EncryptedResponseWriter{
-		ResponseWriter: w,
-		sealer:         sealer,
-		wroteHeader:    false,
-	}, nil
-}
-
-// DecryptChunkedResponse decrypts a chunked response where each chunk is prefixed with its length
-func (i *Identity) DecryptChunkedResponse(data []byte, encapKey []byte) ([]byte, error) {
-	receiver, err := i.Suite().NewReceiver(i.sk, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver: %w", err)
-	}
-
-	opener, err := receiver.Setup(encapKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to setup decryption: %w", err)
-	}
-
-	var result bytes.Buffer
-	reader := bytes.NewReader(data)
-
-	for reader.Len() > 0 {
-		// Read chunk length (4 bytes)
-		var chunkLen uint32
-		err := binary.Read(reader, binary.BigEndian, &chunkLen)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("failed to read chunk length: %w", err)
-		}
-
-		if chunkLen == 0 {
-			continue
-		}
-
-		// Read encrypted chunk data
-		encryptedChunk := make([]byte, chunkLen)
-		_, err = io.ReadFull(reader, encryptedChunk)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read encrypted chunk: %w", err)
-		}
-
-		// Decrypt chunk
-		decryptedChunk, err := opener.Open(encryptedChunk, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt chunk: %w", err)
-		}
-
-		result.Write(decryptedChunk)
-	}
-
-	return result.Bytes(), nil
-}
-
 // =============================================================================
-// EHBP v2: Response encryption using derived keys
+// Server-side: Request decryption and response encryption
 // =============================================================================
 
 // ResponseContext holds the HPKE context information needed for response encryption.
@@ -423,8 +202,7 @@ type ResponseContext struct {
 }
 
 // DerivedResponseWriter wraps an http.ResponseWriter for streaming encryption
-// using keys derived from the request's HPKE context. This replaces EncryptedResponseWriter
-// for the v2 protocol.
+// using keys derived from the request's HPKE context.
 type DerivedResponseWriter struct {
 	http.ResponseWriter
 	aead        cipher.AEAD
@@ -489,7 +267,7 @@ func (w *DerivedResponseWriter) Flush() {
 }
 
 // DecryptRequestWithContext decrypts the request body and returns the HPKE context
-// needed for response encryption. This is the v2 replacement for DecryptRequest.
+// needed for response encryption.
 //
 // The returned ResponseContext contains the HPKE opener which can be used to
 // export the shared secret for response key derivation.
@@ -539,8 +317,7 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 }
 
 // SetupDerivedResponseEncryption creates an encrypted response writer using
-// keys derived from the request's HPKE context. This is the secure v2 replacement
-// for SetupResponseEncryption.
+// keys derived from the request's HPKE context.
 //
 // The response encryption keys are derived as follows:
 //  1. Export a secret from the HPKE context using label "ehbp response"
@@ -617,7 +394,7 @@ func (i *Identity) SetupResponseContextForEmptyBody(encapKeyHex string) (*Respon
 }
 
 // =============================================================================
-// EHBP v2: Client-side request encryption and response decryption
+// Client-side: Request encryption and response decryption
 // =============================================================================
 
 // RequestContext holds the HPKE context needed for response decryption.
@@ -628,11 +405,7 @@ type RequestContext struct {
 }
 
 // EncryptRequestWithContext encrypts the request body and returns the HPKE context
-// needed for response decryption. This is the v2 replacement for EncryptRequest.
-//
-// Unlike the v1 EncryptRequest, this function:
-// - Does NOT set the ClientPublicKeyHeader (which was vulnerable to MitM)
-// - Returns a RequestContext that must be used to decrypt the response
+// needed for response decryption.
 func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey []byte) (*RequestContext, error) {
 	// Set up encryption to recipient
 	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
@@ -650,7 +423,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey 
 		return nil, fmt.Errorf("failed to setup encryption: %w", err)
 	}
 
-	// Set the request enc header (NOT client public key!)
+	// Set the request enc header
 	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 	req.Header.Set("Transfer-Encoding", "chunked")
 
@@ -673,7 +446,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey 
 }
 
 // DecryptResponseWithContext decrypts a response using keys derived from
-// the request's HPKE context. This is the v2 replacement for the old response decryption.
+// the request's HPKE context.
 //
 // The response decryption keys are derived using the same process as the server:
 //  1. Export a secret from the HPKE context using label "ehbp response"

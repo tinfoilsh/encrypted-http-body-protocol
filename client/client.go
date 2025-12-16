@@ -11,9 +11,6 @@ import (
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
-// Transport implements http.RoundTripper with EHBP v2 encryption.
-// It encrypts request bodies and decrypts response bodies using
-// HPKE with derived response keys to prevent MitM attacks.
 type Transport struct {
 	clientIdentity *identity.Identity
 	serverIdentity *identity.Identity
@@ -22,8 +19,6 @@ type Transport struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
-// NewTransport creates a new Transport with EHBP v2 encryption.
-// It fetches the server's public key configuration from the well-known endpoint.
 func NewTransport(server string, clientIdentity *identity.Identity, insecureSkipVerify bool) (*Transport, error) {
 	t := &Transport{
 		clientIdentity: clientIdentity,
@@ -78,34 +73,22 @@ func (t *Transport) syncServerPublicKey(server string) error {
 	return nil
 }
 
-// ServerIdentity returns the server's public identity configuration.
 func (t *Transport) ServerIdentity() *identity.Identity {
 	return t.serverIdentity
 }
 
-// RoundTrip implements http.RoundTripper with EHBP v2 encryption.
-//
-// The v2 protocol:
-//  1. Encrypts the request body to the server's public key
-//  2. Stores the HPKE sealer context for response decryption
-//  3. Derives response decryption keys from the request's HPKE context
-//  4. Decrypts the response using the derived keys
-//
-// This ensures response encryption is bound to the specific request,
-// preventing MitM attacks where an attacker could intercept responses.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
 
 	serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
 
-	// Encrypt request and get context for response decryption (v2)
+	// Encrypt request and get context for response decryption
 	reqCtx, err := t.clientIdentity.EncryptRequestWithContext(newReq, serverPubKeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
 
-	// Make the HTTP request
 	resp, err := t.httpClient.Do(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %v", err)
@@ -116,7 +99,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	// Decrypt response using the request context (v2)
 	if err := t.clientIdentity.DecryptResponseWithContext(resp, reqCtx); err != nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("failed to decrypt response: %v", err)
