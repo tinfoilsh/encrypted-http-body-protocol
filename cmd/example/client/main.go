@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -12,13 +11,11 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
-	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 var (
-	serverURL    = flag.String("s", "http://localhost:8080", "server URL")
-	identityFile = flag.String("i", "client_identity.json", "client identity file")
-	verbose      = flag.Bool("v", false, "verbose logging")
+	serverURL = flag.String("s", "http://localhost:8080", "server URL")
+	verbose   = flag.Bool("v", false, "verbose logging")
 )
 
 func main() {
@@ -28,16 +25,10 @@ func main() {
 		log.Debug("Verbose logging enabled")
 	}
 
-	clientIdentity, err := identity.FromFile(*identityFile)
-	if err != nil {
-		log.Fatalf("failed to get client identity: %v", err)
-	}
-
-	log.WithFields(log.Fields{
-		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
-	}).Info("Client identity")
-
-	secureTransport, err := client.NewTransport(*serverURL, clientIdentity, false)
+	// Create transport with ephemeral identity (no persistent client keys needed)
+	// The client's private key is never used - response decryption uses keys
+	// derived from the request's HPKE context.
+	secureTransport, err := client.NewTransport(*serverURL, nil, false)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
