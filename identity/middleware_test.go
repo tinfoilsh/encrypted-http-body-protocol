@@ -20,6 +20,8 @@ func TestMiddleware(t *testing.T) {
 	require.NoError(t, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(t, err)
 
 	middleware := serverIdentity.Middleware(false)
 
@@ -43,8 +45,7 @@ func TestMiddleware(t *testing.T) {
 		req.Header.Set("Content-Type", "application/octet-stream")
 
 		// Encrypt the request using the new streaming method
-		serverPubKeyBytes := serverIdentity.MarshalPublicKey()
-		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKeyBytes)
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -129,6 +130,8 @@ func TestStreamingResponseWriter(t *testing.T) {
 	require.NoError(t, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(t, err)
 
 	middleware := serverIdentity.Middleware(false)
 
@@ -149,7 +152,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 	t.Run("streaming response", func(t *testing.T) {
 		// Create an encrypted request
 		req := httptest.NewRequest("POST", "/stream", strings.NewReader("trigger stream"))
-		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -187,6 +190,8 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	require.NoError(t, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(t, err)
 
 	middleware := serverIdentity.Middleware(false)
 
@@ -209,7 +214,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 		wrapped := middleware(chunkHandler)
 
 		req := httptest.NewRequest("POST", "/chunks", strings.NewReader("trigger"))
-		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -237,7 +242,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 		wrapped := middleware(emptyHandler)
 
 		req := httptest.NewRequest("POST", "/empty", strings.NewReader("trigger"))
-		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -265,7 +270,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 		wrapped := middleware(largeHandler)
 
 		req := httptest.NewRequest("POST", "/large", strings.NewReader("trigger"))
-		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -289,6 +294,8 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 	require.NoError(b, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(b, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(b, err)
 
 	middleware := serverIdentity.Middleware(false)
 
@@ -301,7 +308,7 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader("benchmark test data"))
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(b, err)
 
 		w := httptest.NewRecorder()

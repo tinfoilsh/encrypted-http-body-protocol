@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -33,8 +32,12 @@ func main() {
 		log.Fatalf("failed to get client identity: %v", err)
 	}
 
+	publicKeyHex, err := clientIdentity.MarshalPublicKeyHex()
+	if err != nil {
+		log.Fatalf("failed to marshal public key: %v", err)
+	}
 	log.WithFields(log.Fields{
-		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
+		"public_key_hex": publicKeyHex,
 	}).Info("Client identity")
 
 	secureTransport, err := client.NewTransport(*serverURL, clientIdentity, false)

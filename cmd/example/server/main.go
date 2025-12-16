@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -56,8 +55,12 @@ func main() {
 
 	middleware := serverIdentity.Middleware(*permitPlaintext)
 
+	publicKeyHex, err := serverIdentity.MarshalPublicKeyHex()
+	if err != nil {
+		logrus.Fatalf("Failed to marshal public key: %v", err)
+	}
 	logrus.WithFields(logrus.Fields{
-		"public_key_hex":   hex.EncodeToString(serverIdentity.MarshalPublicKey()),
+		"public_key_hex":   publicKeyHex,
 		"permit_plaintext": *permitPlaintext,
 	}).Info("Server identity")
 

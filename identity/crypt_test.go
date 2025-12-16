@@ -17,6 +17,8 @@ func TestStreamingEncryption(t *testing.T) {
 	require.NoError(t, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(t, err)
 
 	t.Run("big streaming request encryption", func(t *testing.T) {
 		largeData := strings.Repeat("A", 1024*1024)
@@ -25,7 +27,7 @@ func TestStreamingEncryption(t *testing.T) {
 		originalLength := req.ContentLength
 
 		// Encrypt
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		// Verify headers are set
@@ -54,7 +56,7 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "Hello, streaming world!"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		_, err = serverIdentity.DecryptRequest(req)
@@ -110,7 +112,7 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "This is a test of partial reads with streaming encryption"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.NoError(t, err)
 
 		// Read in very small chunks to test partial read handling
@@ -137,17 +139,19 @@ func TestStreamingReaderEdgeCases(t *testing.T) {
 	require.NoError(t, err)
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
+	serverPubKey, err := serverIdentity.MarshalPublicKey()
+	require.NoError(t, err)
 
 	t.Run("empty request body requires error", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(""))
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "EHBP requires a request body")
 	})
 
 	t.Run("nil request body requires error", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", nil)
-		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverPubKey)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "EHBP requires a request body")
 	})

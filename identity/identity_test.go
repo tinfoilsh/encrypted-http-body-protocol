@@ -77,7 +77,8 @@ func TestMarshalPublicKey(t *testing.T) {
 	identity, err := NewIdentity()
 	require.NoError(t, err)
 
-	pkBytes := identity.MarshalPublicKey()
+	pkBytes, err := identity.MarshalPublicKey()
+	require.NoError(t, err)
 	assert.NotEmpty(t, pkBytes)
 	assert.Equal(t, 32, len(pkBytes)) // X25519 public key size
 

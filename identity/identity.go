@@ -95,17 +95,17 @@ func (i *Identity) PrivateKey() kem.PrivateKey {
 }
 
 // MarshalPublicKey returns a binary representation of the public key
-func (i *Identity) MarshalPublicKey() []byte {
-	pkM, err := i.pk.MarshalBinary()
-	if err != nil {
-		panic("code error: invalid pk: " + err.Error())
-	}
-	return pkM
+func (i *Identity) MarshalPublicKey() ([]byte, error) {
+	return i.pk.MarshalBinary()
 }
 
 // MarshalPublicKeyHex returns a hex string representation of the public key
-func (i *Identity) MarshalPublicKeyHex() string {
-	return hex.EncodeToString(i.MarshalPublicKey())
+func (i *Identity) MarshalPublicKeyHex() (string, error) {
+	pkBytes, err := i.MarshalPublicKey()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(pkBytes), nil
 }
 
 // MarshalConfig returns a binary representation of the identity compatible with RFC9458 application/ohttp-keys

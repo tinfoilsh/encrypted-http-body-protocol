@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
@@ -41,8 +40,12 @@ func main() {
 		log.Fatalf("failed to get client identity: %v", err)
 	}
 
+	publicKeyHex, err := clientIdentity.MarshalPublicKeyHex()
+	if err != nil {
+		log.Fatalf("failed to marshal public key: %v", err)
+	}
 	log.WithFields(log.Fields{
-		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
+		"public_key_hex": publicKeyHex,
 	}).Debug("Client Identity")
 
 	secureTransport, err := client.NewTransport(url, clientIdentity, *insecure)
@@ -53,8 +56,12 @@ func main() {
 		Transport: secureTransport,
 	}
 
+	serverPubKeyHex, err := secureTransport.ServerIdentity().MarshalPublicKeyHex()
+	if err != nil {
+		log.Fatalf("failed to marshal server public key: %v", err)
+	}
 	log.WithFields(log.Fields{
-		"public_key_hex": secureTransport.ServerIdentity().MarshalPublicKeyHex(),
+		"public_key_hex": serverPubKeyHex,
 		"hpke_suite":     secureTransport.ServerIdentity().Suite(),
 	}).Debug("Server Identity")
 

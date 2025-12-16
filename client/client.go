@@ -84,7 +84,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	newReq := req.Clone(req.Context())
 
-	serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
+	serverPubKeyBytes, err := t.serverIdentity.MarshalPublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal server public key: %v", err)
+	}
 	reqCtx, err := t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
