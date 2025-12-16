@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -408,4 +409,209 @@ func (i *Identity) DecryptChunkedResponse(data []byte, encapKey []byte) ([]byte,
 	}
 
 	return result.Bytes(), nil
+}
+
+// =============================================================================
+// EHBP v2: Response encryption using derived keys
+// =============================================================================
+
+// ResponseContext holds the HPKE context information needed for response encryption.
+// This is returned by DecryptRequestWithContext and passed to SetupDerivedResponseEncryption.
+type ResponseContext struct {
+	opener     hpke.Opener // The opener from request decryption (has Export method)
+	RequestEnc []byte      // The encapsulated key from the request
+}
+
+// DerivedResponseWriter wraps an http.ResponseWriter for streaming encryption
+// using keys derived from the request's HPKE context. This replaces EncryptedResponseWriter
+// for the v2 protocol.
+type DerivedResponseWriter struct {
+	http.ResponseWriter
+	aead        cipher.AEAD
+	nonceBase   []byte
+	seq         uint64
+	wroteHeader bool
+	statusCode  int
+}
+
+// WriteHeader captures the status code and delegates to the underlying ResponseWriter
+func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
+	if !w.wroteHeader {
+		w.ResponseWriter.Header().Del("Content-Length")
+		w.statusCode = statusCode
+		w.ResponseWriter.WriteHeader(statusCode)
+		w.wroteHeader = true
+	}
+}
+
+// Write encrypts data as chunks and writes them to the underlying ResponseWriter.
+// Each chunk is encrypted with AES-256-GCM using a nonce derived from the base nonce
+// XORed with the sequence number.
+func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	if len(data) == 0 {
+		return 0, nil
+	}
+
+	// Compute nonce for this chunk: nonceBase XOR seq
+	nonce := make([]byte, AESGCMNonceLength)
+	copy(nonce, w.nonceBase)
+	for i := 0; i < 8; i++ {
+		nonce[AESGCMNonceLength-1-i] ^= byte(w.seq >> (i * 8))
+	}
+
+	// Encrypt the chunk
+	encrypted := w.aead.Seal(nil, nonce, data, nil)
+	w.seq++
+
+	// Write chunk header (4 bytes big-endian length)
+	chunkHeader := make([]byte, 4)
+	binary.BigEndian.PutUint32(chunkHeader, uint32(len(encrypted)))
+
+	if _, err := w.ResponseWriter.Write(chunkHeader); err != nil {
+		return 0, err
+	}
+	if _, err := w.ResponseWriter.Write(encrypted); err != nil {
+		return 0, err
+	}
+
+	return len(data), nil
+}
+
+// Flush implements http.Flusher
+func (w *DerivedResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// DecryptRequestWithContext decrypts the request body and returns the HPKE context
+// needed for response encryption. This is the v2 replacement for DecryptRequest.
+//
+// The returned ResponseContext contains the HPKE opener which can be used to
+// export the shared secret for response key derivation.
+func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContext, error) {
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil, nil
+	}
+
+	// Get the encapsulated key header
+	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
+	if encapKeyHex == "" {
+		return nil, NewClientError(fmt.Errorf("missing %s header", protocol.EncapsulatedKeyHeader))
+	}
+
+	encapKey, err := hex.DecodeString(encapKeyHex)
+	if err != nil {
+		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
+	}
+
+	// Create receiver and setup decryption
+	receiver, err := i.Suite().NewReceiver(i.sk, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create receiver: %w", err)
+	}
+
+	opener, err := receiver.Setup(encapKey)
+	if err != nil {
+		return nil, NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
+	}
+
+	// Wrap the body with streaming decryption
+	streamingReader := &StreamingDecryptReader{
+		reader: req.Body,
+		opener: opener,
+		buffer: nil,
+		eof:    false,
+	}
+
+	req.Body = streamingReader
+	req.ContentLength = -1
+
+	// Return the context for response encryption
+	return &ResponseContext{
+		opener:     opener,
+		RequestEnc: encapKey,
+	}, nil
+}
+
+// SetupDerivedResponseEncryption creates an encrypted response writer using
+// keys derived from the request's HPKE context. This is the secure v2 replacement
+// for SetupResponseEncryption.
+//
+// The response encryption keys are derived as follows:
+//  1. Export a secret from the HPKE context using label "ehbp response"
+//  2. Generate a random response nonce
+//  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
+//
+// This binds the response encryption to the specific request, preventing MitM attacks.
+func (i *Identity) SetupDerivedResponseEncryption(
+	w http.ResponseWriter,
+	respCtx *ResponseContext,
+) (*DerivedResponseWriter, error) {
+	if respCtx == nil {
+		return nil, fmt.Errorf("response context is nil")
+	}
+
+	// Export secret from the request's HPKE context
+	exportedSecret := respCtx.opener.Export([]byte(ExportLabel), uint(ExportLength))
+
+	// Generate random response nonce
+	responseNonce := make([]byte, ResponseNonceLength)
+	if _, err := rand.Read(responseNonce); err != nil {
+		return nil, fmt.Errorf("failed to generate response nonce: %w", err)
+	}
+
+	// Derive response keys
+	km, err := DeriveResponseKeys(exportedSecret, respCtx.RequestEnc, responseNonce)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive response keys: %w", err)
+	}
+
+	// Create AEAD
+	aead, err := km.NewResponseAEAD()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AEAD: %w", err)
+	}
+
+	// Set response headers
+	w.Header().Set(protocol.ResponseNonceHeader, hex.EncodeToString(responseNonce))
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Del("Content-Length")
+
+	return &DerivedResponseWriter{
+		ResponseWriter: w,
+		aead:           aead,
+		nonceBase:      km.NonceBase,
+		seq:            0,
+		wroteHeader:    false,
+	}, nil
+}
+
+// SetupResponseContextForEmptyBody creates a ResponseContext for requests without a body.
+// This is needed when the request has an Ehbp-Encapsulated-Key header but no body,
+// and we still need to derive response encryption keys.
+func (i *Identity) SetupResponseContextForEmptyBody(encapKeyHex string) (*ResponseContext, error) {
+	encapKey, err := hex.DecodeString(encapKeyHex)
+	if err != nil {
+		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
+	}
+
+	receiver, err := i.Suite().NewReceiver(i.sk, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create receiver: %w", err)
+	}
+
+	opener, err := receiver.Setup(encapKey)
+	if err != nil {
+		return nil, NewClientError(fmt.Errorf("failed to setup decryption context: %w", err))
+	}
+
+	return &ResponseContext{
+		opener:     opener,
+		RequestEnc: encapKey,
+	}, nil
 }
