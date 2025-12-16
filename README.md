@@ -30,15 +30,15 @@ This ensures that EHBP keeps streaming semantics intact and can be used as a dro
 2. Run the example client:
 
    ```sh
-   go run ./cmd/example/client -s http://localhost:8080 -i client_identity.json -v
+   go run ./cmd/example/client -s http://localhost:8080 -v
    ```
 
-   _The client likewise materializes `client_identity.json` the first time it runs._
+   _The client uses an ephemeral identity - no persistent keys required._
 
 3. Use the curl-like fetcher (sends encrypted requests and decrypts responses):
 
    ```sh
-   go run ./cmd/fetch -i client_identity.json -X POST -d 'hello' http://localhost:8080/secure
+   go run ./cmd/fetch -X POST -d 'hello' http://localhost:8080/secure
    ```
 
 4. Enable server plaintext fallback (for testing):
@@ -92,16 +92,13 @@ import (
   "net/http"
 
   "github.com/tinfoilsh/encrypted-http-body-protocol/client"
-  "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 func main() {
-  id, err := identity.FromFile("client_identity.json")
-  if err != nil {
-    log.Fatalf("client exited: %v", err)
-  }
-
-  tr, err := client.NewTransport("http://localhost:8080", id, false)
+  // Pass nil for clientIdentity - an ephemeral identity is created automatically.
+  // The client's private key is never used; response decryption uses keys
+  // derived from the request's HPKE context.
+  tr, err := client.NewTransport("http://localhost:8080", nil, false)
   if err != nil {
     log.Fatalf("client exited: %v", err)
   }

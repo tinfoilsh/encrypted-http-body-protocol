@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"io"
 	"net/http"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
-	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 var (
@@ -20,8 +18,7 @@ var (
 	headers       = pflag.StringSliceP("header", "H", []string{}, "request header (can be used multiple times)")
 	data          = pflag.StringP("data", "d", "", "request data")
 
-	identityFile = pflag.StringP("identity", "i", "client_identity.json", "client identity file")
-	verbose      = pflag.BoolP("verbose", "v", false, "verbose logging")
+	verbose = pflag.BoolP("verbose", "v", false, "verbose logging")
 )
 
 func main() {
@@ -36,16 +33,8 @@ func main() {
 		log.Fatalf("URL is required")
 	}
 
-	clientIdentity, err := identity.FromFile(*identityFile)
-	if err != nil {
-		log.Fatalf("failed to get client identity: %v", err)
-	}
-
-	log.WithFields(log.Fields{
-		"public_key_hex": hex.EncodeToString(clientIdentity.MarshalPublicKey()),
-	}).Debug("Client Identity")
-
-	secureTransport, err := client.NewTransport(url, clientIdentity, *insecure)
+	// Create transport with ephemeral identity (no persistent client keys needed)
+	secureTransport, err := client.NewTransport(url, nil, *insecure)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}

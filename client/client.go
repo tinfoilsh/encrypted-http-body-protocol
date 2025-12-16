@@ -19,7 +19,20 @@ type Transport struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
+// NewTransport creates a new encrypted transport.
+// If clientIdentity is nil, an ephemeral identity is created automatically.
+// The client identity is used only for HPKE suite access - its private key is never used
+// since response decryption uses keys derived from the request's HPKE context.
 func NewTransport(server string, clientIdentity *identity.Identity, insecureSkipVerify bool) (*Transport, error) {
+	// Create ephemeral identity if not provided
+	if clientIdentity == nil {
+		var err error
+		clientIdentity, err = identity.NewIdentity()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ephemeral identity: %v", err)
+		}
+	}
+
 	t := &Transport{
 		clientIdentity: clientIdentity,
 		httpClient: &http.Client{
