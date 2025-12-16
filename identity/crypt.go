@@ -41,9 +41,15 @@ func IsClientError(err error) bool {
 // EncryptedResponseWriter wraps an http.ResponseWriter for streaming encryption
 type EncryptedResponseWriter struct {
 	http.ResponseWriter
-	sealer      hpke.Sealer
+	sealer      *exportedSealer
 	wroteHeader bool
 	statusCode  int
+}
+
+// ResponseContext holds the HPKE context needed to derive response encryption keys
+type ResponseContext struct {
+	opener hpke.Opener
+	suite  hpke.Suite
 }
 
 // WriteHeader captures the status code and delegates to the underlying ResponseWriter
@@ -171,26 +177,49 @@ func (r *StreamingEncryptReader) Close() error {
 	return nil
 }
 
-// EncryptRequest creates a streaming encryption reader for the request body
-func (i *Identity) EncryptRequest(req *http.Request, recipientPubKey []byte) error {
+// RequestContext holds the HPKE context needed to derive response decryption keys
+type RequestContext struct {
+	sealer hpke.Sealer
+	suite  hpke.Suite
+}
+
+// NewResponseDecrypter creates an opener for decrypting the response using a key
+// derived from the request's HPKE context via the Export interface.
+func (rc *RequestContext) NewResponseDecrypter() (*exportedOpener, error) {
+	_, _, aeadID := rc.suite.Params()
+	keyLen := aeadID.KeySize()
+	nonceLen := aeadID.NonceSize()
+
+	exportLen := keyLen + nonceLen
+	exported := rc.sealer.Export(protocol.ResponseExportContext, exportLen)
+	responseKey := exported[:keyLen]
+	responseNonce := exported[keyLen:]
+
+	return newExportedOpener(responseKey, responseNonce)
+}
+
+// EncryptRequest creates a streaming encryption reader for the request body.
+// Returns a RequestContext that must be used to decrypt the response.
+// Returns an error if the request has no body (EHBP requires a body for bidirectional encryption).
+func (i *Identity) EncryptRequest(req *http.Request, recipientPubKey []byte) (*RequestContext, error) {
 	if req.Body == nil || req.ContentLength == 0 {
-		return nil // Nothing to encrypt
+		return nil, fmt.Errorf("EHBP requires a request body")
 	}
 
 	// Set up encryption
 	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
 	if err != nil {
-		return fmt.Errorf("invalid recipient public key: %w", err)
+		return nil, fmt.Errorf("invalid recipient public key: %w", err)
 	}
 
 	sender, err := i.Suite().NewSender(pk, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create sender: %w", err)
+		return nil, fmt.Errorf("failed to create sender: %w", err)
 	}
 
 	encapKey, sealer, err := sender.Setup(rand.Reader)
 	if err != nil {
-		return fmt.Errorf("failed to setup encryption: %w", err)
+		return nil, fmt.Errorf("failed to setup encryption: %w", err)
 	}
 
 	streamingReader := &StreamingEncryptReader{
@@ -203,23 +232,22 @@ func (i *Identity) EncryptRequest(req *http.Request, recipientPubKey []byte) err
 	req.Body = streamingReader
 	req.ContentLength = -1 // Unknown length
 
-	req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(i.MarshalPublicKey()))
 	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 	req.Header.Set("Transfer-Encoding", "chunked")
 
-	return nil
+	return &RequestContext{sealer: sealer, suite: i.suite}, nil
 }
 
 // StreamingDecryptReader wraps an io.Reader for streaming decryption
 type StreamingDecryptReader struct {
 	reader io.Reader
-	opener hpke.Opener
+	opener Opener
 	buffer []byte
 	eof    bool
 }
 
 // NewStreamingDecryptReader creates a new streaming decrypt reader
-func NewStreamingDecryptReader(reader io.Reader, opener hpke.Opener) *StreamingDecryptReader {
+func NewStreamingDecryptReader(reader io.Reader, opener Opener) *StreamingDecryptReader {
 	return &StreamingDecryptReader{
 		reader: reader,
 		opener: opener,
@@ -289,31 +317,30 @@ func (r *StreamingDecryptReader) Close() error {
 }
 
 // DecryptRequest creates a streaming decryption reader for the request body
-func (i *Identity) DecryptRequest(req *http.Request) error {
-	if req.Body == nil || req.Body == http.NoBody {
-		return nil // Nothing to decrypt
-	}
-
-	// Get encryption headers
-	clientPubKeyHex := req.Header.Get(protocol.ClientPublicKeyHeader)
+// and returns a ResponseContext that must be used to encrypt the response.
+func (i *Identity) DecryptRequest(req *http.Request) (*ResponseContext, error) {
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
-
-	if clientPubKeyHex == "" || encapKeyHex == "" {
-		return NewClientError(fmt.Errorf("missing encryption headers"))
+	if encapKeyHex == "" {
+		return nil, NewClientError(fmt.Errorf("missing %s header", protocol.EncapsulatedKeyHeader))
 	}
 
-	// Decrypt
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil, NewClientError(fmt.Errorf("request body required for encrypted requests"))
+	}
+
 	encapKey, err := hex.DecodeString(encapKeyHex)
 	if err != nil {
-		return NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
+		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
 	}
+
 	receiver, err := i.Suite().NewReceiver(i.sk, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create receiver: %w", err)
+		return nil, fmt.Errorf("failed to create receiver: %w", err)
 	}
+
 	opener, err := receiver.Setup(encapKey)
 	if err != nil {
-		return NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
+		return nil, NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
 	}
 
 	streamingReader := &StreamingDecryptReader{
@@ -326,31 +353,31 @@ func (i *Identity) DecryptRequest(req *http.Request) error {
 	req.Body = streamingReader
 	req.ContentLength = -1 // Unknown length for streaming
 
-	return nil
+	return &ResponseContext{opener: opener, suite: i.suite}, nil
 }
 
-// SetupResponseEncryption prepares an encrypted response writer for streaming encryption
-func (i *Identity) SetupResponseEncryption(w http.ResponseWriter, clientPubKeyHex string) (*EncryptedResponseWriter, error) {
-	clientPubKeyBytes, err := hex.DecodeString(clientPubKeyHex)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
+// SetupResponseEncryption prepares an encrypted response writer using a key derived
+// from the request's HPKE context via the Export interface.
+func (i *Identity) SetupResponseEncryption(w http.ResponseWriter, reqCtx *ResponseContext) (*EncryptedResponseWriter, error) {
+	if reqCtx == nil {
+		return nil, fmt.Errorf("response context required")
 	}
 
-	clientPubKey, err := i.KEMScheme().UnmarshalBinaryPublicKey(clientPubKeyBytes)
+	// Derive response key and nonce from the request's HPKE context
+	_, _, aeadID := reqCtx.suite.Params()
+	keyLen := aeadID.KeySize()
+	nonceLen := aeadID.NonceSize()
+
+	exportLen := keyLen + nonceLen
+	exported := reqCtx.opener.Export(protocol.ResponseExportContext, exportLen)
+	responseKey := exported[:keyLen]
+	responseNonce := exported[keyLen:]
+
+	sealer, err := newExportedSealer(responseKey, responseNonce)
 	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid client public key: %w", err))
+		return nil, fmt.Errorf("failed to create response sealer: %w", err)
 	}
 
-	sender, err := i.Suite().NewSender(clientPubKey, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption context: %w", err)
-	}
-	encapKey, sealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to setup encryption: %w", err)
-	}
-
-	w.Header().Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.Header().Del("Content-Length")
 

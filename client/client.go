@@ -2,7 +2,6 @@ package client
 
 import (
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,18 +78,16 @@ func (t *Transport) ServerIdentity() *identity.Identity {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Create a copy of the request to avoid modifying the original
+	if req.Body == nil || req.ContentLength == 0 {
+		return nil, fmt.Errorf("EHBP requires a request body; GET requests are not supported")
+	}
+
 	newReq := req.Clone(req.Context())
 
-	// Encrypt request body using streaming encryption
-	if newReq.Body != nil {
-		serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
-		if err := t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes); err != nil {
-			return nil, fmt.Errorf("failed to encrypt request: %v", err)
-		}
-	} else {
-		// EncryptRequest will set the client public key header above if we have something to encrypt
-		newReq.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(t.clientIdentity.MarshalPublicKey()))
+	serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
+	reqCtx, err := t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
 
 	resp, err := t.httpClient.Do(newReq)
@@ -98,27 +95,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to make request: %v", err)
 	}
 
-	encapKeyHeader := resp.Header.Get(protocol.EncapsulatedKeyHeader)
-	if encapKeyHeader == "" {
-		return nil, fmt.Errorf("missing encapsulated key header")
-	}
-
-	serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+	// Derive response decryption key from request context
+	opener, err := reqCtx.NewResponseDecrypter()
 	if err != nil {
 		resp.Body.Close()
-		return nil, fmt.Errorf("failed to decode encapsulated key: %v", err)
-	}
-
-	// Decrypt
-	receiver, err := t.clientIdentity.Suite().NewReceiver(t.clientIdentity.PrivateKey(), nil)
-	if err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to create receiver: %v", err)
-	}
-	opener, err := receiver.Setup(serverEncapKey)
-	if err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to setup decryption: %v", err)
+		return nil, fmt.Errorf("failed to create response decryptor: %v", err)
 	}
 
 	resp.Body = identity.NewStreamingDecryptReader(resp.Body, opener)
