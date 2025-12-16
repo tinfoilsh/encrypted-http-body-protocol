@@ -22,7 +22,7 @@ describe('Transport', () => {
     assert(transport instanceof Transport, 'Should create transport instance');
   });
 
-  it('should encrypt and decrypt request', async () => {
+  it('should encrypt request with body', async () => {
     const serverPublicKey = serverIdentity.getPublicKey();
     const originalBody = new TextEncoder().encode('Hello, World!');
     const request = new Request('http://localhost:8080/test', {
@@ -30,29 +30,31 @@ describe('Transport', () => {
       body: originalBody
     });
 
-    const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
-    
-    // Check that headers are set
-    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
+    const { request: encryptedRequest, context } = await clientIdentity.encryptRequest(request, serverPublicKey);
+
+    // Check that encapsulated key header is set
     assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
-    
+
     // Check that body is encrypted (different from original)
     const encryptedBody = await encryptedRequest.arrayBuffer();
     assert(encryptedBody.byteLength > 0, 'Encrypted body should not be empty');
     assert(encryptedBody.byteLength !== originalBody.length, 'Encrypted body should have different length');
+
+    // Context should be returned for response decryption
+    assert(context.senderContext, 'Request context should contain sender context');
   });
 
-  it('should handle request without body', async () => {
+  it('should reject request without body', async () => {
     const serverPublicKey = serverIdentity.getPublicKey();
     const request = new Request('http://localhost:8080/test', {
       method: 'GET'
     });
 
-    const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
-    
-    // Check that only client public key header is set
-    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
-    assert(!encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should not be set for empty body');
+    await assert.rejects(
+      () => clientIdentity.encryptRequest(request, serverPublicKey),
+      { message: 'EHBP requires a request body' },
+      'Should reject requests without a body'
+    );
   });
 
   it('should connect to actual server and POST to /secure endpoint', async (t) => {

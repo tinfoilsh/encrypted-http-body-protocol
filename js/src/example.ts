@@ -22,22 +22,7 @@ async function main() {
     const transport = await createTransport(serverURL, clientIdentity);
     console.log('Transport created successfully');
 
-    // Example 1: GET request to secure endpoint
-    console.log('\n--- GET Request ---');
-    try {
-      const getResponse = await transport.get(`${serverURL}/secure`);
-      console.log('GET Response status:', getResponse.status);
-      if (getResponse.ok) {
-        const getData = await getResponse.text();
-        console.log('GET Response:', getData);
-      } else {
-        console.log('GET Request failed with status:', getResponse.status);
-      }
-    } catch (error) {
-      console.log('GET Request failed:', error instanceof Error ? error.message : String(error));
-    }
-
-    // Example 2: POST request with JSON data
+    // Example 1: POST request with text
     console.log('\n--- POST Request ---');
     try {
       const postData = { message: 'Hello from JavaScript client!', timestamp: new Date().toISOString() };
@@ -77,10 +62,10 @@ async function main() {
       console.log('PUT Request failed:', error instanceof Error ? error.message : String(error));
     }
 
-    // Example 4: Streaming request
+    // Example 4: Streaming request (POST with body to stream endpoint)
     console.log('\n--- Streaming Request ---');
     try {
-      const streamResponse = await transport.get(`${serverURL}/stream`);
+      const streamResponse = await transport.post(`${serverURL}/stream`, 'stream request');
       console.log('Stream Response status:', streamResponse.status);
       if (streamResponse.ok) {
         console.log('Streaming response (should show numbers 1-20):');
@@ -88,16 +73,16 @@ async function main() {
         if (reader) {
           const decoder = new TextDecoder();
           let chunkCount = 0;
-          
+
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
+
             const text = decoder.decode(value, { stream: true });
             process.stdout.write(text);
             chunkCount++;
           }
-          
+
           console.log(`\nStream completed with ${chunkCount} chunks`);
         } else {
           console.log('No readable stream available');

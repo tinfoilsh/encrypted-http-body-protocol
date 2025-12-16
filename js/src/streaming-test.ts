@@ -20,7 +20,7 @@ async function streamingTest() {
 
     // Test 1: Basic streaming request
     console.log('\n--- Test 1: Basic Streaming ---');
-    const streamResponse = await transport.get(`${serverURL}/stream`);
+    const streamResponse = await transport.post(`${serverURL}/stream`, 'stream request');
     console.log('Stream request sent, status:', streamResponse.status);
 
     if (streamResponse.ok) {
@@ -53,7 +53,7 @@ async function streamingTest() {
     for (let i = 0; i < concurrentStreams; i++) {
       streamPromises.push(
         (async (streamId: number) => {
-          const response = await transport.get(`${serverURL}/stream`);
+          const response = await transport.post(`${serverURL}/stream`, `stream ${streamId}`);
           if (response.ok && response.body) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -84,7 +84,7 @@ async function streamingTest() {
     // Test 3: Large data streaming (if server supports it)
     console.log('\n--- Test 3: Large Data Stream ---');
     try {
-      const largeStreamResponse = await transport.get(`${serverURL}/stream`);
+      const largeStreamResponse = await transport.post(`${serverURL}/stream`, 'large stream request');
       if (largeStreamResponse.ok) {
         console.log('Reading large data stream...');
         const reader = largeStreamResponse.body?.getReader();
