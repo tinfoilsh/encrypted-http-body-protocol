@@ -615,3 +615,197 @@ func (i *Identity) SetupResponseContextForEmptyBody(encapKeyHex string) (*Respon
 		RequestEnc: encapKey,
 	}, nil
 }
+
+// =============================================================================
+// EHBP v2: Client-side request encryption and response decryption
+// =============================================================================
+
+// RequestContext holds the HPKE context needed for response decryption.
+// This is returned by EncryptRequestWithContext and passed to DecryptResponseWithContext.
+type RequestContext struct {
+	Sealer     hpke.Sealer // The sealer from request encryption (has Export method)
+	RequestEnc []byte      // The encapsulated key we sent
+}
+
+// EncryptRequestWithContext encrypts the request body and returns the HPKE context
+// needed for response decryption. This is the v2 replacement for EncryptRequest.
+//
+// Unlike the v1 EncryptRequest, this function:
+// - Does NOT set the ClientPublicKeyHeader (which was vulnerable to MitM)
+// - Returns a RequestContext that must be used to decrypt the response
+func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey []byte) (*RequestContext, error) {
+	// Set up encryption to recipient
+	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid recipient public key: %w", err)
+	}
+
+	sender, err := i.Suite().NewSender(pk, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sender: %w", err)
+	}
+
+	encapKey, sealer, err := sender.Setup(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup encryption: %w", err)
+	}
+
+	// Set the request enc header (NOT client public key!)
+	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
+	req.Header.Set("Transfer-Encoding", "chunked")
+
+	// If there's a body, wrap it with streaming encryption
+	if req.Body != nil && req.ContentLength != 0 {
+		streamingReader := &StreamingEncryptReader{
+			reader: req.Body,
+			sealer: sealer,
+			buffer: nil,
+			eof:    false,
+		}
+		req.Body = streamingReader
+		req.ContentLength = -1
+	}
+
+	return &RequestContext{
+		Sealer:     sealer,
+		RequestEnc: encapKey,
+	}, nil
+}
+
+// DecryptResponseWithContext decrypts a response using keys derived from
+// the request's HPKE context. This is the v2 replacement for the old response decryption.
+//
+// The response decryption keys are derived using the same process as the server:
+//  1. Export a secret from the HPKE context using label "ehbp response"
+//  2. Read the response nonce from the Ehbp-Response-Nonce header
+//  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
+func (i *Identity) DecryptResponseWithContext(
+	resp *http.Response,
+	reqCtx *RequestContext,
+) error {
+	if reqCtx == nil {
+		return fmt.Errorf("request context is nil")
+	}
+
+	// Get response nonce from header
+	responseNonceHex := resp.Header.Get(protocol.ResponseNonceHeader)
+	if responseNonceHex == "" {
+		return fmt.Errorf("missing %s header", protocol.ResponseNonceHeader)
+	}
+
+	responseNonce, err := hex.DecodeString(responseNonceHex)
+	if err != nil {
+		return fmt.Errorf("invalid response nonce: %w", err)
+	}
+
+	if len(responseNonce) != ResponseNonceLength {
+		return fmt.Errorf("invalid response nonce length: expected %d, got %d",
+			ResponseNonceLength, len(responseNonce))
+	}
+
+	// Export secret from request context
+	exportedSecret := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+
+	// Derive response keys
+	km, err := DeriveResponseKeys(exportedSecret, reqCtx.RequestEnc, responseNonce)
+	if err != nil {
+		return fmt.Errorf("failed to derive response keys: %w", err)
+	}
+
+	// Create AEAD for decryption
+	aead, err := km.NewResponseAEAD()
+	if err != nil {
+		return fmt.Errorf("failed to create AEAD: %w", err)
+	}
+
+	// Wrap response body with streaming decryption
+	resp.Body = &DerivedStreamingDecryptReader{
+		reader:    resp.Body,
+		aead:      aead,
+		nonceBase: km.NonceBase,
+		seq:       0,
+		buffer:    nil,
+		eof:       false,
+	}
+	resp.ContentLength = -1
+
+	return nil
+}
+
+// DerivedStreamingDecryptReader decrypts response chunks using derived keys.
+// It implements io.ReadCloser for use as an http.Response.Body.
+type DerivedStreamingDecryptReader struct {
+	reader    io.Reader
+	aead      cipher.AEAD
+	nonceBase []byte
+	seq       uint64
+	buffer    []byte
+	eof       bool
+}
+
+// Read implements io.Reader, decrypting chunks as they are read.
+func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
+	if r.eof {
+		return 0, io.EOF
+	}
+
+	// Return buffered data first
+	if len(r.buffer) > 0 {
+		n = copy(p, r.buffer)
+		r.buffer = r.buffer[n:]
+		return n, nil
+	}
+
+	// Read chunk length (4 bytes)
+	chunkLenBytes := make([]byte, 4)
+	_, err = io.ReadFull(r.reader, chunkLenBytes)
+	if err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			r.eof = true
+			return 0, io.EOF
+		}
+		return 0, fmt.Errorf("failed to read chunk length: %w", err)
+	}
+
+	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
+	if chunkLen == 0 {
+		return r.Read(p) // Skip empty chunks
+	}
+
+	// Read encrypted chunk
+	encryptedChunk := make([]byte, chunkLen)
+	_, err = io.ReadFull(r.reader, encryptedChunk)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
+	}
+
+	// Compute nonce for this chunk: nonceBase XOR seq
+	nonce := make([]byte, AESGCMNonceLength)
+	copy(nonce, r.nonceBase)
+	for i := 0; i < 8; i++ {
+		nonce[AESGCMNonceLength-1-i] ^= byte(r.seq >> (i * 8))
+	}
+	r.seq++
+
+	// Decrypt chunk
+	decryptedChunk, err := r.aead.Open(nil, nonce, encryptedChunk, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
+	}
+
+	// Return as much as fits, buffer the rest
+	n = copy(p, decryptedChunk)
+	if n < len(decryptedChunk) {
+		r.buffer = decryptedChunk[n:]
+	}
+
+	return n, nil
+}
+
+// Close implements io.Closer.
+func (r *DerivedStreamingDecryptReader) Close() error {
+	if closer, ok := r.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}

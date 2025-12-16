@@ -2,7 +2,6 @@ package client
 
 import (
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,9 @@ import (
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
+// Transport implements http.RoundTripper with EHBP v2 encryption.
+// It encrypts request bodies and decrypts response bodies using
+// HPKE with derived response keys to prevent MitM attacks.
 type Transport struct {
 	clientIdentity *identity.Identity
 	serverIdentity *identity.Identity
@@ -20,6 +22,8 @@ type Transport struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
+// NewTransport creates a new Transport with EHBP v2 encryption.
+// It fetches the server's public key configuration from the well-known endpoint.
 func NewTransport(server string, clientIdentity *identity.Identity, insecureSkipVerify bool) (*Transport, error) {
 	t := &Transport{
 		clientIdentity: clientIdentity,
@@ -74,55 +78,49 @@ func (t *Transport) syncServerPublicKey(server string) error {
 	return nil
 }
 
+// ServerIdentity returns the server's public identity configuration.
 func (t *Transport) ServerIdentity() *identity.Identity {
 	return t.serverIdentity
 }
 
+// RoundTrip implements http.RoundTripper with EHBP v2 encryption.
+//
+// The v2 protocol:
+//  1. Encrypts the request body to the server's public key
+//  2. Stores the HPKE sealer context for response decryption
+//  3. Derives response decryption keys from the request's HPKE context
+//  4. Decrypts the response using the derived keys
+//
+// This ensures response encryption is bound to the specific request,
+// preventing MitM attacks where an attacker could intercept responses.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
 
-	// Encrypt request body using streaming encryption
-	if newReq.Body != nil {
-		serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
-		if err := t.clientIdentity.EncryptRequest(newReq, serverPubKeyBytes); err != nil {
-			return nil, fmt.Errorf("failed to encrypt request: %v", err)
-		}
-	} else {
-		// EncryptRequest will set the client public key header above if we have something to encrypt
-		newReq.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(t.clientIdentity.MarshalPublicKey()))
+	serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
+
+	// Encrypt request and get context for response decryption (v2)
+	reqCtx, err := t.clientIdentity.EncryptRequestWithContext(newReq, serverPubKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
 
+	// Make the HTTP request
 	resp, err := t.httpClient.Do(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %v", err)
 	}
 
-	encapKeyHeader := resp.Header.Get(protocol.EncapsulatedKeyHeader)
-	if encapKeyHeader == "" {
-		return nil, fmt.Errorf("missing encapsulated key header")
+	// Check for plaintext fallback
+	if resp.Header.Get(protocol.FallbackHeader) == "1" {
+		return resp, nil
 	}
 
-	serverEncapKey, err := hex.DecodeString(encapKeyHeader)
-	if err != nil {
+	// Decrypt response using the request context (v2)
+	if err := t.clientIdentity.DecryptResponseWithContext(resp, reqCtx); err != nil {
 		resp.Body.Close()
-		return nil, fmt.Errorf("failed to decode encapsulated key: %v", err)
+		return nil, fmt.Errorf("failed to decrypt response: %v", err)
 	}
-
-	// Decrypt
-	receiver, err := t.clientIdentity.Suite().NewReceiver(t.clientIdentity.PrivateKey(), nil)
-	if err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to create receiver: %v", err)
-	}
-	opener, err := receiver.Setup(serverEncapKey)
-	if err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to setup decryption: %v", err)
-	}
-
-	resp.Body = identity.NewStreamingDecryptReader(resp.Body, opener)
-	resp.ContentLength = -1 // Unknown length for streaming
 
 	return resp, nil
 }
