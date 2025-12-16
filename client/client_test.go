@@ -20,7 +20,9 @@ func TestSecureClient(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	// Use v1 middleware since the client still uses v1 protocol
+	// The client will be updated to v2 in PR #4
+	middleware := serverIdentity.MiddlewareV1(false)
 
 	mux := http.NewServeMux()
 
