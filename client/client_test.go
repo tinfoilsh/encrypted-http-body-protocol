@@ -83,7 +83,7 @@ func TestSecureClient(t *testing.T) {
 	})
 
 	t.Run("streaming endpoint", func(t *testing.T) {
-		req, err := http.NewRequest("GET", server.URL+"/stream", nil)
+		req, err := http.NewRequest("POST", server.URL+"/stream", bytes.NewBufferString("trigger stream"))
 		assert.NoError(t, err)
 
 		resp, err := httpClient.Do(req)

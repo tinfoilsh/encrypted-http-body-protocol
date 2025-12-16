@@ -25,11 +25,10 @@ func TestStreamingEncryption(t *testing.T) {
 		originalLength := req.ContentLength
 
 		// Encrypt
-		err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
 		require.NoError(t, err)
 
 		// Verify headers are set
-		assert.NotEmpty(t, req.Header.Get(protocol.ClientPublicKeyHeader))
 		assert.NotEmpty(t, req.Header.Get(protocol.EncapsulatedKeyHeader))
 		assert.Equal(t, "chunked", req.Header.Get("Transfer-Encoding"))
 		assert.Equal(t, int64(-1), req.ContentLength) // Unknown length for streaming
@@ -55,10 +54,10 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "Hello, streaming world!"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
 		require.NoError(t, err)
 
-		err = serverIdentity.DecryptRequest(req)
+		_, err = serverIdentity.DecryptRequest(req)
 		require.NoError(t, err)
 
 		decryptedBody, err := io.ReadAll(req.Body)
@@ -67,13 +66,12 @@ func TestStreamingEncryption(t *testing.T) {
 		assert.Equal(t, testData, string(decryptedBody))
 	})
 
-	t.Run("streaming response encryption bad client pubkey", func(t *testing.T) {
+	t.Run("response encryption requires context", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		clientPubKeyHex := "deadbeef"
 
-		_, err := serverIdentity.SetupResponseEncryption(w, clientPubKeyHex)
+		_, err := serverIdentity.SetupResponseEncryption(w, nil)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid client public key")
+		assert.Contains(t, err.Error(), "response context required")
 	})
 
 	t.Run("chunked response decryption", func(t *testing.T) {
@@ -112,7 +110,7 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "This is a test of partial reads with streaming encryption"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
 		require.NoError(t, err)
 
 		// Read in very small chunks to test partial read handling
@@ -140,17 +138,18 @@ func TestStreamingReaderEdgeCases(t *testing.T) {
 	clientIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	t.Run("empty request body", func(t *testing.T) {
+	t.Run("empty request body requires error", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(""))
-		err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
-		require.NoError(t, err)
-		assert.Equal(t, int64(0), req.ContentLength)
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "EHBP requires a request body")
 	})
 
-	t.Run("nil request body", func(t *testing.T) {
+	t.Run("nil request body requires error", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", nil)
-		err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
-		require.NoError(t, err)
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "EHBP requires a request body")
 	})
 
 	t.Run("decrypt empty encrypted stream", func(t *testing.T) {

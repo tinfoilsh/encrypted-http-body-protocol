@@ -44,7 +44,7 @@ func TestMiddleware(t *testing.T) {
 
 		// Encrypt the request using the new streaming method
 		serverPubKeyBytes := serverIdentity.MarshalPublicKey()
-		err := clientIdentity.EncryptRequest(req, serverPubKeyBytes)
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverPubKeyBytes)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
@@ -52,55 +52,28 @@ func TestMiddleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		// Verify response has encapsulated key header
-		encapKeyHeader := w.Header().Get(protocol.EncapsulatedKeyHeader)
-		assert.NotEmpty(t, encapKeyHeader)
-
-		// Decrypt response using chunked format
-		serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+		// Decrypt response using key derived from request context
+		opener, err := reqCtx.NewResponseDecrypter()
 		require.NoError(t, err)
 
-		decryptedResponse, err := clientIdentity.DecryptChunkedResponse(w.Body.Bytes(), serverEncapKey)
+		decryptReader := NewStreamingDecryptReader(bytes.NewReader(w.Body.Bytes()), opener)
+		decryptedResponse, err := io.ReadAll(decryptReader)
 		require.NoError(t, err)
 		assert.Equal(t, "Hello, test message", string(decryptedResponse))
 	})
 
-	t.Run("missing client public key header", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-		w := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "missing client public key")
-	})
-
-	t.Run("invalid client public key", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-		req.Header.Set(protocol.ClientPublicKeyHeader, "invalid-hex")
-		req.Header.Set(protocol.EncapsulatedKeyHeader, "deadbeef")
-		w := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "failed to decrypt request")
-	})
-
 	t.Run("missing encapsulated key header", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
 		w := httptest.NewRecorder()
 
 		wrapped.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "failed to decrypt request")
+		assert.Contains(t, w.Body.String(), "encrypted request body required")
 	})
 
 	t.Run("invalid encapsulated key", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
 		req.Header.Set(protocol.EncapsulatedKeyHeader, "invalid-hex")
 		w := httptest.NewRecorder()
 
@@ -110,15 +83,15 @@ func TestMiddleware(t *testing.T) {
 		assert.Contains(t, w.Body.String(), "failed to decrypt request")
 	})
 
-	t.Run("empty request body", func(t *testing.T) {
-		// Send request with no body
+	t.Run("empty request body rejected", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/test", nil)
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
+		req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString([]byte("some-key")))
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
 
-		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "failed to decrypt request")
 	})
 }
 
@@ -174,15 +147,10 @@ func TestStreamingResponseWriter(t *testing.T) {
 	wrapped := middleware(streamHandler)
 
 	t.Run("streaming response", func(t *testing.T) {
-		// Set up encryption from the client side
-		sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+		// Create an encrypted request
+		req := httptest.NewRequest("POST", "/stream", strings.NewReader("trigger stream"))
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
 		require.NoError(t, err)
-		clientEncapKey, _, err := sender.Setup(nil)
-		require.NoError(t, err)
-
-		req := httptest.NewRequest("GET", "/stream", nil)
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
-		req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(clientEncapKey))
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
@@ -191,16 +159,12 @@ func TestStreamingResponseWriter(t *testing.T) {
 		assert.Equal(t, "chunked", w.Header().Get("Transfer-Encoding"))
 		assert.Empty(t, w.Header().Get("Content-Length"))
 
-		// Verify response can be decrypted
-		encapKeyHeader := w.Header().Get(protocol.EncapsulatedKeyHeader)
-		assert.NotEmpty(t, encapKeyHeader)
-
-		serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+		// Decrypt response using key derived from request context
+		opener, err := reqCtx.NewResponseDecrypter()
 		require.NoError(t, err)
 
-		// Decrypt chunked response
-		responseBody := w.Body.Bytes()
-		decryptedResponse, err := clientIdentity.DecryptChunkedResponse(responseBody, serverEncapKey)
+		decryptReader := NewStreamingDecryptReader(bytes.NewReader(w.Body.Bytes()), opener)
+		decryptedResponse, err := io.ReadAll(decryptReader)
 		require.NoError(t, err)
 
 		expectedContent := "chunk 1\nchunk 2\nchunk 3\n"
@@ -244,22 +208,21 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(chunkHandler)
 
-		req := httptest.NewRequest("GET", "/chunks", nil)
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
+		req := httptest.NewRequest("POST", "/chunks", strings.NewReader("trigger"))
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		// Decrypt response
-		encapKeyHeader := w.Header().Get(protocol.EncapsulatedKeyHeader)
-		assert.NotEmpty(t, encapKeyHeader)
-
-		serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+		// Decrypt response using key derived from request context
+		opener, err := reqCtx.NewResponseDecrypter()
 		require.NoError(t, err)
 
-		decryptedResponse, err := clientIdentity.DecryptChunkedResponse(w.Body.Bytes(), serverEncapKey)
+		decryptReader := NewStreamingDecryptReader(bytes.NewReader(w.Body.Bytes()), opener)
+		decryptedResponse, err := io.ReadAll(decryptReader)
 		require.NoError(t, err)
 		assert.Equal(t, "chunk1|chunk2|chunk3", string(decryptedResponse))
 	})
@@ -273,22 +236,21 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(emptyHandler)
 
-		req := httptest.NewRequest("GET", "/empty", nil)
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
+		req := httptest.NewRequest("POST", "/empty", strings.NewReader("trigger"))
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		// Decrypt response
-		encapKeyHeader := w.Header().Get(protocol.EncapsulatedKeyHeader)
-		assert.NotEmpty(t, encapKeyHeader)
-
-		serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+		// Decrypt response using key derived from request context
+		opener, err := reqCtx.NewResponseDecrypter()
 		require.NoError(t, err)
 
-		decryptedResponse, err := clientIdentity.DecryptChunkedResponse(w.Body.Bytes(), serverEncapKey)
+		decryptReader := NewStreamingDecryptReader(bytes.NewReader(w.Body.Bytes()), opener)
+		decryptedResponse, err := io.ReadAll(decryptReader)
 		require.NoError(t, err)
 		assert.Equal(t, "after empty", string(decryptedResponse))
 	})
@@ -302,22 +264,21 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(largeHandler)
 
-		req := httptest.NewRequest("GET", "/large", nil)
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
+		req := httptest.NewRequest("POST", "/large", strings.NewReader("trigger"))
+		reqCtx, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		// Decrypt response
-		encapKeyHeader := w.Header().Get(protocol.EncapsulatedKeyHeader)
-		assert.NotEmpty(t, encapKeyHeader)
-
-		serverEncapKey, err := hex.DecodeString(encapKeyHeader)
+		// Decrypt response using key derived from request context
+		opener, err := reqCtx.NewResponseDecrypter()
 		require.NoError(t, err)
 
-		decryptedResponse, err := clientIdentity.DecryptChunkedResponse(w.Body.Bytes(), serverEncapKey)
+		decryptReader := NewStreamingDecryptReader(bytes.NewReader(w.Body.Bytes()), opener)
+		decryptedResponse, err := io.ReadAll(decryptReader)
 		require.NoError(t, err)
 		assert.Equal(t, largeData, string(decryptedResponse))
 	})
@@ -337,21 +298,11 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 
 	wrapped := middleware(testHandler)
 
-	// Set up encryption from the client side
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
-	require.NoError(b, err)
-	clientEncapKey, sealer, err := sender.Setup(nil)
-	require.NoError(b, err)
-
-	requestBody := []byte("benchmark test data")
-	encryptedBody, err := sealer.Seal(requestBody, nil)
-	require.NoError(b, err)
-
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest("POST", "/test", bytes.NewBuffer(encryptedBody))
-		req.Header.Set(protocol.ClientPublicKeyHeader, hex.EncodeToString(clientIdentity.MarshalPublicKey()))
-		req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(clientEncapKey))
+		req := httptest.NewRequest("POST", "/test", strings.NewReader("benchmark test data"))
+		_, err := clientIdentity.EncryptRequest(req, serverIdentity.MarshalPublicKey())
+		require.NoError(b, err)
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
