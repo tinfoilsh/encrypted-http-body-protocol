@@ -330,6 +330,11 @@ export class Identity {
                   continue; // Empty chunk
                 }
 
+                if (chunkLength > PROTOCOL.MAX_CHUNK_SIZE) {
+                  controller.error(new Error(`Chunk size ${chunkLength} exceeds maximum ${PROTOCOL.MAX_CHUNK_SIZE}`));
+                  return;
+                }
+
                 // Check if we have the complete chunk
                 if (offset + chunkLength > buffer.length) {
                   // Not enough data yet, rewind offset and wait for more

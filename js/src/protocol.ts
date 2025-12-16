@@ -5,7 +5,8 @@ export const PROTOCOL = {
   ENCAPSULATED_KEY_HEADER: 'Ehbp-Encapsulated-Key',
   KEYS_MEDIA_TYPE: 'application/ohttp-keys',
   KEYS_PATH: '/.well-known/hpke-keys',
-  FALLBACK_HEADER: 'Ehbp-Fallback'
+  FALLBACK_HEADER: 'Ehbp-Fallback',
+  MAX_CHUNK_SIZE: 64 * 1024 * 1024 // 64MB limit to prevent memory exhaustion
 } as const;
 
 /**

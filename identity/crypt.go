@@ -285,6 +285,9 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 		// Empty chunk, try reading next chunk
 		return r.Read(p)
 	}
+	if chunkLen > protocol.MaxChunkSize {
+		return 0, NewClientError(fmt.Errorf("chunk size %d exceeds maximum %d", chunkLen, protocol.MaxChunkSize))
+	}
 
 	// Read encrypted chunk
 	encryptedChunk := make([]byte, chunkLen)
@@ -416,6 +419,9 @@ func (i *Identity) DecryptChunkedResponse(data []byte, encapKey []byte) ([]byte,
 
 		if chunkLen == 0 {
 			continue
+		}
+		if chunkLen > protocol.MaxChunkSize {
+			return nil, fmt.Errorf("chunk size %d exceeds maximum %d", chunkLen, protocol.MaxChunkSize)
 		}
 
 		// Read encrypted chunk data
