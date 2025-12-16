@@ -72,7 +72,7 @@ func testSecureEndpoint(httpClient *http.Client) {
 func testStreamEndpoint(httpClient *http.Client) {
 	log.Info("Testing streaming endpoint...")
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/stream", *serverURL), nil)
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/stream", *serverURL), bytes.NewBufferString("stream"))
 	if err != nil {
 		log.Fatalf("failed to create request: %v", err)
 	}
