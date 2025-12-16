@@ -269,46 +269,47 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 		return n, nil
 	}
 
-	// Read chunk length (4 bytes)
-	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			r.eof = true
-			return 0, io.EOF
+	for {
+		// Read chunk length (4 bytes)
+		chunkLenBytes := make([]byte, 4)
+		_, err = io.ReadFull(r.reader, chunkLenBytes)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				r.eof = true
+				return 0, io.EOF
+			}
+			return 0, fmt.Errorf("failed to read chunk length: %w", err)
 		}
-		return 0, fmt.Errorf("failed to read chunk length: %w", err)
-	}
 
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		// Empty chunk, try reading next chunk
-		return r.Read(p)
-	}
-	if chunkLen > protocol.MaxChunkSize {
-		return 0, NewClientError(fmt.Errorf("chunk size %d exceeds maximum %d", chunkLen, protocol.MaxChunkSize))
-	}
+		chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
+		if chunkLen == 0 {
+			continue
+		}
+		if chunkLen > protocol.MaxChunkSize {
+			return 0, NewClientError(fmt.Errorf("chunk size %d exceeds maximum %d", chunkLen, protocol.MaxChunkSize))
+		}
 
-	// Read encrypted chunk
-	encryptedChunk := make([]byte, chunkLen)
-	_, err = io.ReadFull(r.reader, encryptedChunk)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
-	}
+		// Read encrypted chunk
+		encryptedChunk := make([]byte, chunkLen)
+		_, err = io.ReadFull(r.reader, encryptedChunk)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
+		}
 
-	// Decrypt chunk
-	decryptedChunk, err := r.opener.Open(encryptedChunk, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
-	}
+		// Decrypt chunk
+		decryptedChunk, err := r.opener.Open(encryptedChunk, nil)
+		if err != nil {
+			return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
+		}
 
-	// Return as much as fits in p, buffer the rest
-	n = copy(p, decryptedChunk)
-	if n < len(decryptedChunk) {
-		r.buffer = decryptedChunk[n:]
-	}
+		// Return as much as fits in p, buffer the rest
+		n = copy(p, decryptedChunk)
+		if n < len(decryptedChunk) {
+			r.buffer = decryptedChunk[n:]
+		}
 
-	return n, nil
+		return n, nil
+	}
 }
 
 // Close implements io.Closer
