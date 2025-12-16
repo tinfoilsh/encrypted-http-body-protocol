@@ -1,5 +1,12 @@
-import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm } from '@hpke/core';
-import { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm, SenderContext } from '@hpke/core';
+import { PROTOCOL, HPKE_CONFIG, RESPONSE_ENCRYPTION } from './protocol.js';
+
+/**
+ * Request context holding the HPKE sender context for deriving response decryption keys
+ */
+export interface RequestContext {
+  senderContext: SenderContext;
+}
 
 /**
  * Identity class for managing HPKE key pairs and encryption/decryption
@@ -211,19 +218,15 @@ export class Identity {
   }
 
   /**
-   * Encrypt request body and set appropriate headers
+   * Encrypt request body and set appropriate headers.
+   * Returns both the encrypted request and a context needed to decrypt the response.
+   * @throws Error if request has no body (EHBP requires a body for bidirectional encryption)
    */
-  async encryptRequest(request: Request, serverPublicKey: CryptoKey): Promise<Request> {
+  async encryptRequest(request: Request, serverPublicKey: CryptoKey): Promise<{ request: Request; context: RequestContext }> {
     const body = await request.arrayBuffer();
+
     if (body.byteLength === 0) {
-      // No body to encrypt, just set client public key header
-      const headers = new Headers(request.headers);
-      headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.getPublicKeyHex());
-      return new Request(request.url, {
-        method: request.method,
-        headers,
-        body: null
-      });
+      throw new Error('EHBP requires a request body');
     }
 
     // Create sender for encryption
@@ -241,39 +244,59 @@ export class Identity {
     const chunkLength = new Uint8Array(4);
     const view = new DataView(chunkLength.buffer);
     view.setUint32(0, encrypted.byteLength, false); // Big-endian
-    
+
     const chunkedData = new Uint8Array(4 + encrypted.byteLength);
     chunkedData.set(chunkLength, 0);
     chunkedData.set(new Uint8Array(encrypted), 4);
 
     // Create new request with encrypted body and headers
     const headers = new Headers(request.headers);
-    headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.getPublicKeyHex());
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, Array.from(new Uint8Array(encapKey))
       .map(b => b.toString(16).padStart(2, '0'))
       .join(''));
 
-    return new Request(request.url, {
+    const encryptedRequest = new Request(request.url, {
       method: request.method,
       headers,
       body: chunkedData,
       duplex: 'half'
     } as RequestInit);
+
+    return {
+      request: encryptedRequest,
+      context: { senderContext: sender }
+    };
   }
 
   /**
-   * Decrypt response body
+   * Decrypt response body using key derived from the request context.
+   * Uses HPKE Export interface for bidirectional encryption (RFC 9180 Section 9.8).
    */
-  async decryptResponse(response: Response, serverEncapKey: Uint8Array): Promise<Response> {
+  async decryptResponse(response: Response, reqContext: RequestContext): Promise<Response> {
     if (!response.body) {
       return response;
     }
 
-    // Create receiver for decryption
-    const receiver = await this.suite.createRecipientContext({
-      recipientKey: this.privateKey,
-      enc: serverEncapKey.buffer as ArrayBuffer
-    });
+    // Derive response key and nonce from request context using Export
+    const exportLen = RESPONSE_ENCRYPTION.KEY_LENGTH + RESPONSE_ENCRYPTION.NONCE_LENGTH;
+    const exported = await reqContext.senderContext.export(
+      RESPONSE_ENCRYPTION.EXPORT_CONTEXT.buffer as ArrayBuffer,
+      exportLen
+    );
+    const exportedBytes = new Uint8Array(exported);
+    const responseKey = exportedBytes.slice(0, RESPONSE_ENCRYPTION.KEY_LENGTH);
+    const baseNonce = exportedBytes.slice(RESPONSE_ENCRYPTION.KEY_LENGTH);
+
+    // Import key for AES-GCM decryption
+    const aesKey = await crypto.subtle.importKey(
+      'raw',
+      responseKey,
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    );
+
+    let seq = 0n;
 
     // Create a readable stream that decrypts chunks as they arrive
     const decryptedStream = new ReadableStream({
@@ -297,9 +320,9 @@ export class Identity {
               // Process complete chunks
               while (offset + 4 <= buffer.length) {
                 // Read chunk length (4 bytes big-endian)
-                const chunkLength = (buffer[offset] << 24) | 
-                                  (buffer[offset + 1] << 16) | 
-                                  (buffer[offset + 2] << 8) | 
+                const chunkLength = (buffer[offset] << 24) |
+                                  (buffer[offset + 1] << 16) |
+                                  (buffer[offset + 2] << 8) |
                                   buffer[offset + 3];
                 offset += 4;
 
@@ -314,12 +337,25 @@ export class Identity {
                   break;
                 }
 
-                // Extract and decrypt the chunk
+                // Extract the encrypted chunk
                 const encryptedChunk = buffer.slice(offset, offset + chunkLength);
                 offset += chunkLength;
 
                 try {
-                  const decryptedChunk = await receiver.open(encryptedChunk.buffer);
+                  // Compute nonce: XOR base nonce with sequence number
+                  const nonce = new Uint8Array(baseNonce);
+                  let tempSeq = seq;
+                  for (let i = nonce.length - 1; i >= 0 && tempSeq > 0n; i--) {
+                    nonce[i] ^= Number(tempSeq & 0xffn);
+                    tempSeq >>= 8n;
+                  }
+                  seq++;
+
+                  const decryptedChunk = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: nonce },
+                    aesKey,
+                    encryptedChunk
+                  );
                   controller.enqueue(new Uint8Array(decryptedChunk));
                 } catch (error) {
                   controller.error(new Error(`Failed to decrypt chunk: ${error}`));

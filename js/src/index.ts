@@ -7,8 +7,9 @@
  */
 
 export { Identity } from './identity.js';
+export type { RequestContext } from './identity.js';
 export { Transport, createTransport } from './client.js';
-export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+export { PROTOCOL, HPKE_CONFIG, RESPONSE_ENCRYPTION } from './protocol.js';
 
 // Re-export commonly used types
 export type { CipherSuite } from '@hpke/core';

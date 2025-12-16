@@ -1,4 +1,4 @@
-import { Identity } from './identity.js';
+import { Identity, RequestContext } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 
 /**
@@ -68,7 +68,9 @@ export class Transport {
   }
 
   /**
-   * Make an encrypted HTTP request
+   * Make an encrypted HTTP request.
+   * EHBP requires a request body for bidirectional encryption.
+   * @throws Error if request has no body (e.g., GET requests)
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     // Skip EHBP for non-network URLs (data:, blob:)
@@ -79,15 +81,18 @@ export class Transport {
 
     // Extract body from init or original request before creating Request object
     let requestBody: BodyInit | null = null;
-    
+
     if (input instanceof Request) {
-      // If input is a Request, extract its body
       if (input.body) {
         requestBody = await input.arrayBuffer();
       }
     } else {
-      // If input is URL/string, get body from init
       requestBody = init?.body || null;
+    }
+
+    // EHBP requires a body for bidirectional encryption
+    if (requestBody === null || requestBody === undefined) {
+      throw new Error('EHBP requires a request body; GET requests are not supported');
     }
 
     // Create the URL with correct host
@@ -101,34 +106,24 @@ export class Transport {
       headers = input.headers;
     } else {
       url = new URL(input);
-      method = init?.method || 'GET';
+      method = init?.method || 'POST';
       headers = init?.headers || {};
     }
 
     url.host = this.serverHost;
-    
-    let request = new Request(url.toString(), {
+
+    const baseRequest = new Request(url.toString(), {
       method,
       headers,
       body: requestBody,
       duplex: 'half'
     } as RequestInit);
 
-    // Encrypt request body if present (check the original requestBody, not request.body)
-    if (requestBody !== null && requestBody !== undefined) {
-      request = await this.clientIdentity.encryptRequest(request, this.serverPublicKey);
-    } else {
-      // No body, just set client public key header
-      const headers = new Headers(request.headers);
-      headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.clientIdentity.getPublicKeyHex());
-      request = new Request(request.url, {
-        method: request.method,
-        headers,
-        body: null
-      });
-    }
+    const { request, context: reqContext } = await this.clientIdentity.encryptRequest(
+      baseRequest,
+      this.serverPublicKey
+    );
 
-    // Make the request
     const response = await fetch(request);
 
     if (!response.ok) {
@@ -141,52 +136,29 @@ export class Transport {
       return response;
     }
 
-    // Check for encapsulated key header
-    const encapKeyHeader = response.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
-    if (!encapKeyHeader) {
-      throw new Error(`Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} encapsulated key header`);
-    }
-
-    // Validate hex encoding
-    if (!/^[0-9a-fA-F]+$/.test(encapKeyHeader) || encapKeyHeader.length % 2 !== 0) {
-      throw new Error(`Invalid ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header: must be valid hex string with even length`);
-    }
-
-    // Decode encapsulated key
-    const serverEncapKey = new Uint8Array(
-      encapKeyHeader.match(/.{2}/g)!.map(byte => parseInt(byte, 16))
-    );
-
-    // Decrypt response
-    return await this.clientIdentity.decryptResponse(response, serverEncapKey);
-  }
-
-  /**
-   * Convenience method for GET requests
-   */
-  async get(url: string | URL, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'GET' });
+    // Decrypt response using key derived from request context
+    return await this.clientIdentity.decryptResponse(response, reqContext);
   }
 
   /**
    * Convenience method for POST requests
    */
-  async post(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> {
+  async post(url: string | URL, body: BodyInit, init?: RequestInit): Promise<Response> {
     return this.request(url, { ...init, method: 'POST', body });
   }
 
   /**
    * Convenience method for PUT requests
    */
-  async put(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> {
+  async put(url: string | URL, body: BodyInit, init?: RequestInit): Promise<Response> {
     return this.request(url, { ...init, method: 'PUT', body });
   }
 
   /**
-   * Convenience method for DELETE requests
+   * Convenience method for PATCH requests
    */
-  async delete(url: string | URL, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'DELETE' });
+  async patch(url: string | URL, body: BodyInit, init?: RequestInit): Promise<Response> {
+    return this.request(url, { ...init, method: 'PATCH', body });
   }
 }
 
