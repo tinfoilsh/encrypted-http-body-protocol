@@ -230,149 +230,6 @@ export class Identity {
     return new Identity(suite, publicKey, dummyPrivateKey);
   }
 
-  /**
-   * Encrypt request body and set appropriate headers
-   */
-  async encryptRequest(request: Request, serverPublicKey: CryptoKey): Promise<Request> {
-    const body = await request.arrayBuffer();
-    if (body.byteLength === 0) {
-      // No body to encrypt, just set client public key header
-      const headers = new Headers(request.headers);
-      headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.getPublicKeyHex());
-      return new Request(request.url, {
-        method: request.method,
-        headers,
-        body: null
-      });
-    }
-
-    // Create sender for encryption
-    const sender = await this.suite.createSenderContext({
-      recipientPublicKey: serverPublicKey
-    });
-
-    // Encrypt the body
-    const encrypted = await sender.seal(body);
-
-    // Get encapsulated key
-    const encapKey = sender.enc;
-
-    // Create chunked format: 4-byte length header + encrypted data
-    const chunkLength = new Uint8Array(4);
-    const view = new DataView(chunkLength.buffer);
-    view.setUint32(0, encrypted.byteLength, false); // Big-endian
-    
-    const chunkedData = new Uint8Array(4 + encrypted.byteLength);
-    chunkedData.set(chunkLength, 0);
-    chunkedData.set(new Uint8Array(encrypted), 4);
-
-    // Create new request with encrypted body and headers
-    const headers = new Headers(request.headers);
-    headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.getPublicKeyHex());
-    headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, Array.from(new Uint8Array(encapKey))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join(''));
-
-    return new Request(request.url, {
-      method: request.method,
-      headers,
-      body: chunkedData,
-      duplex: 'half'
-    } as RequestInit);
-  }
-
-  /**
-   * Decrypt response body
-   * @deprecated Use decryptResponseWithContext instead
-   */
-  async decryptResponse(response: Response, serverEncapKey: Uint8Array): Promise<Response> {
-    if (!response.body) {
-      return response;
-    }
-
-    // Create receiver for decryption
-    const receiver = await this.suite.createRecipientContext({
-      recipientKey: this.privateKey,
-      enc: serverEncapKey.buffer as ArrayBuffer
-    });
-
-    // Create a readable stream that decrypts chunks as they arrive
-    const decryptedStream = new ReadableStream({
-      start(controller) {
-        const reader = response.body!.getReader();
-        let buffer = new Uint8Array(0);
-        let offset = 0;
-
-        async function pump() {
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-
-              // Append new data to buffer
-              const newBuffer = new Uint8Array(buffer.length + value.length);
-              newBuffer.set(buffer);
-              newBuffer.set(value, buffer.length);
-              buffer = newBuffer;
-
-              // Process complete chunks
-              while (offset + 4 <= buffer.length) {
-                // Read chunk length (4 bytes big-endian)
-                const chunkLength = (buffer[offset] << 24) |
-                                  (buffer[offset + 1] << 16) |
-                                  (buffer[offset + 2] << 8) |
-                                  buffer[offset + 3];
-                offset += 4;
-
-                if (chunkLength === 0) {
-                  continue; // Empty chunk
-                }
-
-                // Check if we have the complete chunk
-                if (offset + chunkLength > buffer.length) {
-                  // Not enough data yet, rewind offset and wait for more
-                  offset -= 4;
-                  break;
-                }
-
-                // Extract and decrypt the chunk
-                const encryptedChunk = buffer.slice(offset, offset + chunkLength);
-                offset += chunkLength;
-
-                try {
-                  const decryptedChunk = await receiver.open(encryptedChunk.buffer);
-                  controller.enqueue(new Uint8Array(decryptedChunk));
-                } catch (error) {
-                  controller.error(new Error(`Failed to decrypt chunk: ${error}`));
-                  return;
-                }
-              }
-
-              // Remove processed data from buffer
-              if (offset > 0) {
-                buffer = buffer.slice(offset);
-                offset = 0;
-              }
-            }
-
-            controller.close();
-          } catch (error) {
-            controller.error(error);
-          }
-        }
-
-        pump();
-      }
-    });
-
-    // Create new response with decrypted stream
-    return new Response(decryptedStream, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    });
-  }
-
   // ===========================================================================
   // Derived Key Methods - Use derived keys for response encryption
   // ===========================================================================
@@ -385,8 +242,6 @@ export class Identity {
    * 1. Creates an HPKE sender context to this identity's public key
    * 2. Encrypts the request body
    * 3. Returns a RequestContext that must be used to decrypt the response
-   *
-   * IMPORTANT: Do NOT send Ehbp-Client-Public-Key header (vulnerable to MitM)
    */
   async encryptRequestWithContext(
     request: Request
@@ -409,7 +264,6 @@ export class Identity {
     // Set headers - only encapsulated key, NOT client public key
     const headers = new Headers(request.headers);
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
-    // Note: Do NOT set CLIENT_PUBLIC_KEY_HEADER - vulnerable to MitM attack!
 
     if (body.byteLength === 0) {
       return {
@@ -452,9 +306,6 @@ export class Identity {
    * 2. Exports a secret from the HPKE sender context
    * 3. Derives response keys using HKDF
    * 4. Decrypts the response body
-   *
-   * This prevents MitM key substitution attacks because the response keys
-   * are derived from the shared secret between client and server.
    */
   async decryptResponseWithContext(
     response: Response,
