@@ -108,6 +108,7 @@ export class Transport {
     } as RequestInit);
 
     // Encrypt request (returns context for response decryption)
+    // For bodyless requests, context will be null and request passes through unmodified
     const { request: encryptedRequest, context } =
       await this.serverIdentity.encryptRequestWithContext(request);
 
@@ -116,6 +117,11 @@ export class Transport {
 
     if (!response.ok) {
       console.warn(`Server returned non-OK status: ${response.status}`);
+    }
+
+    // Bodyless requests: context is null, response is plaintext
+    if (context === null) {
+      return response;
     }
 
     // Check for fallback header - if set, server returned unencrypted response

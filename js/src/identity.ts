@@ -245,8 +245,23 @@ export class Identity {
    */
   async encryptRequestWithContext(
     request: Request
-  ): Promise<{ request: Request; context: RequestContext }> {
+  ): Promise<{ request: Request; context: RequestContext | null }> {
     const body = await request.arrayBuffer();
+
+    // Bodyless requests pass through unmodified - no HPKE context needed.
+    // See SPEC.md Section 5.1: "When the request has no payload body, an encrypted
+    // response is not possible (since there is no HPKE context to derive response
+    // keys from). Such requests pass through unmodified."
+    if (body.byteLength === 0) {
+      return {
+        request: new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: null,
+        }),
+        context: null,
+      };
+    }
 
     // Create sender for encryption with info parameter for domain separation
     const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
@@ -261,20 +276,9 @@ export class Identity {
       requestEnc: new Uint8Array(sender.enc),
     };
 
-    // Set headers - only encapsulated key, NOT client public key
+    // Set headers - only encapsulated key for requests with body
     const headers = new Headers(request.headers);
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
-
-    if (body.byteLength === 0) {
-      return {
-        request: new Request(request.url, {
-          method: request.method,
-          headers,
-          body: null,
-        }),
-        context,
-      };
-    }
 
     // Encrypt the body
     const encrypted = await sender.seal(body);
