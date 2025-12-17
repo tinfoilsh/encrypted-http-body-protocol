@@ -90,11 +90,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to make request: %v", err)
 	}
 
-	// Check for plaintext fallback
-	if resp.Header.Get(protocol.FallbackHeader) == "1" {
-		return resp, nil
-	}
-
 	if err := reqCtx.DecryptResponse(resp); err != nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("failed to decrypt response: %v", err)
