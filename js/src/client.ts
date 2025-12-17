@@ -1,5 +1,6 @@
 import { Identity } from './identity.js';
 import { PROTOCOL } from './protocol.js';
+import type { Key } from 'hpke';
 
 /**
  * HTTP transport for EHBP
@@ -49,7 +50,7 @@ export class Transport {
   /**
    * Get the server public key
    */
-  getServerPublicKey(): CryptoKey {
+  getServerPublicKey(): Key {
     return this.serverIdentity.getPublicKey();
   }
 
