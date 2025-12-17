@@ -123,7 +123,6 @@
             try {
                 updateStatus('serverStatus', 'info', 'Initializing client...');
                 const serverUrl = document.getElementById('serverUrl').value;
-                // No client identity needed - response keys derived from HPKE shared secret
                 transport = await createTransport(serverUrl);
                 updateStatus('serverStatus', 'success', `Connected to ${serverUrl}`);
                 return true;
