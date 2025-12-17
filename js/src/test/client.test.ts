@@ -1,41 +1,44 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { Identity, Transport, createTransport } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 
 describe('Transport', () => {
-  let clientIdentity: Identity;
   let serverIdentity: Identity;
 
   before(async () => {
-    clientIdentity = await Identity.generate();
     serverIdentity = await Identity.generate();
   });
 
   it('should create transport with server public key', () => {
+    // V2: Transport only needs the server identity, not a client identity
     const transport = new Transport(
-      clientIdentity,
-      'localhost:8080',
-      serverIdentity.getPublicKey()
+      serverIdentity,
+      'localhost:8080'
     );
-    
+
     assert(transport instanceof Transport, 'Should create transport instance');
   });
 
   it('should encrypt and decrypt request', async () => {
-    const serverPublicKey = serverIdentity.getPublicKey();
+    // V2: encryptRequestWithContext is called on the server identity
     const originalBody = new TextEncoder().encode('Hello, World!');
     const request = new Request('http://localhost:8080/test', {
       method: 'POST',
       body: originalBody
     });
 
-    const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
-    
-    // Check that headers are set
-    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
+    const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
+
+    // V2: Only encapsulated key header is set (no client public key header)
+    assert(!encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'V2 should NOT set client public key header');
     assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
-    
+
+    // Check that context was returned for response decryption
+    assert(context, 'Context should be returned');
+    assert(context.senderContext, 'Context should have sender context');
+    assert(context.requestEnc, 'Context should have request enc');
+
     // Check that body is encrypted (different from original)
     const encryptedBody = await encryptedRequest.arrayBuffer();
     assert(encryptedBody.byteLength > 0, 'Encrypted body should not be empty');
@@ -43,51 +46,54 @@ describe('Transport', () => {
   });
 
   it('should handle request without body', async () => {
-    const serverPublicKey = serverIdentity.getPublicKey();
+    // V2: encryptRequestWithContext is called on the server identity
     const request = new Request('http://localhost:8080/test', {
       method: 'GET'
     });
 
-    const encryptedRequest = await clientIdentity.encryptRequest(request, serverPublicKey);
-    
-    // Check that only client public key header is set
-    assert(encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Client public key header should be set');
-    assert(!encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should not be set for empty body');
+    const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
+
+    // V2: Only encapsulated key header is set (no client public key header)
+    assert(!encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'V2 should NOT set client public key header');
+    assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set for v2 even without body');
+
+    // Context is returned for response decryption
+    assert(context, 'Context should be returned');
   });
 
   it('should connect to actual server and POST to /secure endpoint', async (t) => {
     const serverURL = 'http://localhost:8080';
-    
+
     try {
       const keysResponse = await fetch(`${serverURL}${PROTOCOL.KEYS_PATH}`);
       if (!keysResponse.ok) {
         t.skip('Server not running at localhost:8080');
         return;
       }
-    } catch (error) {
+    } catch {
       t.skip('Server not running at localhost:8080');
       return;
     }
 
-    // Create transport that will connect to the real server
-    const transport = await createTransport(serverURL, clientIdentity);
-    
+    // V2: Create transport without client identity
+    const transport = await createTransport(serverURL);
+
     const testName = 'Integration Test User';
 
     const serverPubKeyHex = await transport.getServerPublicKeyHex();
-    assert.strictEqual(serverPubKeyHex.length, 64, 'Server public key should be 64 bytes');
+    assert.strictEqual(serverPubKeyHex.length, 64, 'Server public key should be 64 hex chars (32 bytes)');
 
     // Make actual POST request to /secure endpoint
     const response = await transport.post(`${serverURL}/secure`, testName, {
       headers: { 'Content-Type': 'text/plain' }
     });
-    
+
     // Verify response
     assert(response.ok, `Response should be ok, got status: ${response.status}`);
-    
+
     const responseText = await response.text();
     assert.strictEqual(responseText, `Hello, ${testName}`, 'Server should respond with Hello, {name}');
-    
+
     console.log(`✓ Integration test passed: ${responseText}`);
   });
 });

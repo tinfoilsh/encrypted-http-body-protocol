@@ -1,21 +1,17 @@
 #!/usr/bin/env node
 
-import { Identity, createTransport } from './index.js';
+import { createTransport } from './index.js';
 
 async function streamingTest() {
-  console.log('EHBP Streaming Test');
-  console.log('===================');
+  console.log('EHBP v2 Streaming Test');
+  console.log('======================');
 
   try {
-    // Create client identity
-    console.log('Creating client identity...');
-    const clientIdentity = await Identity.generate();
-    console.log('Client identity created');
-
+    // V2: No client identity needed! Response keys are derived from HPKE shared secret.
     // Create transport
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080';
-    const transport = await createTransport(serverURL, clientIdentity);
+    const transport = await createTransport(serverURL);
     console.log('Transport created');
 
     // Test 1: Basic streaming request

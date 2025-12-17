@@ -1,4 +1,4 @@
-import { Identity, RequestContext } from './identity.js';
+import { Identity } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 
 /**
@@ -6,22 +6,27 @@ import { PROTOCOL } from './protocol.js';
  *
  * This transport uses the v2 protocol which derives response encryption keys
  * from the HPKE shared secret, preventing MitM key substitution attacks.
+ *
+ * Unlike v1, this transport does NOT require a client keypair. The v2 protocol
+ * derives response keys from the HPKE shared secret established during request
+ * encryption, so only the server's public key is needed.
  */
 export class Transport {
-  private clientIdentity: Identity;
+  private serverIdentity: Identity;
   private serverHost: string;
-  private serverPublicKey: CryptoKey;
 
-  constructor(clientIdentity: Identity, serverHost: string, serverPublicKey: CryptoKey) {
-    this.clientIdentity = clientIdentity;
+  constructor(serverIdentity: Identity, serverHost: string) {
+    this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
-    this.serverPublicKey = serverPublicKey;
   }
 
   /**
-   * Create a new transport by fetching server public key
+   * Create a new transport by fetching server public key.
+   *
+   * Note: Unlike v1, no client identity is required. The v2 protocol derives
+   * response keys from the HPKE shared secret.
    */
-  static async create(serverURL: string, clientIdentity: Identity): Promise<Transport> {
+  static async create(serverURL: string): Promise<Transport> {
     const url = new URL(serverURL);
     const serverHost = url.host;
 
@@ -40,34 +45,29 @@ export class Transport {
 
     const keysData = new Uint8Array(await response.arrayBuffer());
     const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
-    const serverPublicKey = serverIdentity.getPublicKey();
 
-    return new Transport(clientIdentity, serverHost, serverPublicKey);
+    return new Transport(serverIdentity, serverHost);
+  }
+
+  /**
+   * Get the server identity
+   */
+  getServerIdentity(): Identity {
+    return this.serverIdentity;
   }
 
   /**
    * Get the server public key
    */
   getServerPublicKey(): CryptoKey {
-    return this.serverPublicKey;
+    return this.serverIdentity.getPublicKey();
   }
 
   /**
    * Get the server public key as hex string
    */
   async getServerPublicKeyHex(): Promise<string> {
-    const exported = await crypto.subtle.exportKey('raw', this.serverPublicKey);
-    const keyBytes = new Uint8Array(exported);
-    return Array.from(keyBytes)
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
-  }
-
-  /**
-   * Get the client public key
-   */
-  getClientPublicKey(): CryptoKey {
-    return this.clientIdentity.getPublicKey();
+    return this.serverIdentity.getPublicKeyHex();
   }
 
   /**
@@ -122,7 +122,7 @@ export class Transport {
 
     // Encrypt request using v2 protocol (returns context for response decryption)
     const { request: encryptedRequest, context } =
-      await this.clientIdentity.encryptRequestWithContext(request, this.serverPublicKey);
+      await this.serverIdentity.encryptRequestWithContext(request);
 
     // Make the request
     const response = await fetch(encryptedRequest);
@@ -144,7 +144,7 @@ export class Transport {
     }
 
     // Decrypt response using derived keys (v2)
-    return await this.clientIdentity.decryptResponseWithContext(response, context);
+    return await this.serverIdentity.decryptResponseWithContext(response, context);
   }
 
   /**
@@ -177,8 +177,11 @@ export class Transport {
 }
 
 /**
- * Create a new transport instance
+ * Create a new transport instance.
+ *
+ * Note: Unlike v1, no client identity is required. The v2 protocol derives
+ * response keys from the HPKE shared secret.
  */
-export async function createTransport(serverURL: string, clientIdentity: Identity): Promise<Transport> {
-  return Transport.create(serverURL, clientIdentity);
+export async function createTransport(serverURL: string): Promise<Transport> {
+  return Transport.create(serverURL);
 }

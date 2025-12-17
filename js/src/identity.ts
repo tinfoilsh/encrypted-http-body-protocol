@@ -380,23 +380,23 @@ export class Identity {
   /**
    * Encrypt request body and return context for response decryption (v2).
    *
-   * This method:
-   * 1. Creates an HPKE sender context to the server's public key
+   * This method is called on the SERVER's identity (public key only).
+   * It:
+   * 1. Creates an HPKE sender context to this identity's public key
    * 2. Encrypts the request body
    * 3. Returns a RequestContext that must be used to decrypt the response
    *
    * IMPORTANT: Do NOT send Ehbp-Client-Public-Key header (v1 vulnerability)
    */
   async encryptRequestWithContext(
-    request: Request,
-    serverPublicKey: CryptoKey
+    request: Request
   ): Promise<{ request: Request; context: RequestContext }> {
     const body = await request.arrayBuffer();
 
     // Create sender for encryption with info parameter for domain separation
     const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
     const sender = await this.suite.createSenderContext({
-      recipientPublicKey: serverPublicKey,
+      recipientPublicKey: this.publicKey, // Encrypt to this identity's public key (the server)
       info: infoBytes.buffer.slice(infoBytes.byteOffset, infoBytes.byteOffset + infoBytes.byteLength),
     });
 
