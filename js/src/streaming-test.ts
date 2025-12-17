@@ -7,7 +7,6 @@ async function streamingTest() {
   console.log('===================');
 
   try {
-    // No client identity needed - response keys are derived from HPKE shared secret.
     // Create transport
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080';

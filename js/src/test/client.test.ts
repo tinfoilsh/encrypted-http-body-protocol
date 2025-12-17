@@ -11,7 +11,6 @@ describe('Transport', () => {
   });
 
   it('should create transport with server public key', () => {
-    // Transport only needs the server identity, not a client identity
     const transport = new Transport(
       serverIdentity,
       'localhost:8080'
@@ -21,7 +20,6 @@ describe('Transport', () => {
   });
 
   it('should encrypt and decrypt request', async () => {
-    // encryptRequestWithContext is called on the server identity
     const originalBody = new TextEncoder().encode('Hello, World!');
     const request = new Request('http://localhost:8080/test', {
       method: 'POST',
@@ -30,8 +28,7 @@ describe('Transport', () => {
 
     const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
 
-    // Only encapsulated key header is set (no client public key header)
-    assert(!encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Should NOT set client public key header');
+    // Only encapsulated key header is set
     assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
 
     // Check that context was returned for response decryption
@@ -46,15 +43,13 @@ describe('Transport', () => {
   });
 
   it('should handle request without body', async () => {
-    // encryptRequestWithContext is called on the server identity
     const request = new Request('http://localhost:8080/test', {
       method: 'GET'
     });
 
     const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
 
-    // Only encapsulated key header is set (no client public key header)
-    assert(!encryptedRequest.headers.get(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER), 'Should NOT set client public key header');
+    // Only encapsulated key header is set
     assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set even without body');
 
     // Context is returned for response decryption
@@ -75,7 +70,6 @@ describe('Transport', () => {
       return;
     }
 
-    // Create transport without client identity
     const transport = await createTransport(serverURL);
 
     const testName = 'Integration Test User';

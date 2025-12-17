@@ -4,8 +4,6 @@
  * This library provides secure HTTP communication using Hybrid Public Key Encryption (HPKE)
  * as specified in RFC 9180. It automatically encrypts request bodies and decrypts response
  * bodies while preserving HTTP headers for routing.
- *
- * Response keys are derived from the HPKE shared secret, preventing MitM key substitution attacks.
  */
 
 export { Identity } from './identity.js';

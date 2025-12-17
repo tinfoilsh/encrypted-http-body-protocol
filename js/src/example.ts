@@ -2,9 +2,6 @@
 
 /**
  * Example usage of the EHBP JavaScript client
- *
- * Note: No client identity is required. Response keys are derived from
- * the HPKE shared secret, preventing MitM key substitution attacks.
  */
 
 import { createTransport } from './index.js';
@@ -14,7 +11,6 @@ async function main() {
   console.log('==============================');
 
   try {
-    // No client identity needed - response keys are derived from HPKE shared secret.
     // Create transport (this will fetch server public key)
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080'; // Adjust as needed
