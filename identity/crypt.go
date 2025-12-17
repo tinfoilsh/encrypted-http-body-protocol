@@ -277,7 +277,8 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	}
 
 	// Create receiver and setup decryption
-	receiver, err := i.Suite().NewReceiver(i.sk, nil)
+	// The info parameter must match the sender's info for domain separation
+	receiver, err := i.Suite().NewReceiver(i.sk, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create receiver: %w", err)
 	}
@@ -364,7 +365,8 @@ func (i *Identity) SetupResponseContextForEmptyBody(encapKeyHex string) (*Respon
 		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
 	}
 
-	receiver, err := i.Suite().NewReceiver(i.sk, nil)
+	// The info parameter must match the sender's info for domain separation
+	receiver, err := i.Suite().NewReceiver(i.sk, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create receiver: %w", err)
 	}
@@ -396,7 +398,8 @@ type RequestContext struct {
 // This should be called on the server's identity (obtained from the server's public config).
 func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext, error) {
 	// Set up encryption to this identity's public key
-	sender, err := i.Suite().NewSender(i.pk, nil)
+	// The info parameter provides domain separation for the HPKE key schedule
+	sender, err := i.Suite().NewSender(i.pk, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender: %w", err)
 	}

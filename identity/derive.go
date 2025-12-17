@@ -11,6 +11,9 @@ import (
 )
 
 const (
+	// HPKERequestInfo is the info string for HPKE sender/receiver setup.
+	// This provides domain separation for the HPKE key schedule.
+	HPKERequestInfo = "ehbp request"
 	// ResponseKeyLabel is the info string for HKDF-Expand to derive the response key.
 	ResponseKeyLabel = "key"
 	// ResponseNonceLabel is the info string for HKDF-Expand to derive the response nonce.
