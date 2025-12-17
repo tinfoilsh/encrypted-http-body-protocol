@@ -1,8 +1,11 @@
-import { Identity } from './identity.js';
+import { Identity, RequestContext } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 
 /**
- * HTTP transport for EHBP
+ * HTTP transport for EHBP v2
+ *
+ * This transport uses the v2 protocol which derives response encryption keys
+ * from the HPKE shared secret, preventing MitM key substitution attacks.
  */
 export class Transport {
   private clientIdentity: Identity;
@@ -68,7 +71,10 @@ export class Transport {
   }
 
   /**
-   * Make an encrypted HTTP request
+   * Make an encrypted HTTP request using v2 protocol.
+   *
+   * V2 protocol uses derived keys for response encryption, preventing
+   * MitM key substitution attacks that were possible in v1.
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     // Skip EHBP for non-network URLs (data:, blob:)
@@ -79,7 +85,7 @@ export class Transport {
 
     // Extract body from init or original request before creating Request object
     let requestBody: BodyInit | null = null;
-    
+
     if (input instanceof Request) {
       // If input is a Request, extract its body
       if (input.body) {
@@ -106,30 +112,20 @@ export class Transport {
     }
 
     url.host = this.serverHost;
-    
+
     let request = new Request(url.toString(), {
       method,
       headers,
       body: requestBody,
-      duplex: 'half'
+      duplex: 'half',
     } as RequestInit);
 
-    // Encrypt request body if present (check the original requestBody, not request.body)
-    if (requestBody !== null && requestBody !== undefined) {
-      request = await this.clientIdentity.encryptRequest(request, this.serverPublicKey);
-    } else {
-      // No body, just set client public key header
-      const headers = new Headers(request.headers);
-      headers.set(PROTOCOL.CLIENT_PUBLIC_KEY_HEADER, await this.clientIdentity.getPublicKeyHex());
-      request = new Request(request.url, {
-        method: request.method,
-        headers,
-        body: null
-      });
-    }
+    // Encrypt request using v2 protocol (returns context for response decryption)
+    const { request: encryptedRequest, context } =
+      await this.clientIdentity.encryptRequestWithContext(request, this.serverPublicKey);
 
     // Make the request
-    const response = await fetch(request);
+    const response = await fetch(encryptedRequest);
 
     if (!response.ok) {
       console.warn(`Server returned non-OK status: ${response.status}`);
@@ -141,24 +137,14 @@ export class Transport {
       return response;
     }
 
-    // Check for encapsulated key header
-    const encapKeyHeader = response.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
-    if (!encapKeyHeader) {
-      throw new Error(`Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} encapsulated key header`);
+    // V2: Check for response nonce header (derived key response)
+    const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
+    if (!responseNonceHeader) {
+      throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
     }
 
-    // Validate hex encoding
-    if (!/^[0-9a-fA-F]+$/.test(encapKeyHeader) || encapKeyHeader.length % 2 !== 0) {
-      throw new Error(`Invalid ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header: must be valid hex string with even length`);
-    }
-
-    // Decode encapsulated key
-    const serverEncapKey = new Uint8Array(
-      encapKeyHeader.match(/.{2}/g)!.map(byte => parseInt(byte, 16))
-    );
-
-    // Decrypt response
-    return await this.clientIdentity.decryptResponse(response, serverEncapKey);
+    // Decrypt response using derived keys (v2)
+    return await this.clientIdentity.decryptResponseWithContext(response, context);
   }
 
   /**
