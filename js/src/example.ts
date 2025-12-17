@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * Example usage of the EHBP v2 JavaScript client
+ * Example usage of the EHBP JavaScript client
  *
- * Note: V2 does NOT require a client identity. Response keys are derived
- * from the HPKE shared secret, preventing MitM key substitution attacks.
+ * Note: No client identity is required. Response keys are derived from
+ * the HPKE shared secret, preventing MitM key substitution attacks.
  */
 
 import { createTransport } from './index.js';
 
 async function main() {
-  console.log('EHBP v2 JavaScript Client Example');
-  console.log('==================================');
+  console.log('EHBP JavaScript Client Example');
+  console.log('==============================');
 
   try {
-    // V2: No client identity needed! Response keys are derived from HPKE shared secret.
+    // No client identity needed - response keys are derived from HPKE shared secret.
     // Create transport (this will fetch server public key)
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080'; // Adjust as needed

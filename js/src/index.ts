@@ -1,12 +1,11 @@
 /**
- * JavaScript client for Encrypted HTTP Body Protocol (EHBP) v2 using HPKE
+ * JavaScript client for Encrypted HTTP Body Protocol (EHBP) using HPKE
  *
  * This library provides secure HTTP communication using Hybrid Public Key Encryption (HPKE)
  * as specified in RFC 9180. It automatically encrypts request bodies and decrypts response
  * bodies while preserving HTTP headers for routing.
  *
- * V2 protocol uses derived keys for response encryption, preventing MitM key substitution
- * attacks that were possible in v1.
+ * Response keys are derived from the HPKE shared secret, preventing MitM key substitution attacks.
  */
 
 export { Identity } from './identity.js';

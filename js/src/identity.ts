@@ -13,7 +13,7 @@ import {
 } from './derive.js';
 
 /**
- * Request context for v2 response decryption.
+ * Request context for response decryption.
  * Holds the HPKE sender context needed to derive response keys.
  */
 export interface RequestContext {
@@ -283,7 +283,7 @@ export class Identity {
 
   /**
    * Decrypt response body
-   * @deprecated Use decryptResponseWithContext for v2 protocol
+   * @deprecated Use decryptResponseWithContext instead
    */
   async decryptResponse(response: Response, serverEncapKey: Uint8Array): Promise<Response> {
     if (!response.body) {
@@ -374,11 +374,11 @@ export class Identity {
   }
 
   // ===========================================================================
-  // V2 Protocol Methods - Use derived keys for response encryption
+  // Derived Key Methods - Use derived keys for response encryption
   // ===========================================================================
 
   /**
-   * Encrypt request body and return context for response decryption (v2).
+   * Encrypt request body and return context for response decryption.
    *
    * This method is called on the SERVER's identity (public key only).
    * It:
@@ -386,7 +386,7 @@ export class Identity {
    * 2. Encrypts the request body
    * 3. Returns a RequestContext that must be used to decrypt the response
    *
-   * IMPORTANT: Do NOT send Ehbp-Client-Public-Key header (v1 vulnerability)
+   * IMPORTANT: Do NOT send Ehbp-Client-Public-Key header (vulnerable to MitM)
    */
   async encryptRequestWithContext(
     request: Request
@@ -409,7 +409,7 @@ export class Identity {
     // Set headers - only encapsulated key, NOT client public key
     const headers = new Headers(request.headers);
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
-    // Note: Do NOT set CLIENT_PUBLIC_KEY_HEADER - that's the v1 vulnerability!
+    // Note: Do NOT set CLIENT_PUBLIC_KEY_HEADER - vulnerable to MitM attack!
 
     if (body.byteLength === 0) {
       return {
@@ -445,7 +445,7 @@ export class Identity {
   }
 
   /**
-   * Decrypt response using keys derived from request context (v2).
+   * Decrypt response using keys derived from request context.
    *
    * This method:
    * 1. Reads the response nonce from Ehbp-Response-Nonce header
@@ -494,7 +494,7 @@ export class Identity {
     );
 
     // Create decrypting stream
-    const decryptedStream = this.createDecryptStreamV2(response.body, km);
+    const decryptedStream = this.createDecryptStream(response.body, km);
 
     return new Response(decryptedStream, {
       status: response.status,
@@ -506,7 +506,7 @@ export class Identity {
   /**
    * Creates a ReadableStream that decrypts response chunks using derived keys.
    */
-  private createDecryptStreamV2(
+  private createDecryptStream(
     body: ReadableStream<Uint8Array>,
     km: ResponseKeyMaterial
   ): ReadableStream<Uint8Array> {

@@ -3,11 +3,11 @@
 import { createTransport } from './index.js';
 
 async function streamingTest() {
-  console.log('EHBP v2 Streaming Test');
-  console.log('======================');
+  console.log('EHBP Streaming Test');
+  console.log('===================');
 
   try {
-    // V2: No client identity needed! Response keys are derived from HPKE shared secret.
+    // No client identity needed - response keys are derived from HPKE shared secret.
     // Create transport
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080';

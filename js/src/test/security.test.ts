@@ -1,5 +1,5 @@
 /**
- * Security Tests for EHBP v2
+ * Security Tests for EHBP
  *
  * These tests verify that the MitM key substitution vulnerability is fixed:
  * 1. MitM cannot derive the correct response decryption keys
@@ -264,12 +264,12 @@ describe('Security Tests', () => {
     });
   });
 
-  describe('V1 attack vector eliminated', () => {
+  describe('Client public key header attack prevented', () => {
     it('should not use client public key for response encryption', async () => {
-      // In v1, the server encrypted responses TO the client's public key from a header.
+      // The vulnerable approach was: server encrypts responses TO the client's public key from a header.
       // An attacker could substitute their own public key and decrypt responses.
       //
-      // In v2, response keys are derived from the HPKE shared secret.
+      // The fix: response keys are derived from the HPKE shared secret.
       // There is no Ehbp-Client-Public-Key header to substitute.
 
       const serverKeyPair = await suite.kem.generateKeyPair();
@@ -283,8 +283,8 @@ describe('Security Tests', () => {
       });
       const requestEnc = new Uint8Array(aliceSender.enc);
 
-      // In v1, Eve would substitute her public key in the header.
-      // In v2, there's no such header - response keys come from HPKE export.
+      // With the vulnerable approach, Eve would substitute her public key in the header.
+      // With derived keys, there's no such header - response keys come from HPKE export.
 
       // Server creates receiver from Alice's actual enc
       const serverReceiver = await suite.createRecipientContext({
@@ -316,8 +316,8 @@ describe('Security Tests', () => {
       // Even if Eve had Alice's public key, she can't compute the shared secret
       // because she doesn't have Alice's private key.
       //
-      // The v1 vulnerability was that Eve could make the SERVER encrypt TO Eve's key.
-      // In v2, the server encrypts with keys derived from the HPKE shared secret,
+      // The vulnerability was that Eve could make the SERVER encrypt TO Eve's key.
+      // With derived keys, the server encrypts with keys derived from the HPKE shared secret,
       // which Eve cannot compute.
     });
   });
