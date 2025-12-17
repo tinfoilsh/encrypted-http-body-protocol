@@ -386,6 +386,10 @@ export class Identity {
           buffer = newBuffer;
         }
       },
+      cancel(reason) {
+        // Release the underlying reader when the stream is cancelled
+        return reader.cancel(reason);
+      },
     });
   }
 }
