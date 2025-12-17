@@ -18,23 +18,23 @@ import (
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
-// v2TestClient is a test helper that simulates a v2 client with request/response encryption.
+// TestClient is a test helper that simulates a client with request/response encryption.
 // It stores the HPKE sealer from request encryption so it can derive response decryption keys.
-type v2TestClient struct {
+type TestClient struct {
 	identity   *Identity
 	sealer     hpke.Sealer
 	requestEnc []byte
 }
 
-// newV2TestClient creates a new v2 test client
-func newV2TestClient(t *testing.T) *v2TestClient {
+// newTestClient creates a new test client
+func newTestClient(t *testing.T) *TestClient {
 	identity, err := NewIdentity()
 	require.NoError(t, err)
-	return &v2TestClient{identity: identity}
+	return &TestClient{identity: identity}
 }
 
 // encryptRequest encrypts a request to the server and stores the context for response decryption
-func (c *v2TestClient) encryptRequest(t *testing.T, req *http.Request, serverPubKey []byte) {
+func (c *TestClient) encryptRequest(t *testing.T, req *http.Request, serverPubKey []byte) {
 	// Set up encryption to server
 	pk, err := c.identity.KEMScheme().UnmarshalBinaryPublicKey(serverPubKey)
 	require.NoError(t, err)
@@ -75,8 +75,8 @@ func (c *v2TestClient) encryptRequest(t *testing.T, req *http.Request, serverPub
 	}
 }
 
-// decryptResponse decrypts a v2 response using derived keys
-func (c *v2TestClient) decryptResponse(t *testing.T, resp *httptest.ResponseRecorder) []byte {
+// decryptResponse decrypts a response using derived keys
+func (c *TestClient) decryptResponse(t *testing.T, resp *httptest.ResponseRecorder) []byte {
 	// Get response nonce from header
 	responseNonceHex := resp.Header().Get(protocol.ResponseNonceHeader)
 	require.NotEmpty(t, responseNonceHex, "missing response nonce header")
@@ -147,7 +147,7 @@ func TestMiddleware(t *testing.T) {
 	wrapped := middleware(testHandler)
 
 	t.Run("successful encrypted request", func(t *testing.T) {
-		client := newV2TestClient(t)
+		client := newTestClient(t)
 		requestBody := []byte("test message")
 
 		// Create request with body
@@ -162,7 +162,7 @@ func TestMiddleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
-		// Verify response has nonce header (v2)
+		// Verify response has nonce header
 		responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
 		assert.NotEmpty(t, responseNonceHeader)
 
@@ -254,7 +254,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 	wrapped := middleware(streamHandler)
 
 	t.Run("streaming response", func(t *testing.T) {
-		client := newV2TestClient(t)
+		client := newTestClient(t)
 
 		req := httptest.NewRequest("GET", "/stream", nil)
 		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
@@ -266,7 +266,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 		assert.Equal(t, "chunked", w.Header().Get("Transfer-Encoding"))
 		assert.Empty(t, w.Header().Get("Content-Length"))
 
-		// Verify response nonce header exists (v2)
+		// Verify response nonce header exists
 		responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
 		assert.NotEmpty(t, responseNonceHeader)
 
@@ -294,7 +294,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	middleware := serverIdentity.Middleware(false)
 
 	t.Run("multiple chunks are encrypted separately", func(t *testing.T) {
-		client := newV2TestClient(t)
+		client := newTestClient(t)
 
 		// Create handler that writes multiple chunks
 		chunkHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +326,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	})
 
 	t.Run("empty chunks are handled correctly", func(t *testing.T) {
-		client := newV2TestClient(t)
+		client := newTestClient(t)
 
 		// Create handler that writes empty data
 		emptyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -350,7 +350,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	})
 
 	t.Run("large chunks are encrypted correctly", func(t *testing.T) {
-		client := newV2TestClient(t)
+		client := newTestClient(t)
 		largeData := strings.Repeat("A", 10000) // 10KB of data
 
 		largeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +374,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 }
 
 // TestBodylessHTTPMethods verifies that GET, HEAD, DELETE, and OPTIONS work correctly
-// with EHBP v2 - these methods typically don't have request bodies but still need
+// with EHBP - these methods typically don't have request bodies but still need
 // encrypted responses.
 func TestBodylessHTTPMethods(t *testing.T) {
 	serverIdentity, err := NewIdentity()
@@ -393,7 +393,7 @@ func TestBodylessHTTPMethods(t *testing.T) {
 
 	for _, method := range bodylessMethods {
 		t.Run(method+" request encrypts response", func(t *testing.T) {
-			client := newV2TestClient(t)
+			client := newTestClient(t)
 
 			req := httptest.NewRequest(method, "/test", nil)
 			client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
@@ -431,8 +431,8 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 	wrapped := middleware(testHandler)
 
 	t.Run("different clients cannot decrypt each others responses", func(t *testing.T) {
-		client1 := newV2TestClient(t)
-		client2 := newV2TestClient(t)
+		client1 := newTestClient(t)
+		client2 := newTestClient(t)
 
 		// Client 1 makes a request
 		req := httptest.NewRequest("GET", "/test", nil)
