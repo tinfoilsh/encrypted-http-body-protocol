@@ -220,8 +220,6 @@ func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
 }
 
 // Write encrypts data as chunks and writes them to the underlying ResponseWriter.
-// Each chunk is encrypted with AES-256-GCM using a nonce derived from the base nonce
-// XORed with the sequence number. The sequence is automatically incremented.
 func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
@@ -248,7 +246,6 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// Flush implements http.Flusher
 func (w *DerivedResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
@@ -308,13 +305,6 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 
 // SetupDerivedResponseEncryption creates an encrypted response writer using
 // keys derived from the request's HPKE context.
-//
-// The response encryption keys are derived as follows:
-//  1. Export a secret from the HPKE context using label "ehbp response"
-//  2. Generate a random response nonce
-//  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
-//
-// This binds the response encryption to the specific request, preventing MitM attacks.
 func (i *Identity) SetupDerivedResponseEncryption(
 	w http.ResponseWriter,
 	respCtx *ResponseContext,
@@ -356,32 +346,6 @@ func (i *Identity) SetupDerivedResponseEncryption(
 	}, nil
 }
 
-// SetupResponseContextForEmptyBody creates a ResponseContext for requests without a body.
-// This is needed when the request has an Ehbp-Encapsulated-Key header but no body,
-// and we still need to derive response encryption keys.
-func (i *Identity) SetupResponseContextForEmptyBody(encapKeyHex string) (*ResponseContext, error) {
-	encapKey, err := hex.DecodeString(encapKeyHex)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
-	}
-
-	// The info parameter must match the sender's info for domain separation
-	receiver, err := i.Suite().NewReceiver(i.sk, []byte(HPKERequestInfo))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver: %w", err)
-	}
-
-	opener, err := receiver.Setup(encapKey)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("failed to setup decryption context: %w", err))
-	}
-
-	return &ResponseContext{
-		opener:     opener,
-		RequestEnc: encapKey,
-	}, nil
-}
-
 // =============================================================================
 // Client-side: Request encryption and response decryption
 // =============================================================================
@@ -395,10 +359,17 @@ type RequestContext struct {
 
 // EncryptRequestWithContext encrypts the request body TO this identity's public key
 // and returns the HPKE context needed for response decryption.
-// This should be called on the server's identity (obtained from the server's public config).
+//
+// For bodyless requests (no body or empty body), returns nil - the request passes
+// through unencrypted and the response will also be unencrypted.
+// See SPEC.md Section 6.4 for the security rationale.
 func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext, error) {
+	// Bodyless requests pass through unencrypted - no HPKE context needed
+	if req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 {
+		return nil, nil
+	}
+
 	// Set up encryption to this identity's public key
-	// The info parameter provides domain separation for the HPKE key schedule
 	sender, err := i.Suite().NewSender(i.pk, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender: %w", err)
@@ -413,17 +384,15 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 	req.Header.Set("Transfer-Encoding", "chunked")
 
-	// If there's a body, wrap it with streaming encryption
-	if req.Body != nil && req.ContentLength != 0 {
-		streamingReader := &StreamingEncryptReader{
-			reader: req.Body,
-			sealer: sealer,
-			buffer: nil,
-			eof:    false,
-		}
-		req.Body = streamingReader
-		req.ContentLength = -1
+	// Wrap body with streaming encryption
+	streamingReader := &StreamingEncryptReader{
+		reader: req.Body,
+		sealer: sealer,
+		buffer: nil,
+		eof:    false,
 	}
+	req.Body = streamingReader
+	req.ContentLength = -1
 
 	return &RequestContext{
 		Sealer:     sealer,
@@ -486,7 +455,6 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 }
 
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
-// It implements io.ReadCloser for use as an http.Response.Body.
 type DerivedStreamingDecryptReader struct {
 	reader io.Reader
 	aead   *ResponseAEAD
@@ -545,7 +513,6 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 	return n, nil
 }
 
-// Close implements io.Closer.
 func (r *DerivedStreamingDecryptReader) Close() error {
 	if closer, ok := r.reader.(io.Closer); ok {
 		return closer.Close()

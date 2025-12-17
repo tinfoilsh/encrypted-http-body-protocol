@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
@@ -379,7 +380,7 @@ func TestEndToEndSecureRoundTrip(t *testing.T) {
 	wrappedHandler := serverIdentity.Middleware(false)(handler)
 
 	// Client creates request with encryption to server's public key
-	req := httptest.NewRequest("GET", "/secret", nil)
+	req := httptest.NewRequest("POST", "/secret", strings.NewReader("test body"))
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	if err != nil {
 		t.Fatalf("Failed to encrypt request: %v", err)

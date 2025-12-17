@@ -256,7 +256,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 	t.Run("streaming response", func(t *testing.T) {
 		client := newTestClient(t)
 
-		req := httptest.NewRequest("GET", "/stream", nil)
+		req := httptest.NewRequest("POST", "/stream", strings.NewReader("test body"))
 		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 		w := httptest.NewRecorder()
@@ -312,7 +312,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(chunkHandler)
 
-		req := httptest.NewRequest("GET", "/chunks", nil)
+		req := httptest.NewRequest("POST", "/chunks", strings.NewReader("test body"))
 		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 		w := httptest.NewRecorder()
@@ -336,7 +336,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(emptyHandler)
 
-		req := httptest.NewRequest("GET", "/empty", nil)
+		req := httptest.NewRequest("POST", "/empty", strings.NewReader("test body"))
 		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 		w := httptest.NewRecorder()
@@ -359,7 +359,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 		wrapped := middleware(largeHandler)
 
-		req := httptest.NewRequest("GET", "/large", nil)
+		req := httptest.NewRequest("POST", "/large", strings.NewReader("test body"))
 		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 		w := httptest.NewRecorder()
@@ -373,9 +373,9 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	})
 }
 
-// TestBodylessHTTPMethods verifies that GET, HEAD, DELETE, and OPTIONS work correctly
-// with EHBP - these methods typically don't have request bodies but still need
-// encrypted responses.
+// TestBodylessHTTPMethods verifies that GET, HEAD, DELETE, and OPTIONS pass through
+// unencrypted - see SPEC.md Section 6.4 for security rationale.
+// Note: No fallback header is set because the client knows it sent a bodyless request.
 func TestBodylessHTTPMethods(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
@@ -392,27 +392,27 @@ func TestBodylessHTTPMethods(t *testing.T) {
 	bodylessMethods := []string{"GET", "HEAD", "DELETE", "OPTIONS"}
 
 	for _, method := range bodylessMethods {
-		t.Run(method+" request encrypts response", func(t *testing.T) {
-			client := newTestClient(t)
-
+		t.Run(method+" request passes through unencrypted", func(t *testing.T) {
 			req := httptest.NewRequest(method, "/test", nil)
-			client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 			w := httptest.NewRecorder()
 			wrapped.ServeHTTP(w, req)
 
 			assert.Equal(t, http.StatusOK, w.Code, "%s request should succeed", method)
 
-			// Verify response has encryption headers
-			responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
-			assert.NotEmpty(t, responseNonceHeader, "%s response should have nonce header", method)
+			// Verify NO fallback header (client knows it's bodyless, doesn't need this)
+			fallbackHeader := w.Header().Get(protocol.FallbackHeader)
+			assert.Empty(t, fallbackHeader, "%s response should NOT have fallback header", method)
 
-			// HEAD responses have no body, so skip body decryption for HEAD
+			// Verify response does NOT have encryption headers
+			responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
+			assert.Empty(t, responseNonceHeader, "%s response should not have nonce header", method)
+
+			// HEAD responses have no body
 			if method != "HEAD" {
-				// Decrypt response
-				decryptedResponse := client.decryptResponse(t, w)
-				assert.Equal(t, "Method: "+method, string(decryptedResponse),
-					"%s response should decrypt correctly", method)
+				// Response should be plaintext
+				assert.Equal(t, "Method: "+method, w.Body.String(),
+					"%s response should be plaintext", method)
 			}
 		})
 	}
@@ -435,7 +435,7 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 		client2 := newTestClient(t)
 
 		// Client 1 makes a request
-		req := httptest.NewRequest("GET", "/test", nil)
+		req := httptest.NewRequest("POST", "/test", strings.NewReader("test body"))
 		client1.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
 
 		w := httptest.NewRecorder()
@@ -453,7 +453,7 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 
 		// Client 2 tries to derive keys with their sealer (wrong shared secret)
 		// First set up client2's sealer by encrypting a dummy request
-		dummyReq := httptest.NewRequest("GET", "/dummy", nil)
+		dummyReq := httptest.NewRequest("POST", "/dummy", strings.NewReader("dummy body"))
 		client2.encryptRequest(t, dummyReq, serverIdentity.MarshalPublicKey())
 
 		client2ExportedSecret := client2.sealer.Export([]byte(ExportLabel), uint(ExportLength))

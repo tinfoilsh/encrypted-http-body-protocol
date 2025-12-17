@@ -16,6 +16,15 @@ func sendError(w http.ResponseWriter, err error, text string, status int) {
 func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Check for request body - bodyless requests pass through unencrypted
+			// See SPEC.md Section 6.4 for security rationale
+			// Note: No fallback header is set - the client knows it sent a bodyless request
+			if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
+				log.Debugf("bodyless request, passing through unencrypted")
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Check for request encryption header
 			requestEncHex := r.Header.Get(protocol.EncapsulatedKeyHeader)
 			if requestEncHex == "" {
@@ -30,31 +39,14 @@ func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) h
 			}
 
 			// Decrypt request body and get context for response
-			var respCtx *ResponseContext
-			var err error
-
-			if r.Body != nil && r.Body != http.NoBody {
-				respCtx, err = i.DecryptRequestWithContext(r)
-				if err != nil {
-					status := http.StatusInternalServerError
-					if IsClientError(err) {
-						status = http.StatusBadRequest
-					}
-					sendError(w, err, "failed to decrypt request", status)
-					return
+			respCtx, err := i.DecryptRequestWithContext(r)
+			if err != nil {
+				status := http.StatusInternalServerError
+				if IsClientError(err) {
+					status = http.StatusBadRequest
 				}
-			} else {
-				// No body, but we still need to setup context for response
-				// The client sends Ehbp-Encapsulated-Key even without a body
-				respCtx, err = i.SetupResponseContextForEmptyBody(requestEncHex)
-				if err != nil {
-					status := http.StatusInternalServerError
-					if IsClientError(err) {
-						status = http.StatusBadRequest
-					}
-					sendError(w, err, "failed to setup response context", status)
-					return
-				}
+				sendError(w, err, "failed to decrypt request", status)
+				return
 			}
 
 			// Setup response encryption using derived keys
