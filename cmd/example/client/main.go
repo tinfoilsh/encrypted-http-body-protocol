@@ -25,10 +25,7 @@ func main() {
 		log.Debug("Verbose logging enabled")
 	}
 
-	// Create transport with ephemeral identity (no persistent client keys needed)
-	// The client's private key is never used - response decryption uses keys
-	// derived from the request's HPKE context.
-	secureTransport, err := client.NewTransport(*serverURL, nil, false)
+	secureTransport, err := client.NewTransport(*serverURL, false)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}

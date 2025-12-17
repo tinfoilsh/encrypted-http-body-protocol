@@ -12,18 +12,16 @@ import (
 
 const (
 	// ResponseKeyLabel is the info string for HKDF-Expand to derive the response key.
-	// Matches OHTTP (RFC 9458) exactly.
 	ResponseKeyLabel = "key"
 	// ResponseNonceLabel is the info string for HKDF-Expand to derive the response nonce.
-	// Matches OHTTP (RFC 9458) exactly.
 	ResponseNonceLabel = "nonce"
 	// ExportLabel is the context string for HPKE Export.
 	ExportLabel = "ehbp response"
 	// ExportLength is the length of the exported secret.
-	// Matches OHTTP: Nk (AEAD key size) = 32 bytes for AES-256-GCM.
+	// Nk (AEAD key size) = 32 bytes for AES-256-GCM.
 	ExportLength = 32
 	// ResponseNonceLength is the length of the random response nonce.
-	// Matches OHTTP (RFC 9458): max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
+	// max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
 	ResponseNonceLength = 32
 	// AES256KeyLength is the length of an AES-256 key
 	AES256KeyLength = 32

@@ -18,8 +18,6 @@ import (
 func TestStreamingEncryption(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
-	clientIdentity, err := NewIdentity()
-	require.NoError(t, err)
 
 	t.Run("big streaming request encryption", func(t *testing.T) {
 		largeData := strings.Repeat("A", 1024*1024)
@@ -27,8 +25,8 @@ func TestStreamingEncryption(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(largeData))
 		originalLength := req.ContentLength
 
-		// Encrypt
-		reqCtx, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		// Encrypt to server's public key
+		reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 		require.NotNil(t, reqCtx)
 
@@ -58,7 +56,7 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "Hello, streaming world!"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		_, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		_, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 
 		respCtx, err := serverIdentity.DecryptRequestWithContext(req)
@@ -75,7 +73,7 @@ func TestStreamingEncryption(t *testing.T) {
 		testData := "This is a test of partial reads with streaming encryption"
 
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		_, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		_, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 
 		// Read in very small chunks to test partial read handling
@@ -100,19 +98,17 @@ func TestStreamingEncryption(t *testing.T) {
 func TestStreamingReaderEdgeCases(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
-	clientIdentity, err := NewIdentity()
-	require.NoError(t, err)
 
 	t.Run("empty request body", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(""))
-		_, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		_, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), req.ContentLength)
 	})
 
 	t.Run("nil request body", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", nil)
-		_, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		_, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 	})
 }
@@ -120,15 +116,13 @@ func TestStreamingReaderEdgeCases(t *testing.T) {
 func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
-	clientIdentity, err := NewIdentity()
-	require.NoError(t, err)
 
 	t.Run("full round trip with body", func(t *testing.T) {
 		testData := "Hello, encrypted world!"
 
-		// Client encrypts request
+		// Client encrypts request to server's public key
 		req := httptest.NewRequest("POST", "/test", strings.NewReader(testData))
-		reqCtx, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 
 		// Server decrypts request
@@ -201,9 +195,9 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 	})
 
 	t.Run("empty body request with response", func(t *testing.T) {
-		// Client encrypts request with no body
+		// Client encrypts request with no body (to server's public key)
 		req := httptest.NewRequest("GET", "/test", nil)
-		reqCtx, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+		reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
 
 		// Server sets up response context for empty body
@@ -254,12 +248,10 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 func TestSetupResponseContextForEmptyBody(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
-	clientIdentity, err := NewIdentity()
-	require.NoError(t, err)
 
 	t.Run("valid encapsulated key", func(t *testing.T) {
-		// Client creates an HPKE context
-		sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+		// Client creates an HPKE context (using server's suite/public key)
+		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
 		require.NoError(t, err)
 		encapKey, _, err := sender.Setup(rand.Reader)
 		require.NoError(t, err)
@@ -282,13 +274,6 @@ func TestSetupResponseContextForEmptyBody(t *testing.T) {
 	})
 }
 
-func TestInvalidServerPublicKey(t *testing.T) {
-	clientIdentity, err := NewIdentity()
-	require.NoError(t, err)
-
-	req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-
-	// Invalid public key
-	_, err = clientIdentity.EncryptRequestWithContext(req, []byte("invalid"))
-	require.Error(t, err)
-}
+// TestInvalidServerPublicKey was removed - the public key is no longer passed
+// as a parameter since EncryptRequestWithContext now uses the identity's own
+// public key (the server's public config obtained from the key endpoint).

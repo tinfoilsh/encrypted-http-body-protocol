@@ -33,8 +33,7 @@ func main() {
 		log.Fatalf("URL is required")
 	}
 
-	// Create transport with ephemeral identity (no persistent client keys needed)
-	secureTransport, err := client.NewTransport(url, nil, *insecure)
+	secureTransport, err := client.NewTransport(url, *insecure)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
