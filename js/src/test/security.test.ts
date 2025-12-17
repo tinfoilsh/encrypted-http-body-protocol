@@ -9,7 +9,12 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm } from '@hpke/core';
+import {
+  CipherSuite,
+  KEM_DHKEM_X25519_HKDF_SHA256,
+  KDF_HKDF_SHA256,
+  AEAD_AES_256_GCM,
+} from 'hpke';
 import {
   deriveResponseKeys,
   encryptChunk,
@@ -19,17 +24,12 @@ import {
   EXPORT_LENGTH,
 } from '../derive.js';
 
-// Helper to convert Uint8Array to ArrayBuffer for HPKE library
-function toArrayBuffer(arr: Uint8Array): ArrayBuffer {
-  return arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength) as ArrayBuffer;
-}
-
 describe('Security Tests', () => {
-  const suite = new CipherSuite({
-    kem: new DhkemX25519HkdfSha256(),
-    kdf: new HkdfSha256(),
-    aead: new Aes256Gcm(),
-  });
+  const suite = new CipherSuite(
+    KEM_DHKEM_X25519_HKDF_SHA256,
+    KDF_HKDF_SHA256,
+    AEAD_AES_256_GCM
+  );
 
   const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
   const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
@@ -37,33 +37,26 @@ describe('Security Tests', () => {
   describe('MitM cannot read responses', () => {
     it('should derive different keys for attacker vs legitimate client', async () => {
       // Server keypair
-      const serverKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
 
       // Client (Alice) creates request context with info parameter
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const requestEnc = new Uint8Array(aliceSender.enc);
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
+      );
+      const requestEnc = aliceEnc;
 
       // Response nonce (public, sent in header)
       const responseNonce = new Uint8Array(32);
       crypto.getRandomValues(responseNonce);
 
       // Alice exports secret from her HPKE context
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
 
       // Eve (attacker) creates her own HPKE context to the server
       // Even though Eve intercepts requestEnc, she cannot derive the shared secret
-      const eveSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const eveExported = new Uint8Array(
-        await eveSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const { ctx: eveCtx } = await suite.SetupSender(serverKeyPair.publicKey, { info: infoBytes });
+      const eveExported = await eveCtx.Export(exportLabelBytes, EXPORT_LENGTH);
 
       // Alice derives correct keys
       const aliceKM = await deriveResponseKeys(aliceExported, requestEnc, responseNonce);
@@ -85,50 +78,41 @@ describe('Security Tests', () => {
     });
 
     it('should prevent Eve from decrypting responses meant for Alice', async () => {
-      const serverKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
 
       // Alice creates request
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const requestEnc = new Uint8Array(aliceSender.enc);
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
+      );
+      const requestEnc = aliceEnc;
 
       // Server receives and creates receiver context
-      const serverReceiver = await suite.createRecipientContext({
-        recipientKey: serverKeyPair.privateKey,
-        enc: aliceSender.enc,
-        info: toArrayBuffer(infoBytes),
-      });
+      const serverCtx = await suite.SetupRecipient(
+        serverKeyPair.privateKey,
+        aliceEnc,
+        { info: infoBytes }
+      );
 
       // Server generates response nonce and encrypts response
       const responseNonce = new Uint8Array(32);
       crypto.getRandomValues(responseNonce);
 
-      const serverExported = new Uint8Array(
-        await serverReceiver.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const serverExported = await serverCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const serverKM = await deriveResponseKeys(serverExported, requestEnc, responseNonce);
 
       const secretMessage = new TextEncoder().encode('Secret API key: sk-12345');
       const encryptedResponse = await encryptChunk(serverKM, 0, secretMessage);
 
       // Alice can decrypt (she has matching exported secret)
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const aliceKM = await deriveResponseKeys(aliceExported, requestEnc, responseNonce);
       const aliceDecrypted = await decryptChunk(aliceKM, 0, encryptedResponse);
       assert.deepStrictEqual(aliceDecrypted, secretMessage, 'Alice should decrypt successfully');
 
       // Eve creates her own context - she CANNOT decrypt
-      const eveSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const eveExported = new Uint8Array(
-        await eveSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const { ctx: eveCtx } = await suite.SetupSender(serverKeyPair.publicKey, { info: infoBytes });
+      const eveExported = await eveCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const eveKM = await deriveResponseKeys(eveExported, requestEnc, responseNonce);
 
       // Eve's decryption MUST fail
@@ -142,17 +126,15 @@ describe('Security Tests', () => {
 
   describe('MitM cannot forge responses', () => {
     it('should reject responses encrypted with wrong keys', async () => {
-      const serverKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
 
       // Alice creates request
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const requestEnc = new Uint8Array(aliceSender.enc);
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
       );
+      const requestEnc = aliceEnc;
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
 
       // Attacker creates forged response with random keys
       const attackerSecret = new Uint8Array(32);
@@ -178,24 +160,22 @@ describe('Security Tests', () => {
 
   describe('Modified headers cause failure', () => {
     it('should fail decryption if request enc is modified', async () => {
-      const serverKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
 
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const originalEnc = new Uint8Array(aliceSender.enc);
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
+      );
+      const originalEnc = aliceEnc;
 
-      const serverReceiver = await suite.createRecipientContext({
-        recipientKey: serverKeyPair.privateKey,
-        enc: aliceSender.enc,
-        info: toArrayBuffer(infoBytes),
-      });
+      const serverCtx = await suite.SetupRecipient(
+        serverKeyPair.privateKey,
+        aliceEnc,
+        { info: infoBytes }
+      );
 
       // Server encrypts response using original enc
-      const serverExported = new Uint8Array(
-        await serverReceiver.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const serverExported = await serverCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const responseNonce = new Uint8Array(32);
       crypto.getRandomValues(responseNonce);
 
@@ -205,11 +185,9 @@ describe('Security Tests', () => {
 
       // Alice receives with MODIFIED enc (tampered by MitM)
       const modifiedEnc = new Uint8Array(originalEnc);
-      modifiedEnc[0] ^= 0xFF; // Flip bits
+      modifiedEnc[0] ^= 0xff; // Flip bits
 
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const aliceKM = await deriveResponseKeys(aliceExported, modifiedEnc, responseNonce);
 
       // Decryption MUST fail because enc was modified
@@ -221,24 +199,22 @@ describe('Security Tests', () => {
     });
 
     it('should fail decryption if response nonce is modified', async () => {
-      const serverKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
 
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const requestEnc = new Uint8Array(aliceSender.enc);
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
+      );
+      const requestEnc = aliceEnc;
 
-      const serverReceiver = await suite.createRecipientContext({
-        recipientKey: serverKeyPair.privateKey,
-        enc: aliceSender.enc,
-        info: toArrayBuffer(infoBytes),
-      });
+      const serverCtx = await suite.SetupRecipient(
+        serverKeyPair.privateKey,
+        aliceEnc,
+        { info: infoBytes }
+      );
 
       // Server encrypts response
-      const serverExported = new Uint8Array(
-        await serverReceiver.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const serverExported = await serverCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const originalNonce = new Uint8Array(32);
       crypto.getRandomValues(originalNonce);
 
@@ -248,11 +224,9 @@ describe('Security Tests', () => {
 
       // Alice receives with MODIFIED nonce (tampered by MitM)
       const modifiedNonce = new Uint8Array(originalNonce);
-      modifiedNonce[0] ^= 0xFF;
+      modifiedNonce[0] ^= 0xff;
 
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const aliceKM = await deriveResponseKeys(aliceExported, requestEnc, modifiedNonce);
 
       // Decryption MUST fail because nonce was modified
@@ -272,42 +246,38 @@ describe('Security Tests', () => {
       // The fix: response keys are derived from the HPKE shared secret.
       // There is no Ehbp-Client-Public-Key header to substitute.
 
-      const serverKeyPair = await suite.kem.generateKeyPair();
-      const _aliceKeyPair = await suite.kem.generateKeyPair();
-      const _eveKeyPair = await suite.kem.generateKeyPair();
+      const serverKeyPair = await suite.GenerateKeyPair(true);
+      const _aliceKeyPair = await suite.GenerateKeyPair(true);
+      const _eveKeyPair = await suite.GenerateKeyPair(true);
 
       // Alice creates request
-      const aliceSender = await suite.createSenderContext({
-        recipientPublicKey: serverKeyPair.publicKey,
-        info: toArrayBuffer(infoBytes),
-      });
-      const requestEnc = new Uint8Array(aliceSender.enc);
+      const { encapsulatedSecret: aliceEnc, ctx: aliceCtx } = await suite.SetupSender(
+        serverKeyPair.publicKey,
+        { info: infoBytes }
+      );
+      const requestEnc = aliceEnc;
 
       // With the vulnerable approach, Eve would substitute her public key in the header.
       // With derived keys, there's no such header - response keys come from HPKE export.
 
       // Server creates receiver from Alice's actual enc
-      const serverReceiver = await suite.createRecipientContext({
-        recipientKey: serverKeyPair.privateKey,
-        enc: aliceSender.enc,
-        info: toArrayBuffer(infoBytes),
-      });
+      const serverCtx = await suite.SetupRecipient(
+        serverKeyPair.privateKey,
+        aliceEnc,
+        { info: infoBytes }
+      );
 
       const responseNonce = new Uint8Array(32);
       crypto.getRandomValues(responseNonce);
 
-      const serverExported = new Uint8Array(
-        await serverReceiver.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const serverExported = await serverCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const serverKM = await deriveResponseKeys(serverExported, requestEnc, responseNonce);
 
       const secretData = new TextEncoder().encode('Sensitive API response');
       const encrypted = await encryptChunk(serverKM, 0, secretData);
 
       // Alice can decrypt using her HPKE context
-      const aliceExported = new Uint8Array(
-        await aliceSender.export(toArrayBuffer(exportLabelBytes), EXPORT_LENGTH)
-      );
+      const aliceExported = await aliceCtx.Export(exportLabelBytes, EXPORT_LENGTH);
       const aliceKM = await deriveResponseKeys(aliceExported, requestEnc, responseNonce);
       const decrypted = await decryptChunk(aliceKM, 0, encrypted);
       assert.deepStrictEqual(decrypted, secretData);

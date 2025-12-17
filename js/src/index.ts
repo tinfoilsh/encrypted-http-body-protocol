@@ -28,5 +28,4 @@ export {
 } from './derive.js';
 export type { ResponseKeyMaterial } from './derive.js';
 
-// Re-export commonly used types
-export type { CipherSuite } from '@hpke/core';
+export type { CipherSuite, SenderContext, RecipientContext, Key } from 'hpke';

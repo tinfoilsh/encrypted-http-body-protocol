@@ -2,7 +2,6 @@
  * Response key derivation for EHBP
  *
  * This module implements the key derivation matching the Go implementation.
- * Uses Web Crypto for HKDF and @hpke/core for AEAD.
  *
  * The derivation follows OHTTP (RFC 9458):
  *   salt = concat(enc, response_nonce)
@@ -11,12 +10,11 @@
  *   aead_nonce = Expand(prk, "nonce", Nn)
  */
 
-import { Aes256Gcm, type AeadEncryptionContext } from '@hpke/core';
+import { KDF_HKDF_SHA256, AEAD_AES_256_GCM, type KDF, type AEAD } from 'hpke';
 
-// Instantiate AEAD primitive from @hpke/core
-const aead = new Aes256Gcm();
+const kdf: KDF = KDF_HKDF_SHA256();
+const aead: AEAD = AEAD_AES_256_GCM();
 
-// Constants matching the Go implementation exactly
 export const HPKE_REQUEST_INFO = 'ehbp request';
 export const EXPORT_LABEL = 'ehbp response';
 export const EXPORT_LENGTH = 32;
@@ -25,7 +23,7 @@ export const AES256_KEY_LENGTH = 32;
 export const AES_GCM_NONCE_LENGTH = 12;
 export const REQUEST_ENC_LENGTH = 32; // X25519 enc size
 
-// Labels for HKDF-Expand (must match Go)
+// Labels for HKDF-Expand
 const RESPONSE_KEY_LABEL = new TextEncoder().encode('key');
 const RESPONSE_NONCE_LABEL = new TextEncoder().encode('nonce');
 
@@ -33,25 +31,15 @@ const RESPONSE_NONCE_LABEL = new TextEncoder().encode('nonce');
  * Response key material for encryption/decryption
  */
 export interface ResponseKeyMaterial {
-  /** AEAD encryption context with seal/open methods */
-  aeadContext: AeadEncryptionContext;
-  /** Raw key bytes (for testing/interop verification) */
+  /** Raw key bytes for AEAD operations */
   keyBytes: Uint8Array;
   /** 12 bytes, XORed with sequence number for each chunk */
   nonceBase: Uint8Array;
 }
 
 /**
- * Helper to convert Uint8Array to ArrayBuffer safely
- */
-function toArrayBuffer(arr: Uint8Array): ArrayBuffer {
-  return arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength) as ArrayBuffer;
-}
-
-/**
  * Derives response encryption keys from the HPKE exported secret.
  *
- * Uses Web Crypto HKDF + @hpke/core AEAD:
  *   salt = concat(enc, response_nonce)
  *   prk = Extract(salt, secret)
  *   key = Expand(prk, "key", 32)
@@ -67,7 +55,7 @@ export async function deriveResponseKeys(
   requestEnc: Uint8Array,
   responseNonce: Uint8Array
 ): Promise<ResponseKeyMaterial> {
-  // Validate inputs (matching Go validation)
+  // Validate inputs
   if (exportedSecret.length !== EXPORT_LENGTH) {
     throw new Error(`exported secret must be ${EXPORT_LENGTH} bytes, got ${exportedSecret.length}`);
   }
@@ -83,57 +71,21 @@ export async function deriveResponseKeys(
   salt.set(requestEnc, 0);
   salt.set(responseNonce, requestEnc.length);
 
-  // Import exported secret as HKDF key material (Web Crypto)
-  const ikm = await crypto.subtle.importKey(
-    'raw',
-    toArrayBuffer(exportedSecret),
-    'HKDF',
-    false,
-    ['deriveBits']
-  );
+  // prk = Extract(salt, secret)
+  const prk = await kdf.Extract(salt, exportedSecret);
 
-  // key = HKDF(secret, salt, "key", 32)
-  const keyBytes = new Uint8Array(
-    await crypto.subtle.deriveBits(
-      {
-        name: 'HKDF',
-        hash: 'SHA-256',
-        salt: toArrayBuffer(salt),
-        info: toArrayBuffer(RESPONSE_KEY_LABEL),
-      },
-      ikm,
-      AES256_KEY_LENGTH * 8
-    )
-  );
+  // key = Expand(prk, "key", 32)
+  const keyBytes = await kdf.Expand(prk, RESPONSE_KEY_LABEL, AES256_KEY_LENGTH);
 
-  // nonceBase = HKDF(secret, salt, "nonce", 12)
-  const nonceBase = new Uint8Array(
-    await crypto.subtle.deriveBits(
-      {
-        name: 'HKDF',
-        hash: 'SHA-256',
-        salt: toArrayBuffer(salt),
-        info: toArrayBuffer(RESPONSE_NONCE_LABEL),
-      },
-      ikm,
-      AES_GCM_NONCE_LENGTH * 8
-    )
-  );
+  // nonceBase = Expand(prk, "nonce", 12)
+  const nonceBase = await kdf.Expand(prk, RESPONSE_NONCE_LABEL, AES_GCM_NONCE_LENGTH);
 
-  // Create AEAD encryption context from @hpke/core
-  const aeadContext = aead.createEncryptionContext(toArrayBuffer(keyBytes));
-
-  return { aeadContext, keyBytes, nonceBase };
+  return { keyBytes, nonceBase };
 }
 
 /**
  * Computes the nonce for a specific sequence number.
  * nonce = nonceBase XOR sequence_number (big-endian in last 8 bytes)
- *
- * This matches the Go implementation:
- *   for i := 0; i < 8; i++ {
- *       nonce[len(nonce)-1-i] ^= byte(seq >> (i * 8))
- *   }
  */
 export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   if (nonceBase.length !== AES_GCM_NONCE_LENGTH) {
@@ -144,7 +96,6 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   nonce.set(nonceBase);
 
   // XOR with sequence number in the last 8 bytes (big-endian)
-  // Matches Go: nonce[len(nonce)-1-i] ^= byte(seq >> (i * 8))
   //
   // Note: JavaScript's >>> operator works on 32-bit integers and treats
   // shift amounts modulo 32 (so x >>> 32 === x, not 0). We handle this by
@@ -170,13 +121,9 @@ export async function encryptChunk(
 ): Promise<Uint8Array> {
   const nonce = computeNonce(km.nonceBase, seq);
 
-  const ciphertext = await km.aeadContext.seal(
-    toArrayBuffer(nonce),
-    toArrayBuffer(plaintext),
-    new ArrayBuffer(0) // empty AAD
-  );
+  const ciphertext = await aead.Seal(km.keyBytes, nonce, new Uint8Array(0), plaintext);
 
-  return new Uint8Array(ciphertext);
+  return ciphertext;
 }
 
 /**
@@ -189,13 +136,9 @@ export async function decryptChunk(
 ): Promise<Uint8Array> {
   const nonce = computeNonce(km.nonceBase, seq);
 
-  const plaintext = await km.aeadContext.open(
-    toArrayBuffer(nonce),
-    toArrayBuffer(ciphertext),
-    new ArrayBuffer(0) // empty AAD
-  );
+  const plaintext = await aead.Open(km.keyBytes, nonce, new Uint8Array(0), ciphertext);
 
-  return new Uint8Array(plaintext);
+  return plaintext;
 }
 
 /**
@@ -204,6 +147,9 @@ export async function decryptChunk(
 export function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0) {
     throw new Error('Hex string must have even length');
+  }
+  if (!/^[0-9a-fA-F]*$/.test(hex)) {
+    throw new Error('Invalid hex character');
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {

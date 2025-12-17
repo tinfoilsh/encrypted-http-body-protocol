@@ -1,4 +1,11 @@
-import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm, SenderContext } from '@hpke/core';
+import {
+  CipherSuite,
+  KEM_DHKEM_X25519_HKDF_SHA256,
+  KDF_HKDF_SHA256,
+  AEAD_AES_256_GCM,
+  type SenderContext,
+  type Key,
+} from 'hpke';
 import { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 import {
   deriveResponseKeys,
@@ -22,14 +29,25 @@ export interface RequestContext {
 }
 
 /**
+ * Creates a new CipherSuite for X25519/HKDF-SHA256/AES-256-GCM
+ */
+function createSuite(): CipherSuite {
+  return new CipherSuite(
+    KEM_DHKEM_X25519_HKDF_SHA256,
+    KDF_HKDF_SHA256,
+    AEAD_AES_256_GCM
+  );
+}
+
+/**
  * Identity class for managing HPKE key pairs and encryption/decryption
  */
 export class Identity {
   private suite: CipherSuite;
-  private publicKey: CryptoKey;
-  private privateKey: CryptoKey;
+  private publicKey: Key;
+  private privateKey: Key;
 
-  constructor(suite: CipherSuite, publicKey: CryptoKey, privateKey: CryptoKey) {
+  constructor(suite: CipherSuite, publicKey: Key, privateKey: Key) {
     this.suite = suite;
     this.publicKey = publicKey;
     this.privateKey = privateKey;
@@ -39,73 +57,43 @@ export class Identity {
    * Generate a new identity with X25519 key pair
    */
   static async generate(): Promise<Identity> {
-    const suite = new CipherSuite({
-      kem: new DhkemX25519HkdfSha256(),
-      kdf: new HkdfSha256(),
-      aead: new Aes256Gcm()
-    });
+    const suite = createSuite();
+    const { publicKey, privateKey } = await suite.GenerateKeyPair(true); // extractable
 
-    const { publicKey, privateKey } = await suite.kem.generateKeyPair();
-    
-    // Make sure the public key is extractable for serialization
-    const extractablePublicKey = await crypto.subtle.importKey(
-      'raw',
-      await crypto.subtle.exportKey('raw', publicKey),
-      { name: 'X25519' },
-      true, // extractable
-      []
-    );
-    
-    return new Identity(suite, extractablePublicKey, privateKey);
+    return new Identity(suite, publicKey, privateKey);
   }
-
 
   /**
    * Create identity from JSON string
    */
   static async fromJSON(json: string): Promise<Identity> {
     const data = JSON.parse(json);
-    const suite = new CipherSuite({
-      kem: new DhkemX25519HkdfSha256(),
-      kdf: new HkdfSha256(),
-      aead: new Aes256Gcm()
-    });
+    const suite = createSuite();
 
-    // Import public key
-    const publicKey = await crypto.subtle.importKey(
-      'raw',
-      new Uint8Array(data.publicKey),
-      { name: 'X25519' },
-      true, // extractable
-      []
-    );
-
-    // Deserialize private key using HPKE library
-    const privateKey = await suite.kem.deserializePrivateKey(new Uint8Array(data.privateKey).buffer);
+    // Deserialize keys using the suite
+    const publicKey = await suite.DeserializePublicKey(new Uint8Array(data.publicKey));
+    const privateKey = await suite.DeserializePrivateKey(new Uint8Array(data.privateKey), true);
 
     return new Identity(suite, publicKey, privateKey);
   }
-
 
   /**
    * Convert identity to JSON string
    */
   async toJSON(): Promise<string> {
-    const publicKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', this.publicKey));
-    
-    // For X25519, we need to use the HPKE library's serialization for private keys
-    const privateKeyBytes = await this.suite.kem.serializePrivateKey(this.privateKey);
-    
+    const publicKeyBytes = await this.suite.SerializePublicKey(this.publicKey);
+    const privateKeyBytes = await this.suite.SerializePrivateKey(this.privateKey);
+
     return JSON.stringify({
       publicKey: Array.from(publicKeyBytes),
-      privateKey: Array.from(new Uint8Array(privateKeyBytes))
+      privateKey: Array.from(privateKeyBytes),
     });
   }
 
   /**
-   * Get public key as CryptoKey
+   * Get public key
    */
-  getPublicKey(): CryptoKey {
+  getPublicKey(): Key {
     return this.publicKey;
   }
 
@@ -113,16 +101,14 @@ export class Identity {
    * Get public key as hex string
    */
   async getPublicKeyHex(): Promise<string> {
-    const exported = await crypto.subtle.exportKey('raw', this.publicKey);
-    return Array.from(new Uint8Array(exported))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
+    const exported = await this.suite.SerializePublicKey(this.publicKey);
+    return bytesToHex(exported);
   }
 
   /**
-   * Get private key as CryptoKey
+   * Get private key
    */
-  getPrivateKey(): CryptoKey {
+  getPrivateKey(): Key {
     return this.privateKey;
   }
 
@@ -136,7 +122,7 @@ export class Identity {
     const aeadId = HPKE_CONFIG.AEAD;
 
     // Export public key as raw bytes
-    const publicKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', this.publicKey));
+    const publicKeyBytes = await this.suite.SerializePublicKey(this.publicKey);
 
     // Key ID (1 byte) + KEM ID (2 bytes) + Public Key + Cipher Suites
     const keyId = 0;
@@ -150,24 +136,24 @@ export class Identity {
     buffer[offset++] = keyId;
 
     // KEM ID
-    buffer[offset++] = (kemId >> 8) & 0xFF;
-    buffer[offset++] = kemId & 0xFF;
+    buffer[offset++] = (kemId >> 8) & 0xff;
+    buffer[offset++] = kemId & 0xff;
 
     // Public Key
     buffer.set(publicKeyBytes, offset);
     offset += publicKeySize;
 
     // Cipher Suites Length (2 bytes)
-    buffer[offset++] = (cipherSuitesSize >> 8) & 0xFF;
-    buffer[offset++] = cipherSuitesSize & 0xFF;
+    buffer[offset++] = (cipherSuitesSize >> 8) & 0xff;
+    buffer[offset++] = cipherSuitesSize & 0xff;
 
     // KDF ID
-    buffer[offset++] = (kdfId >> 8) & 0xFF;
-    buffer[offset++] = kdfId & 0xFF;
+    buffer[offset++] = (kdfId >> 8) & 0xff;
+    buffer[offset++] = kdfId & 0xff;
 
     // AEAD ID
-    buffer[offset++] = (aeadId >> 8) & 0xFF;
-    buffer[offset++] = aeadId & 0xFF;
+    buffer[offset++] = (aeadId >> 8) & 0xff;
+    buffer[offset++] = aeadId & 0xff;
 
     return buffer;
   }
@@ -210,23 +196,21 @@ export class Identity {
 
     // Validate that we support this cipher suite
     if (firstSuite.kdfId !== HPKE_CONFIG.KDF || firstSuite.aeadId !== HPKE_CONFIG.AEAD) {
-      throw new Error(`Unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`);
+      throw new Error(
+        `Unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
+      );
     }
 
-    // Create cipher suite (currently only supports X25519/HKDF-SHA256/AES-256-GCM)
-    const suite = new CipherSuite({
-      kem: new DhkemX25519HkdfSha256(),
-      kdf: new HkdfSha256(),
-      aead: new Aes256Gcm()
-    });
+    // Create cipher suite
+    const suite = createSuite();
 
-    // Import public key using HPKE library
-    const publicKey = await suite.kem.deserializePublicKey(publicKeyBytes.buffer);
+    // Import public key
+    const publicKey = await suite.DeserializePublicKey(publicKeyBytes);
 
     // For server config, we only have the public key, no private key
     // We'll create a dummy private key that won't be used
-    const dummyPrivateKey = await suite.kem.deserializePrivateKey(new Uint8Array(32).buffer);
-    
+    const dummyPrivateKey = await suite.DeserializePrivateKey(new Uint8Array(32), false);
+
     return new Identity(suite, publicKey, dummyPrivateKey);
   }
 
@@ -263,17 +247,16 @@ export class Identity {
       };
     }
 
-    // Create sender for encryption with info parameter for domain separation
+    // Create sender context for encryption with info parameter for domain separation
     const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
-    const sender = await this.suite.createSenderContext({
-      recipientPublicKey: this.publicKey, // Encrypt to this identity's public key (the server)
-      info: infoBytes.buffer.slice(infoBytes.byteOffset, infoBytes.byteOffset + infoBytes.byteLength),
+    const { encapsulatedSecret, ctx } = await this.suite.SetupSender(this.publicKey, {
+      info: infoBytes,
     });
 
     // Store context for response decryption
     const context: RequestContext = {
-      senderContext: sender,
-      requestEnc: new Uint8Array(sender.enc),
+      senderContext: ctx,
+      requestEnc: encapsulatedSecret,
     };
 
     // Set headers - only encapsulated key for requests with body
@@ -281,7 +264,7 @@ export class Identity {
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
 
     // Encrypt the body
-    const encrypted = await sender.seal(body);
+    const encrypted = await ctx.Seal(new Uint8Array(body));
 
     // Create chunked format: 4-byte length header + encrypted data
     const chunkLength = new Uint8Array(4);
@@ -289,7 +272,7 @@ export class Identity {
 
     const chunkedData = new Uint8Array(4 + encrypted.byteLength);
     chunkedData.set(chunkLength, 0);
-    chunkedData.set(new Uint8Array(encrypted), 4);
+    chunkedData.set(encrypted, 4);
 
     return {
       request: new Request(request.url, {
@@ -334,19 +317,10 @@ export class Identity {
 
     // Export secret from request context
     const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
-    const exportedSecret = new Uint8Array(
-      await context.senderContext.export(
-        exportLabelBytes.buffer.slice(exportLabelBytes.byteOffset, exportLabelBytes.byteOffset + exportLabelBytes.byteLength),
-        EXPORT_LENGTH
-      )
-    );
+    const exportedSecret = await context.senderContext.Export(exportLabelBytes, EXPORT_LENGTH);
 
     // Derive response keys
-    const km = await deriveResponseKeys(
-      exportedSecret,
-      context.requestEnc,
-      responseNonce
-    );
+    const km = await deriveResponseKeys(exportedSecret, context.requestEnc, responseNonce);
 
     // Create decrypting stream
     const decryptedStream = this.createDecryptStream(response.body, km);
@@ -392,9 +366,7 @@ export class Identity {
                 controller.enqueue(plaintext);
                 return;
               } catch (error) {
-                controller.error(
-                  new Error(`Decryption failed at chunk ${seq - 1}: ${error}`)
-                );
+                controller.error(new Error(`Decryption failed at chunk ${seq - 1}: ${error}`));
                 return;
               }
             }
