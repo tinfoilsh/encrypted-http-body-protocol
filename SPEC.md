@@ -167,7 +167,7 @@ Client implementations MAY support consuming plaintext fallback responses. The r
 
 ### 6.1 Request-Response Binding
 
-EHBP v2 cryptographically binds responses to their corresponding requests. This prevents:
+EHBP cryptographically binds responses to their corresponding requests. This prevents:
 
 - **Response interception:** A MitM cannot decrypt responses without the request's HPKE shared secret
 - **Response forgery:** A MitM cannot create valid encrypted responses
