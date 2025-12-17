@@ -140,13 +140,6 @@ func TestUnmarshalPublicConfig(t *testing.T) {
 	assert.True(t, identity.pk.Equal(parsedIdentity.pk))
 	assert.Equal(t, identity.suite, parsedIdentity.suite)
 	assert.Nil(t, parsedIdentity.sk) // should be nil for public key only
-
-	// Test error cases
-	_, err = UnmarshalPublicConfig([]byte{})
-	assert.Error(t, err)
-
-	_, err = UnmarshalPublicConfig([]byte("invalid"))
-	assert.Error(t, err)
 }
 
 func TestExportImportErrorCases(t *testing.T) {

@@ -12,9 +12,9 @@ import (
 )
 
 // =============================================================================
-// Security Tests for EHBP v2
+// Security Tests for EHBP
 //
-// These tests verify that the MitM vulnerability is fixed by testing:
+// These tests verify that the MitM vulnerability is not present:
 // 1. MitM cannot derive the correct response decryption keys
 // 2. MitM cannot forge valid encrypted responses
 // 3. Modified headers cause decryption failures
@@ -47,7 +47,7 @@ func TestMitMCannotReadResponse(t *testing.T) {
 	}
 
 	// Client (Alice) encrypts a request to server
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestMitMCannotReadResponse(t *testing.T) {
 	}
 
 	// Server receives and decrypts (simulated by setting up receiver)
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), nil)
+	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create receiver: %v", err)
 	}
@@ -97,7 +97,8 @@ func TestMitMCannotReadResponse(t *testing.T) {
 	// She does NOT have: the HPKE shared secret
 
 	// Eve tries to create her own HPKE context to the server
-	eveSender, err := eveIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+	// Even with correct info, Eve's shared secret is different from Alice's
+	eveSender, err := eveIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Eve failed to create sender: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestMitMCannotForgeResponse(t *testing.T) {
 	}
 
 	// Client encrypts request
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 	}
 
 	// Original request encryption
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 
 	// Server decrypts with original enc (in real scenario, it would use modified enc
 	// but that would fail decryption - here we test key derivation mismatch)
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), nil)
+	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create receiver: %v", err)
 	}
@@ -298,7 +299,7 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 		t.Fatalf("Failed to create client identity: %v", err)
 	}
 
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
@@ -307,7 +308,7 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 		t.Fatalf("Failed to setup sender: %v", err)
 	}
 
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), nil)
+	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create receiver: %v", err)
 	}

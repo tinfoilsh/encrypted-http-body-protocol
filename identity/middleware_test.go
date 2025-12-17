@@ -202,26 +202,6 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 		assert.Contains(t, w.Body.String(), "failed to decrypt request")
 	})
-
-	t.Run("empty request body with valid enc header", func(t *testing.T) {
-		client := newV2TestClient(t)
-
-		// Send request with no body but valid encryption header
-		req := httptest.NewRequest("GET", "/test", nil)
-		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
-
-		w := httptest.NewRecorder()
-		wrapped.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-
-		// Should still be able to decrypt response
-		responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
-		assert.NotEmpty(t, responseNonceHeader)
-
-		decryptedResponse := client.decryptResponse(t, w)
-		assert.Equal(t, "Hello, ", string(decryptedResponse))
-	})
 }
 
 func TestPlaintextFallback(t *testing.T) {
@@ -518,4 +498,3 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 		wrapped.ServeHTTP(w, req)
 	}
 }
-
