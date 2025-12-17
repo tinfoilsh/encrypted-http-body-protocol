@@ -1,5 +1,25 @@
-import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm } from '@hpke/core';
+import { CipherSuite, DhkemX25519HkdfSha256, HkdfSha256, Aes256Gcm, SenderContext } from '@hpke/core';
 import { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+import {
+  deriveResponseKeys,
+  decryptChunk,
+  hexToBytes,
+  bytesToHex,
+  HPKE_REQUEST_INFO,
+  EXPORT_LABEL,
+  EXPORT_LENGTH,
+  RESPONSE_NONCE_LENGTH,
+  ResponseKeyMaterial,
+} from './derive.js';
+
+/**
+ * Request context for v2 response decryption.
+ * Holds the HPKE sender context needed to derive response keys.
+ */
+export interface RequestContext {
+  senderContext: SenderContext;
+  requestEnc: Uint8Array;
+}
 
 /**
  * Identity class for managing HPKE key pairs and encryption/decryption
@@ -263,6 +283,7 @@ export class Identity {
 
   /**
    * Decrypt response body
+   * @deprecated Use decryptResponseWithContext for v2 protocol
    */
   async decryptResponse(response: Response, serverEncapKey: Uint8Array): Promise<Response> {
     if (!response.body) {
@@ -297,9 +318,9 @@ export class Identity {
               // Process complete chunks
               while (offset + 4 <= buffer.length) {
                 // Read chunk length (4 bytes big-endian)
-                const chunkLength = (buffer[offset] << 24) | 
-                                  (buffer[offset + 1] << 16) | 
-                                  (buffer[offset + 2] << 8) | 
+                const chunkLength = (buffer[offset] << 24) |
+                                  (buffer[offset + 1] << 16) |
+                                  (buffer[offset + 2] << 8) |
                                   buffer[offset + 3];
                 offset += 4;
 
@@ -352,4 +373,192 @@ export class Identity {
     });
   }
 
+  // ===========================================================================
+  // V2 Protocol Methods - Use derived keys for response encryption
+  // ===========================================================================
+
+  /**
+   * Encrypt request body and return context for response decryption (v2).
+   *
+   * This method:
+   * 1. Creates an HPKE sender context to the server's public key
+   * 2. Encrypts the request body
+   * 3. Returns a RequestContext that must be used to decrypt the response
+   *
+   * IMPORTANT: Do NOT send Ehbp-Client-Public-Key header (v1 vulnerability)
+   */
+  async encryptRequestWithContext(
+    request: Request,
+    serverPublicKey: CryptoKey
+  ): Promise<{ request: Request; context: RequestContext }> {
+    const body = await request.arrayBuffer();
+
+    // Create sender for encryption with info parameter for domain separation
+    const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
+    const sender = await this.suite.createSenderContext({
+      recipientPublicKey: serverPublicKey,
+      info: infoBytes.buffer.slice(infoBytes.byteOffset, infoBytes.byteOffset + infoBytes.byteLength),
+    });
+
+    // Store context for response decryption
+    const context: RequestContext = {
+      senderContext: sender,
+      requestEnc: new Uint8Array(sender.enc),
+    };
+
+    // Set headers - only encapsulated key, NOT client public key
+    const headers = new Headers(request.headers);
+    headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
+    // Note: Do NOT set CLIENT_PUBLIC_KEY_HEADER - that's the v1 vulnerability!
+
+    if (body.byteLength === 0) {
+      return {
+        request: new Request(request.url, {
+          method: request.method,
+          headers,
+          body: null,
+        }),
+        context,
+      };
+    }
+
+    // Encrypt the body
+    const encrypted = await sender.seal(body);
+
+    // Create chunked format: 4-byte length header + encrypted data
+    const chunkLength = new Uint8Array(4);
+    new DataView(chunkLength.buffer).setUint32(0, encrypted.byteLength, false);
+
+    const chunkedData = new Uint8Array(4 + encrypted.byteLength);
+    chunkedData.set(chunkLength, 0);
+    chunkedData.set(new Uint8Array(encrypted), 4);
+
+    return {
+      request: new Request(request.url, {
+        method: request.method,
+        headers,
+        body: chunkedData,
+        duplex: 'half',
+      } as RequestInit),
+      context,
+    };
+  }
+
+  /**
+   * Decrypt response using keys derived from request context (v2).
+   *
+   * This method:
+   * 1. Reads the response nonce from Ehbp-Response-Nonce header
+   * 2. Exports a secret from the HPKE sender context
+   * 3. Derives response keys using HKDF
+   * 4. Decrypts the response body
+   *
+   * This prevents MitM key substitution attacks because the response keys
+   * are derived from the shared secret between client and server.
+   */
+  async decryptResponseWithContext(
+    response: Response,
+    context: RequestContext
+  ): Promise<Response> {
+    if (!response.body) {
+      return response;
+    }
+
+    // Get response nonce from header
+    const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
+    if (!responseNonceHex) {
+      throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    }
+
+    const responseNonce = hexToBytes(responseNonceHex);
+    if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
+      throw new Error(
+        `Invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`
+      );
+    }
+
+    // Export secret from request context
+    const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
+    const exportedSecret = new Uint8Array(
+      await context.senderContext.export(
+        exportLabelBytes.buffer.slice(exportLabelBytes.byteOffset, exportLabelBytes.byteOffset + exportLabelBytes.byteLength),
+        EXPORT_LENGTH
+      )
+    );
+
+    // Derive response keys
+    const km = await deriveResponseKeys(
+      exportedSecret,
+      context.requestEnc,
+      responseNonce
+    );
+
+    // Create decrypting stream
+    const decryptedStream = this.createDecryptStreamV2(response.body, km);
+
+    return new Response(decryptedStream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+
+  /**
+   * Creates a ReadableStream that decrypts response chunks using derived keys.
+   */
+  private createDecryptStreamV2(
+    body: ReadableStream<Uint8Array>,
+    km: ResponseKeyMaterial
+  ): ReadableStream<Uint8Array> {
+    let buffer = new Uint8Array(0);
+    let seq = 0;
+    const reader = body.getReader();
+
+    return new ReadableStream({
+      async pull(controller) {
+        while (true) {
+          // Try to read a complete chunk from buffer
+          if (buffer.length >= 4) {
+            const chunkLength =
+              (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+
+            if (chunkLength === 0) {
+              // Skip empty chunk
+              buffer = buffer.slice(4);
+              continue;
+            }
+
+            if (buffer.length >= 4 + chunkLength) {
+              const ciphertext = buffer.slice(4, 4 + chunkLength);
+              buffer = buffer.slice(4 + chunkLength);
+
+              try {
+                const plaintext = await decryptChunk(km, seq++, ciphertext);
+                controller.enqueue(plaintext);
+                return;
+              } catch (error) {
+                controller.error(
+                  new Error(`Decryption failed at chunk ${seq - 1}: ${error}`)
+                );
+                return;
+              }
+            }
+          }
+
+          // Need more data
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+
+          // Append to buffer
+          const newBuffer = new Uint8Array(buffer.length + value.length);
+          newBuffer.set(buffer);
+          newBuffer.set(value, buffer.length);
+          buffer = newBuffer;
+        }
+      },
+    });
+  }
 }
