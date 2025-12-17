@@ -47,13 +47,18 @@ describe('Transport', () => {
       method: 'GET'
     });
 
-    const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
+    const { request: resultRequest, context } = await serverIdentity.encryptRequestWithContext(request);
 
-    // Only encapsulated key header is set
-    assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set even without body');
+    // Bodyless requests pass through unmodified - no EHBP headers set
+    // See SPEC.md Section 5.1
+    assert.strictEqual(
+      resultRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER),
+      null,
+      'Encapsulated key header should NOT be set for bodyless requests'
+    );
 
-    // Context is returned for response decryption
-    assert(context, 'Context should be returned');
+    // Context is null for bodyless requests (no HPKE context to derive response keys from)
+    assert.strictEqual(context, null, 'Context should be null for bodyless requests');
   });
 
   it('should connect to actual server and POST to /secure endpoint', async (t) => {
