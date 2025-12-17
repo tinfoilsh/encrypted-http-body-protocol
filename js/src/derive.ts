@@ -1,5 +1,5 @@
 /**
- * Response key derivation for EHBP v2
+ * Response key derivation for EHBP
  *
  * This module implements the key derivation matching the Go implementation.
  * The derivation follows OHTTP (RFC 9458):

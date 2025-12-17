@@ -2,14 +2,7 @@ import { Identity } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 
 /**
- * HTTP transport for EHBP v2
- *
- * This transport uses the v2 protocol which derives response encryption keys
- * from the HPKE shared secret, preventing MitM key substitution attacks.
- *
- * Unlike v1, this transport does NOT require a client keypair. The v2 protocol
- * derives response keys from the HPKE shared secret established during request
- * encryption, so only the server's public key is needed.
+ * HTTP transport for EHBP
  */
 export class Transport {
   private serverIdentity: Identity;
@@ -22,9 +15,6 @@ export class Transport {
 
   /**
    * Create a new transport by fetching server public key.
-   *
-   * Note: Unlike v1, no client identity is required. The v2 protocol derives
-   * response keys from the HPKE shared secret.
    */
   static async create(serverURL: string): Promise<Transport> {
     const url = new URL(serverURL);
@@ -71,10 +61,7 @@ export class Transport {
   }
 
   /**
-   * Make an encrypted HTTP request using v2 protocol.
-   *
-   * V2 protocol uses derived keys for response encryption, preventing
-   * MitM key substitution attacks that were possible in v1.
+   * Make an encrypted HTTP request.
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     // Skip EHBP for non-network URLs (data:, blob:)
@@ -120,7 +107,7 @@ export class Transport {
       duplex: 'half',
     } as RequestInit);
 
-    // Encrypt request using v2 protocol (returns context for response decryption)
+    // Encrypt request (returns context for response decryption)
     const { request: encryptedRequest, context } =
       await this.serverIdentity.encryptRequestWithContext(request);
 
@@ -137,13 +124,13 @@ export class Transport {
       return response;
     }
 
-    // V2: Check for response nonce header (derived key response)
+    // Check for response nonce header (required for derived key decryption)
     const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
     if (!responseNonceHeader) {
       throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
     }
 
-    // Decrypt response using derived keys (v2)
+    // Decrypt response using derived keys
     return await this.serverIdentity.decryptResponseWithContext(response, context);
   }
 
@@ -178,9 +165,6 @@ export class Transport {
 
 /**
  * Create a new transport instance.
- *
- * Note: Unlike v1, no client identity is required. The v2 protocol derives
- * response keys from the HPKE shared secret.
  */
 export async function createTransport(serverURL: string): Promise<Transport> {
   return Transport.create(serverURL);
