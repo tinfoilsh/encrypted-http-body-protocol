@@ -115,17 +115,16 @@
     </div>
 
     <script type="module">
-        import { Identity, createTransport } from './dist/browser.js';
+        import { createTransport } from './dist/browser.js';
 
         let transport = null;
-        let clientIdentity = null;
 
         async function initializeClient() {
             try {
                 updateStatus('serverStatus', 'info', 'Initializing client...');
-                clientIdentity = await Identity.generate();
                 const serverUrl = document.getElementById('serverUrl').value;
-                transport = await createTransport(serverUrl, clientIdentity);
+                // No client identity needed - response keys derived from HPKE shared secret
+                transport = await createTransport(serverUrl);
                 updateStatus('serverStatus', 'success', `Connected to ${serverUrl}`);
                 return true;
             } catch (error) {
