@@ -391,16 +391,12 @@ type RequestContext struct {
 	RequestEnc []byte      // The encapsulated key we sent
 }
 
-// EncryptRequestWithContext encrypts the request body and returns the HPKE context
-// needed for response decryption.
-func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey []byte) (*RequestContext, error) {
-	// Set up encryption to recipient
-	pk, err := i.KEMScheme().UnmarshalBinaryPublicKey(recipientPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("invalid recipient public key: %w", err)
-	}
-
-	sender, err := i.Suite().NewSender(pk, nil)
+// EncryptRequestWithContext encrypts the request body TO this identity's public key
+// and returns the HPKE context needed for response decryption.
+// This should be called on the server's identity (obtained from the server's public config).
+func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext, error) {
+	// Set up encryption to this identity's public key
+	sender, err := i.Suite().NewSender(i.pk, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sender: %w", err)
 	}
@@ -432,18 +428,14 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request, recipientPubKey 
 	}, nil
 }
 
-// DecryptResponseWithContext decrypts a response using keys derived from
-// the request's HPKE context.
+// DecryptResponse decrypts a response using keys derived from the request's HPKE context.
 //
 // The response decryption keys are derived using the same process as the server:
 //  1. Export a secret from the HPKE context using label "ehbp response"
 //  2. Read the response nonce from the Ehbp-Response-Nonce header
 //  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
-func (i *Identity) DecryptResponseWithContext(
-	resp *http.Response,
-	reqCtx *RequestContext,
-) error {
-	if reqCtx == nil {
+func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
+	if ctx == nil {
 		return fmt.Errorf("request context is nil")
 	}
 
@@ -464,10 +456,10 @@ func (i *Identity) DecryptResponseWithContext(
 	}
 
 	// Export secret from request context
-	exportedSecret := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+	exportedSecret := ctx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
 
 	// Derive response keys
-	km, err := DeriveResponseKeys(exportedSecret, reqCtx.RequestEnc, responseNonce)
+	km, err := DeriveResponseKeys(exportedSecret, ctx.RequestEnc, responseNonce)
 	if err != nil {
 		return fmt.Errorf("failed to derive response keys: %w", err)
 	}

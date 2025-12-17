@@ -15,8 +15,6 @@ import (
 )
 
 func TestSecureClient(t *testing.T) {
-	clientIdentity, err := identity.NewIdentity()
-	assert.NoError(t, err)
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
 
@@ -63,7 +61,7 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureTransport, err := NewTransport(server.URL, clientIdentity, false)
+	secureTransport, err := NewTransport(server.URL, false)
 	assert.NoError(t, err)
 	httpClient := &http.Client{
 		Transport: secureTransport,

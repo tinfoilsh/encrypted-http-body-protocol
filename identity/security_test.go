@@ -369,11 +369,6 @@ func TestEndToEndSecureRoundTrip(t *testing.T) {
 		t.Fatalf("Failed to create server identity: %v", err)
 	}
 
-	clientIdentity, err := NewIdentity()
-	if err != nil {
-		t.Fatalf("Failed to create client identity: %v", err)
-	}
-
 	secretResponse := "This is a secret response that only the legitimate client should see"
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -382,9 +377,9 @@ func TestEndToEndSecureRoundTrip(t *testing.T) {
 
 	wrappedHandler := serverIdentity.Middleware(false)(handler)
 
-	// Client creates request with v2 encryption
+	// Client creates request with encryption to server's public key
 	req := httptest.NewRequest("GET", "/secret", nil)
-	reqCtx, err := clientIdentity.EncryptRequestWithContext(req, serverIdentity.MarshalPublicKey())
+	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	if err != nil {
 		t.Fatalf("Failed to encrypt request: %v", err)
 	}
@@ -404,7 +399,7 @@ func TestEndToEndSecureRoundTrip(t *testing.T) {
 	}
 
 	// Client decrypts response using the request context
-	err = clientIdentity.DecryptResponseWithContext(resp, reqCtx)
+	err = reqCtx.DecryptResponse(resp)
 	if err != nil {
 		t.Fatalf("Failed to decrypt response: %v", err)
 	}

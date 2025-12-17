@@ -12,29 +12,14 @@ import (
 )
 
 type Transport struct {
-	clientIdentity *identity.Identity
 	serverIdentity *identity.Identity
 	httpClient     *http.Client
 }
 
 var _ http.RoundTripper = (*Transport)(nil)
 
-// NewTransport creates a new encrypted transport.
-// If clientIdentity is nil, an ephemeral identity is created automatically.
-// The client identity is used only for HPKE suite access - its private key is never used
-// since response decryption uses keys derived from the request's HPKE context.
-func NewTransport(server string, clientIdentity *identity.Identity, insecureSkipVerify bool) (*Transport, error) {
-	// Create ephemeral identity if not provided
-	if clientIdentity == nil {
-		var err error
-		clientIdentity, err = identity.NewIdentity()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create ephemeral identity: %v", err)
-		}
-	}
-
+func NewTransport(server string, insecureSkipVerify bool) (*Transport, error) {
 	t := &Transport{
-		clientIdentity: clientIdentity,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{
@@ -94,10 +79,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
 
-	serverPubKeyBytes := t.serverIdentity.MarshalPublicKey()
-
-	// Encrypt request and get context for response decryption
-	reqCtx, err := t.clientIdentity.EncryptRequestWithContext(newReq, serverPubKeyBytes)
+	// Encrypt request to server's public key and get context for response decryption
+	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
@@ -112,7 +95,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	if err := t.clientIdentity.DecryptResponseWithContext(resp, reqCtx); err != nil {
+	if err := reqCtx.DecryptResponse(resp); err != nil {
 		resp.Body.Close()
 		return nil, fmt.Errorf("failed to decrypt response: %v", err)
 	}

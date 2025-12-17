@@ -93,10 +93,7 @@ import (
 )
 
 func main() {
-  // Pass nil for clientIdentity.
-  // The client's private key is never used; response decryption uses keys
-  // derived from the request's HPKE context.
-  tr, err := client.NewTransport("http://localhost:8080", nil, false)
+  tr, err := client.NewTransport("http://localhost:8080", false)
   if err != nil {
     log.Fatalf("client exited: %v", err)
   }

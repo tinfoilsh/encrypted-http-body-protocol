@@ -13,14 +13,10 @@ func sendError(w http.ResponseWriter, err error, text string, status int) {
 }
 
 // Middleware wraps an HTTP handler to encrypt/decrypt requests and responses
-// using the v2 protocol with request-response binding.
-//
-// In v2, response encryption keys are derived from the request's HPKE context,
-// which prevents MitM attacks where an attacker could intercept responses.
 func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Check for request encryption header (v2 uses encapsulated key)
+			// Check for request encryption header
 			requestEncHex := r.Header.Get(protocol.EncapsulatedKeyHeader)
 			if requestEncHex == "" {
 				if permitPlaintextFallback {
@@ -61,7 +57,7 @@ func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) h
 				}
 			}
 
-			// Setup response encryption using derived keys (v2)
+			// Setup response encryption using derived keys
 			encryptedWriter, err := i.SetupDerivedResponseEncryption(w, respCtx)
 			if err != nil {
 				status := http.StatusInternalServerError
@@ -77,4 +73,3 @@ func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) h
 		})
 	}
 }
-
