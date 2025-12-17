@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 
 /**
- * Example usage of the EHBP JavaScript client
+ * Example usage of the EHBP v2 JavaScript client
+ *
+ * Note: V2 does NOT require a client identity. Response keys are derived
+ * from the HPKE shared secret, preventing MitM key substitution attacks.
  */
 
-import { Identity, createTransport } from './index.js';
+import { createTransport } from './index.js';
 
 async function main() {
-  console.log('EHBP JavaScript Client Example');
-  console.log('==============================');
+  console.log('EHBP v2 JavaScript Client Example');
+  console.log('==================================');
 
   try {
-    // Create client identity
-    console.log('Creating client identity...');
-    const clientIdentity = await Identity.generate();
-    console.log('Client public key:', await clientIdentity.getPublicKeyHex());
-
+    // V2: No client identity needed! Response keys are derived from HPKE shared secret.
     // Create transport (this will fetch server public key)
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080'; // Adjust as needed
-    const transport = await createTransport(serverURL, clientIdentity);
+    const transport = await createTransport(serverURL);
     console.log('Transport created successfully');
+    console.log('Server public key:', await transport.getServerPublicKeyHex());
 
     // Example 1: GET request to secure endpoint
     console.log('\n--- GET Request ---');
