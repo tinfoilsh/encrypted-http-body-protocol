@@ -81,39 +81,42 @@ Response encryption uses keys derived from the request's HPKE context, providing
 
 Both client and server derive response keys as follows:
 
+The derivation follows OHTTP (RFC 9458) exactly:
+
 1. **Export secret from HPKE context:**
    ```
-   exported_secret = HPKE.Export(context, "ehbp response", 32)
-   ```
-
-   Where `context` is:
-   - Server: The opener/receiver context from request decryption
-   - Client: The sealer/sender context from request encryption
-
-2. **Construct salt:**
-   ```
-   salt = request_enc || response_nonce
+   secret = context.Export("ehbp response", Nk)
    ```
 
    Where:
-   - `request_enc`: The 32-byte encapsulated key from the request (from `Ehbp-Encapsulated-Key`)
-   - `response_nonce`: The 32-byte random nonce from `Ehbp-Response-Nonce`
+   - `context` is the HPKE context (opener on server, sealer on client)
+   - `Nk` = 32 (AES-256 key size)
 
-3. **Derive PRK using HKDF-Extract:**
+2. **Generate response nonce:**
    ```
-   prk = HKDF-Extract(salt, exported_secret)
+   response_nonce = random(max(Nn, Nk))
    ```
 
-4. **Derive response key and nonce:**
+   Where `max(Nn, Nk)` = max(12, 32) = 32 bytes for AES-256-GCM.
+
+3. **Construct salt and derive PRK:**
    ```
-   response_key = HKDF-Expand(prk, "ehbp response key", 32)
-   response_iv = HKDF-Expand(prk, "ehbp response iv", 12)
+   salt = concat(enc, response_nonce)
+   prk = Extract(salt, secret)
    ```
+
+4. **Derive AEAD key and nonce:**
+   ```
+   aead_key = Expand(prk, "key", Nk)
+   aead_nonce = Expand(prk, "nonce", Nn)
+   ```
+
+   Where `Nk` = 32 and `Nn` = 12.
 
 5. **Encrypt/decrypt using AES-256-GCM:**
    - The response body uses the same chunked framing as requests (Section 4.3)
-   - Each chunk is encrypted with AES-256-GCM using `response_key`
-   - Nonce for chunk `i` is: `response_iv XOR i` (where `i` is zero-indexed)
+   - Each chunk is encrypted with AES-256-GCM using `aead_key`
+   - Nonce for chunk `i` is: `aead_nonce XOR i` (where `i` is zero-indexed)
    - AAD is empty
 
 #### 4.4.2 Security Properties

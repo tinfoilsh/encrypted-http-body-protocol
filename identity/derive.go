@@ -11,16 +11,19 @@ import (
 )
 
 const (
-	// ResponseKeyLabel is the info string for deriving the response encryption key
-	ResponseKeyLabel = "ehbp response key"
-	// ResponseIVLabel is the info string for deriving the response IV/nonce base
-	ResponseIVLabel = "ehbp response iv"
-	// ExportLabel is the context string for HPKE Export
+	// ResponseKeyLabel is the info string for HKDF-Expand to derive the response key.
+	// Matches OHTTP (RFC 9458) exactly.
+	ResponseKeyLabel = "key"
+	// ResponseNonceLabel is the info string for HKDF-Expand to derive the response nonce.
+	// Matches OHTTP (RFC 9458) exactly.
+	ResponseNonceLabel = "nonce"
+	// ExportLabel is the context string for HPKE Export.
 	ExportLabel = "ehbp response"
-	// ExportLength is the length of the exported secret (32 bytes for SHA-256)
+	// ExportLength is the length of the exported secret.
+	// Matches OHTTP: Nk (AEAD key size) = 32 bytes for AES-256-GCM.
 	ExportLength = 32
 	// ResponseNonceLength is the length of the random response nonce.
-	// This matches OHTTP (RFC 9458): max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
+	// Matches OHTTP (RFC 9458): max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
 	ResponseNonceLength = 32
 	// AES256KeyLength is the length of an AES-256 key
 	AES256KeyLength = 32
@@ -39,11 +42,12 @@ type ResponseKeyMaterial struct {
 // - requestEnc: The encapsulated key from the request (32 bytes for X25519)
 // - responseNonce: The random nonce for this response (32 bytes, matching OHTTP's max(Nn, Nk))
 //
-// The derivation follows the pattern from OHTTP (RFC 9458):
+// The derivation follows OHTTP (RFC 9458) exactly:
 //
-//	salt = request_enc || response_nonce
-//	key = HKDF(exportedSecret, salt, "ehbp response key", 32)
-//	iv = HKDF(exportedSecret, salt, "ehbp response iv", 12)
+//	salt = concat(enc, response_nonce)
+//	prk = Extract(salt, secret)
+//	aead_key = Expand(prk, "key", Nk)
+//	aead_nonce = Expand(prk, "nonce", Nn)
 func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*ResponseKeyMaterial, error) {
 	if len(exportedSecret) != ExportLength {
 		return nil, fmt.Errorf("exported secret must be %d bytes, got %d", ExportLength, len(exportedSecret))
@@ -55,23 +59,26 @@ func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*Resp
 		return nil, fmt.Errorf("response nonce must be %d bytes, got %d", ResponseNonceLength, len(responseNonce))
 	}
 
-	// Construct salt: request_enc || response_nonce
+	// salt = concat(enc, response_nonce)
 	salt := make([]byte, len(requestEnc)+len(responseNonce))
 	copy(salt, requestEnc)
 	copy(salt[len(requestEnc):], responseNonce)
 
-	// Derive the response key using HKDF with key label as info
-	keyReader := hkdf.New(sha256.New, exportedSecret, salt, []byte(ResponseKeyLabel))
+	// prk = Extract(salt, secret)
+	prk := hkdf.Extract(sha256.New, exportedSecret, salt)
+
+	// aead_key = Expand(prk, "key", Nk)
+	keyReader := hkdf.Expand(sha256.New, prk, []byte(ResponseKeyLabel))
 	key := make([]byte, AES256KeyLength)
 	if _, err := io.ReadFull(keyReader, key); err != nil {
 		return nil, fmt.Errorf("failed to derive response key: %w", err)
 	}
 
-	// Derive the nonce base using HKDF with IV label as info
-	ivReader := hkdf.New(sha256.New, exportedSecret, salt, []byte(ResponseIVLabel))
+	// aead_nonce = Expand(prk, "nonce", Nn)
+	nonceReader := hkdf.Expand(sha256.New, prk, []byte(ResponseNonceLabel))
 	nonceBase := make([]byte, AESGCMNonceLength)
-	if _, err := io.ReadFull(ivReader, nonceBase); err != nil {
-		return nil, fmt.Errorf("failed to derive response nonce base: %w", err)
+	if _, err := io.ReadFull(nonceReader, nonceBase); err != nil {
+		return nil, fmt.Errorf("failed to derive response nonce: %w", err)
 	}
 
 	return &ResponseKeyMaterial{
