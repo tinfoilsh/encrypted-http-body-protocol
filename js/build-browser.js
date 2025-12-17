@@ -4,17 +4,13 @@
  * Build script to create a browser-compatible bundle
  */
 
-import { build } from 'esbuild';
-import { readFileSync, writeFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const { build } = require('esbuild');
+const { writeFileSync } = require('fs');
+const { join } = require('path');
 
 async function buildBrowser() {
   console.log('Building browser bundle...');
-  
+
   try {
     // Build the main bundle
     await build({
@@ -28,8 +24,8 @@ async function buildBrowser() {
       sourcemap: true,
       minify: false,
       define: {
-        'process.env.NODE_ENV': '"production"'
-      }
+        'process.env.NODE_ENV': '"production"',
+      },
     });
 
     // Create a simple wrapper that exports everything
@@ -39,12 +35,11 @@ export * from './browser.js';
 `;
 
     writeFileSync(join(__dirname, 'dist', 'index.js'), wrapper);
-    
+
     console.log('Browser bundle created successfully!');
     console.log('Files created:');
     console.log('  - dist/browser.js (main bundle)');
     console.log('  - dist/index.js (wrapper)');
-    
   } catch (error) {
     console.error('Build failed:', error);
     process.exit(1);

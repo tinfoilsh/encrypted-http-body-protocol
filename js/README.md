@@ -82,9 +82,9 @@ npm test
 npm run build:browser  # Browser bundle
 ```
 
-### Running Examples
+### Running Examples (Node.js)
 
-The example requires a build and an EHBP server running at `http://localhost:8080`:
+The Node.js example requires a build and an EHBP server running at `http://localhost:8080`:
 
 ```sh
 # Build first
@@ -96,6 +96,30 @@ go run pkg/server/main.go
 # Run the example (in another terminal)
 npm run example
 ```
+
+### Running Examples (Browser)
+
+Browser examples are located in `examples/` and require the browser bundle:
+
+```sh
+# Build the browser bundle
+npm run build:browser
+
+# Start the local dev server
+npm run serve
+
+# Start the Go EHBP server (from parent directory, in another terminal)
+go run pkg/server/main.go
+```
+
+Then open in your browser:
+
+| Example | URL | Description |
+|---------|-----|-------------|
+| `test.html` | http://localhost:3000/examples/test.html | POST and streaming tests (server: `localhost:8080`) |
+| `chat.html` | http://localhost:3000/examples/chat.html | Chat interface demo (server: `localhost:8443`) |
+
+**Note:** `chat.html` connects to port 8443 and expects an OpenAI-compatible chat completions API.
 
 ### Running Integration Tests
 
@@ -110,13 +134,14 @@ npm run build
 npm run test:integration
 ```
 
-### Test Commands
+### Commands
 
 | Command | Description |
 |---------|-------------|
 | `npm test` | Run unit tests (no server required) |
 | `npm run test:integration` | Run streaming integration tests (requires server) |
-| `npm run example` | Run API usage demo (requires server) |
+| `npm run example` | Run Node.js API demo (requires server) |
+| `npm run serve` | Start local server for browser examples |
 
 ## Protocol
 
