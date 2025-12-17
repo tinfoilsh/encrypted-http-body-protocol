@@ -92,20 +92,22 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
     throw new Error(`nonce base must be ${AES_GCM_NONCE_LENGTH} bytes`);
   }
 
+  // Validate seq to prevent nonce reuse from integer overflow.
+  // JavaScript's >>> operator only works correctly for 32-bit unsigned integers.
+  // Values >= 2^32 wrap around (e.g., 2^32 >>> 0 === 0), causing nonce reuse.
+  if (!Number.isInteger(seq) || seq < 0 || seq >= 0x100000000) {
+    throw new Error(`sequence number must be an integer in range [0, 2^32): got ${seq}`);
+  }
+
   const nonce = new Uint8Array(AES_GCM_NONCE_LENGTH);
   nonce.set(nonceBase);
 
   // XOR with sequence number in the last 8 bytes (big-endian)
-  //
-  // Note: JavaScript's >>> operator works on 32-bit integers and treats
-  // shift amounts modulo 32 (so x >>> 32 === x, not 0). We handle this by
-  // only XORing for shifts < 32. For seq < 2^32, higher bytes are always 0.
   for (let i = 0; i < 8; i++) {
     const shift = i * 8;
     if (shift < 32) {
       nonce[AES_GCM_NONCE_LENGTH - 1 - i] ^= (seq >>> shift) & 0xff;
     }
-    // For shift >= 32, the byte is 0 for any seq < 2^32, so no XOR needed
   }
 
   return nonce;
