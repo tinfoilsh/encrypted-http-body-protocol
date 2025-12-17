@@ -39,7 +39,8 @@ func (c *v2TestClient) encryptRequest(t *testing.T, req *http.Request, serverPub
 	pk, err := c.identity.KEMScheme().UnmarshalBinaryPublicKey(serverPubKey)
 	require.NoError(t, err)
 
-	sender, err := c.identity.Suite().NewSender(pk, nil)
+	// Use HPKERequestInfo for domain separation (must match server's info)
+	sender, err := c.identity.Suite().NewSender(pk, []byte(HPKERequestInfo))
 	require.NoError(t, err)
 
 	encapKey, sealer, err := sender.Setup(rand.Reader)
@@ -462,7 +463,7 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// Create a fresh client for each iteration (realistic scenario)
 		clientIdentity, _ := NewIdentity()
-		sender, _ := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), nil)
+		sender, _ := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
 		encapKey, _, _ := sender.Setup(rand.Reader)
 
 		req := httptest.NewRequest("GET", "/test", nil)
