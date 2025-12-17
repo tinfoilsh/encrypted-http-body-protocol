@@ -33,8 +33,6 @@ This ensures that EHBP keeps streaming semantics intact and can be used as a dro
    go run ./cmd/example/client -s http://localhost:8080 -v
    ```
 
-   _The client uses an ephemeral identity - no persistent keys required._
-
 3. Use the curl-like fetcher (sends encrypted requests and decrypts responses):
 
    ```sh
@@ -95,7 +93,7 @@ import (
 )
 
 func main() {
-  // Pass nil for clientIdentity - an ephemeral identity is created automatically.
+  // Pass nil for clientIdentity.
   // The client's private key is never used; response decryption uses keys
   // derived from the request's HPKE context.
   tr, err := client.NewTransport("http://localhost:8080", nil, false)

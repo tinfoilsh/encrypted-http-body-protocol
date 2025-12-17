@@ -19,8 +19,9 @@ const (
 	ExportLabel = "ehbp response"
 	// ExportLength is the length of the exported secret (32 bytes for SHA-256)
 	ExportLength = 32
-	// ResponseNonceLength is the length of the random response nonce
-	ResponseNonceLength = 12
+	// ResponseNonceLength is the length of the random response nonce.
+	// This matches OHTTP (RFC 9458): max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
+	ResponseNonceLength = 32
 	// AES256KeyLength is the length of an AES-256 key
 	AES256KeyLength = 32
 	// AESGCMNonceLength is the length of an AES-GCM nonce
@@ -36,7 +37,7 @@ type ResponseKeyMaterial struct {
 // DeriveResponseKeys derives the response encryption key and nonce base from:
 // - exportedSecret: The secret exported from the HPKE context (32 bytes)
 // - requestEnc: The encapsulated key from the request (32 bytes for X25519)
-// - responseNonce: The random nonce for this response (12 bytes)
+// - responseNonce: The random nonce for this response (32 bytes, matching OHTTP's max(Nn, Nk))
 //
 // The derivation follows the pattern from OHTTP (RFC 9458):
 //
