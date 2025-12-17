@@ -126,18 +126,17 @@
     </div>
 
     <script type="module">
-        import { Identity, createTransport } from './dist/browser.js';
+        import { createTransport } from './dist/browser.js';
 
         const serverUrl = 'http://localhost:8443';
 
         let transport = null;
-        let clientIdentity = null;
         let conversationHistory = [];
 
         async function initializeClient() {
             try {
-                clientIdentity = await Identity.generate();
-                transport = await createTransport(serverUrl, clientIdentity);
+                // No client identity needed - response keys derived from HPKE shared secret
+                transport = await createTransport(serverUrl);
                 return true;
             } catch (error) {
                 console.error('Failed to connect:', error.message);

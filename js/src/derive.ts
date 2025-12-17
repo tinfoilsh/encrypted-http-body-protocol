@@ -128,9 +128,12 @@ export async function deriveResponseKeys(
 
 /**
  * Computes the nonce for a specific sequence number.
- * nonce = nonceBase XOR sequence_number (big-endian, padded to 12 bytes)
+ * nonce = nonceBase XOR sequence_number (big-endian in last 8 bytes)
  *
- * This matches the Go implementation exactly.
+ * This matches the Go implementation:
+ *   for i := 0; i < 8; i++ {
+ *       nonce[len(nonce)-1-i] ^= byte(seq >> (i * 8))
+ *   }
  */
 export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   if (nonceBase.length !== AES_GCM_NONCE_LENGTH) {
@@ -141,14 +144,17 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   nonce.set(nonceBase);
 
   // XOR with sequence number in the last 8 bytes (big-endian)
-  // Go uses: nonce[len(nonce)-8+i] ^= byte(seq >> (56 - 8*i))
+  // Matches Go: nonce[len(nonce)-1-i] ^= byte(seq >> (i * 8))
+  //
+  // Note: JavaScript's >>> operator works on 32-bit integers and treats
+  // shift amounts modulo 32 (so x >>> 32 === x, not 0). We handle this by
+  // only XORing for shifts < 32. For seq < 2^32, higher bytes are always 0.
   for (let i = 0; i < 8; i++) {
-    const shift = 56 - 8 * i;
-    if (shift >= 0) {
-      nonce[AES_GCM_NONCE_LENGTH - 8 + i] ^= (seq >>> shift) & 0xFF;
-    } else {
-      nonce[AES_GCM_NONCE_LENGTH - 8 + i] ^= (seq << (-shift)) & 0xFF;
+    const shift = i * 8;
+    if (shift < 32) {
+      nonce[AES_GCM_NONCE_LENGTH - 1 - i] ^= (seq >>> shift) & 0xff;
     }
+    // For shift >= 32, the byte is 0 for any seq < 2^32, so no XOR needed
   }
 
   return nonce;
