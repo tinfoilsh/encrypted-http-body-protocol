@@ -55,7 +55,7 @@ Clients MUST set:
 
 Servers MUST set for encrypted responses:
 
-- `Ehbp-Response-Nonce`: hex (lowercase, no prefix) of the random nonce used in response key derivation. This MUST be exactly 12 bytes (24 hex characters) for AES-GCM.
+- `Ehbp-Response-Nonce`: hex (lowercase, no prefix) of the random nonce used in response key derivation. This MUST be exactly 32 bytes (64 hex characters), matching OHTTP's `max(Nn, Nk)` for AES-256-GCM.
 - `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding.
 
 Servers that accept plaintext fallback (Section 5.3) MUST set:
@@ -97,7 +97,7 @@ Both client and server derive response keys as follows:
 
    Where:
    - `request_enc`: The 32-byte encapsulated key from the request (from `Ehbp-Encapsulated-Key`)
-   - `response_nonce`: The 12-byte random nonce from `Ehbp-Response-Nonce`
+   - `response_nonce`: The 32-byte random nonce from `Ehbp-Response-Nonce`
 
 3. **Derive PRK using HKDF-Extract:**
    ```
@@ -147,7 +147,7 @@ This derivation ensures:
   - If the request has no payload body, no decryption is attempted and no encrypted response can be sent.
 - Response handling:
 
-  - If an HPKE receiver context was established from the request, generate a random 12-byte response nonce, derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce`. Use chunked transfer encoding and omit Content-Length.
+  - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce`. Use chunked transfer encoding and omit Content-Length.
 
 ### 5.3 Plaintext Fallback (Server)
 

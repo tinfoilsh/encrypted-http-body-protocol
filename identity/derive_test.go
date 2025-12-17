@@ -17,7 +17,7 @@ func TestDeriveResponseKeys(t *testing.T) {
 		requestEnc[i] = byte(i + 32)
 	}
 
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 	for i := range responseNonce {
 		responseNonce[i] = byte(i + 64)
 	}
@@ -50,7 +50,7 @@ func TestDeriveResponseKeys(t *testing.T) {
 	}
 
 	// Verify different inputs produce different outputs
-	differentNonce := make([]byte, 12)
+	differentNonce := make([]byte, ResponseNonceLength)
 	copy(differentNonce, responseNonce)
 	differentNonce[0] ^= 0xFF
 
@@ -163,7 +163,7 @@ func TestNonceLargeSequence(t *testing.T) {
 func TestDeriveResponseKeysValidation(t *testing.T) {
 	validSecret := make([]byte, 32)
 	validEnc := make([]byte, 32)
-	validNonce := make([]byte, 12)
+	validNonce := make([]byte, ResponseNonceLength)
 
 	// Test invalid secret length
 	_, err := DeriveResponseKeys(make([]byte, 16), validEnc, validNonce)
@@ -203,7 +203,7 @@ func TestDeriveResponseKeysValidation(t *testing.T) {
 func TestNewResponseAEAD(t *testing.T) {
 	exportedSecret := make([]byte, 32)
 	requestEnc := make([]byte, 32)
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 
 	km, err := DeriveResponseKeys(exportedSecret, requestEnc, responseNonce)
 	if err != nil {
@@ -229,7 +229,7 @@ func TestNewResponseAEAD(t *testing.T) {
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	exportedSecret := make([]byte, 32)
 	requestEnc := make([]byte, 32)
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 
 	// Fill with non-zero values for a more realistic test
 	for i := range exportedSecret {
@@ -281,7 +281,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 func TestMultipleChunksRoundTrip(t *testing.T) {
 	exportedSecret := make([]byte, 32)
 	requestEnc := make([]byte, 32)
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 
 	km, err := DeriveResponseKeys(exportedSecret, requestEnc, responseNonce)
 	if err != nil {
@@ -338,7 +338,7 @@ func TestMultipleChunksRoundTrip(t *testing.T) {
 func TestWrongSequenceNumberFails(t *testing.T) {
 	exportedSecret := make([]byte, 32)
 	requestEnc := make([]byte, 32)
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 
 	km, err := DeriveResponseKeys(exportedSecret, requestEnc, responseNonce)
 	if err != nil {
@@ -375,7 +375,7 @@ func TestDifferentKeysCannotDecrypt(t *testing.T) {
 	}
 
 	requestEnc := make([]byte, 32)
-	responseNonce := make([]byte, 12)
+	responseNonce := make([]byte, ResponseNonceLength)
 
 	serverKM, err := DeriveResponseKeys(serverSecret, requestEnc, responseNonce)
 	if err != nil {
