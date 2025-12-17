@@ -73,8 +73,8 @@ describe('Security Tests', () => {
 
       // Keys MUST be different - this is the core security property
       assert.notDeepStrictEqual(
-        aliceKM.key,
-        eveKM.key,
+        aliceKM.keyBytes,
+        eveKM.keyBytes,
         'Alice and Eve must derive different keys'
       );
       assert.notDeepStrictEqual(

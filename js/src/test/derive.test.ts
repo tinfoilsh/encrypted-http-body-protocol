@@ -22,7 +22,7 @@ describe('deriveResponseKeys', () => {
     const km1 = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
     const km2 = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
 
-    assert.deepStrictEqual(km1.key, km2.key, 'Keys should be identical');
+    assert.deepStrictEqual(km1.keyBytes, km2.keyBytes, 'Keys should be identical');
     assert.deepStrictEqual(km1.nonceBase, km2.nonceBase, 'Nonce bases should be identical');
   });
 
@@ -35,7 +35,7 @@ describe('deriveResponseKeys', () => {
     const km1 = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce1);
     const km2 = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce2);
 
-    assert.notDeepStrictEqual(km1.key, km2.key, 'Keys should differ for different nonces');
+    assert.notDeepStrictEqual(km1.keyBytes, km2.keyBytes, 'Keys should differ for different nonces');
   });
 
   it('should reject invalid exported secret length', async () => {
@@ -225,9 +225,9 @@ describe('Go interoperability', () => {
     const expectedNonceBase = hexToBytes('f8b0ce9466f27aa6243c65f9');
 
     assert.deepStrictEqual(
-      km.key,
+      km.keyBytes,
       expectedKey,
-      `Key mismatch.\nExpected: ${bytesToHex(expectedKey)}\nGot: ${bytesToHex(km.key)}`
+      `Key mismatch.\nExpected: ${bytesToHex(expectedKey)}\nGot: ${bytesToHex(km.keyBytes)}`
     );
     assert.deepStrictEqual(
       km.nonceBase,
