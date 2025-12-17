@@ -393,6 +393,51 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	})
 }
 
+// TestBodylessHTTPMethods verifies that GET, HEAD, DELETE, and OPTIONS work correctly
+// with EHBP v2 - these methods typically don't have request bodies but still need
+// encrypted responses.
+func TestBodylessHTTPMethods(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+
+	middleware := serverIdentity.Middleware(false)
+
+	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Echo back the method used
+		w.Write([]byte("Method: " + r.Method))
+	})
+
+	wrapped := middleware(testHandler)
+
+	bodylessMethods := []string{"GET", "HEAD", "DELETE", "OPTIONS"}
+
+	for _, method := range bodylessMethods {
+		t.Run(method+" request encrypts response", func(t *testing.T) {
+			client := newV2TestClient(t)
+
+			req := httptest.NewRequest(method, "/test", nil)
+			client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
+
+			w := httptest.NewRecorder()
+			wrapped.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code, "%s request should succeed", method)
+
+			// Verify response has encryption headers
+			responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
+			assert.NotEmpty(t, responseNonceHeader, "%s response should have nonce header", method)
+
+			// HEAD responses have no body, so skip body decryption for HEAD
+			if method != "HEAD" {
+				// Decrypt response
+				decryptedResponse := client.decryptResponse(t, w)
+				assert.Equal(t, "Method: "+method, string(decryptedResponse),
+					"%s response should decrypt correctly", method)
+			}
+		})
+	}
+}
+
 func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
