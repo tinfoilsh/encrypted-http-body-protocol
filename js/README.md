@@ -82,6 +82,42 @@ npm test
 npm run build:browser  # Browser bundle
 ```
 
+### Running Examples
+
+The example requires a build and an EHBP server running at `http://localhost:8080`:
+
+```sh
+# Build first
+npm run build
+
+# Start the Go server (from parent directory)
+go run pkg/server/main.go
+
+# Run the example (in another terminal)
+npm run example
+```
+
+### Running Integration Tests
+
+Integration tests verify streaming functionality against a live server:
+
+```sh
+# Start the Go server (from parent directory)
+go run pkg/server/main.go
+
+# Run integration tests (in another terminal)
+npm run build
+npm run test:integration
+```
+
+### Test Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm test` | Run unit tests (no server required) |
+| `npm run test:integration` | Run streaming integration tests (requires server) |
+| `npm run example` | Run API usage demo (requires server) |
+
 ## Protocol
 
 See [SPEC.md](../SPEC.md) for the complete protocol specification.

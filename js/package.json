@@ -20,8 +20,8 @@
     "build:all": "npm run build && npm run build:browser",
     "dev": "tsc --watch",
     "test": "node --test dist/esm/test/*.test.js",
-    "example": "node dist/esm/example.js",
-    "streaming": "node dist/esm/streaming-test.js",
+    "test:integration": "node dist/esm/test/streaming.integration.js",
+    "example": "node --experimental-strip-types examples/example.ts",
     "serve": "node serve.js"
   },
   "keywords": [

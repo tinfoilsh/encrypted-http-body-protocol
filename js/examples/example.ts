@@ -4,7 +4,7 @@
  * Example usage of the EHBP JavaScript client
  */
 
-import { createTransport } from './index.js';
+import { createTransport } from '../dist/esm/index.js';
 
 async function main() {
   console.log('EHBP JavaScript Client Example');
@@ -84,16 +84,16 @@ async function main() {
         if (reader) {
           const decoder = new TextDecoder();
           let chunkCount = 0;
-          
+
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            
+
             const text = decoder.decode(value, { stream: true });
             process.stdout.write(text);
             chunkCount++;
           }
-          
+
           console.log(`\nStream completed with ${chunkCount} chunks`);
         } else {
           console.log('No readable stream available');
@@ -117,6 +117,4 @@ async function main() {
 }
 
 // Run the example
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch(console.error);
-}
+main().catch(console.error);

@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 
-import { createTransport } from './index.js';
+/**
+ * Integration test for EHBP streaming functionality.
+ * Requires a running EHBP server at localhost:8080.
+ *
+ * Run with: npm run test:integration
+ */
 
-async function streamingTest() {
-  console.log('EHBP Streaming Test');
-  console.log('===================');
+import { createTransport } from '../index.js';
+
+async function streamingIntegrationTest() {
+  console.log('EHBP Streaming Integration Test');
+  console.log('================================');
 
   try {
     // Create transport
@@ -58,7 +65,7 @@ async function streamingTest() {
               if (done) break;
 
               const text = decoder.decode(value, { stream: true });
-              
+
               // Prefix with stream ID to show concurrency
               process.stdout.write(`[Stream ${streamId}] ${text}`);
             }
@@ -99,15 +106,13 @@ async function streamingTest() {
       console.log('Large data stream test failed:', error instanceof Error ? error.message : String(error));
     }
 
-    console.log('\nAll streaming tests completed successfully!');
+    console.log('\nAll streaming integration tests completed successfully!');
 
   } catch (error) {
-    console.error('Streaming test failed:', error);
+    console.error('Streaming integration test failed:', error);
     process.exit(1);
   }
 }
 
-// Run the streaming test
-if (import.meta.url === `file://${process.argv[1]}`) {
-  streamingTest().catch(console.error);
-}
+// Run the integration test
+streamingIntegrationTest().catch(console.error);
