@@ -80,6 +80,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	newReq := req.Clone(req.Context())
 
 	// Encrypt request to server's public key and get context for response decryption
+	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
 	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
@@ -90,9 +91,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to make request: %v", err)
 	}
 
-	if err := reqCtx.DecryptResponse(resp); err != nil {
-		resp.Body.Close()
-		return nil, fmt.Errorf("failed to decrypt response: %v", err)
+	// Only decrypt if we encrypted the request (had a body)
+	if reqCtx != nil {
+		if err := reqCtx.DecryptResponse(resp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decrypt response: %v", err)
+		}
 	}
 
 	return resp, nil
