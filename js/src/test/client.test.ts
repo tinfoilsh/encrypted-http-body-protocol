@@ -28,7 +28,6 @@ describe('Transport', () => {
 
     const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
 
-    // Only encapsulated key header is set
     assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
 
     // Check that context was returned for response decryption

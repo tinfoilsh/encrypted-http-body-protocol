@@ -131,13 +131,13 @@ export class Transport {
       return response;
     }
 
-    // Check for response nonce header (required for derived key decryption)
+    // Check for response nonce header (required for response decryption)
     const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
     if (!responseNonceHeader) {
       throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
     }
 
-    // Decrypt response using derived keys
+    // Decrypt response
     return await this.serverIdentity.decryptResponseWithContext(response, context);
   }
 

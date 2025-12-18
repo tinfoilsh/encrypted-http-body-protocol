@@ -10,6 +10,12 @@ EHBP encrypts HTTP request and response bodies end-to-end using HPKE ([RFC 9180]
 npm install ehbp
 ```
 
+## Requirements
+
+- Node.js 20+
+- Works in both Node.js and modern browsers
+
+
 ## Quick Start
 
 ```javascript

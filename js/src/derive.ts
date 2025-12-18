@@ -95,6 +95,7 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   // Validate seq to prevent nonce reuse from integer overflow.
   // JavaScript's >>> operator only works correctly for 32-bit unsigned integers.
   // Values >= 2^32 wrap around (e.g., 2^32 >>> 0 === 0), causing nonce reuse.
+  // In practice, 2^32 chunks per response is impossible (~4PB minimum), but we validate defensively.
   if (!Number.isInteger(seq) || seq < 0 || seq >= 0x100000000) {
     throw new Error(`sequence number must be an integer in range [0, 2^32): got ${seq}`);
   }

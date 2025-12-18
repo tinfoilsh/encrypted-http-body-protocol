@@ -135,7 +135,6 @@
 
         async function initializeClient() {
             try {
-                // No client identity needed - response keys derived from HPKE shared secret
                 transport = await createTransport(serverUrl);
                 return true;
             } catch (error) {
