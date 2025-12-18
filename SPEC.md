@@ -162,7 +162,7 @@ Servers MAY support plaintext fallback. If enabled and `Ehbp-Encapsulated-Key` i
 
 Fallback is not used for malformed headers; if `Ehbp-Encapsulated-Key` is present but invalid, the handler returns HTTP 400.
 
-Client implementations MAY support consuming plaintext fallback responses. The reference Go client does not implement fallback consumption and requires encrypted responses. The reference JavaScript client supports plaintext fallback: when `Ehbp-Fallback: 1` is present on the response, it returns the response without attempting decryption.
+Client implementations do not process fallback headers. When an HPKE context was established for a request, clients always attempt to decrypt the response. If the server returns a plaintext response with `Ehbp-Fallback: 1`, decryption will fail.
 
 ## 6. Security Considerations
 

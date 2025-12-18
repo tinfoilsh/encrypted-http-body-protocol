@@ -6,7 +6,6 @@ export const PROTOCOL = {
   RESPONSE_NONCE_HEADER: 'Ehbp-Response-Nonce',
   KEYS_MEDIA_TYPE: 'application/ohttp-keys',
   KEYS_PATH: '/.well-known/hpke-keys',
-  FALLBACK_HEADER: 'Ehbp-Fallback',
 } as const;
 
 /**

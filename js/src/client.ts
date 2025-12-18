@@ -125,12 +125,6 @@ export class Transport {
       return response;
     }
 
-    // Check for fallback header - if set, server returned unencrypted response
-    const fallbackHeader = response.headers.get(PROTOCOL.FALLBACK_HEADER);
-    if (fallbackHeader === '1') {
-      return response;
-    }
-
     // Check for response nonce header (required for response decryption)
     const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
     if (!responseNonceHeader) {
