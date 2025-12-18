@@ -214,10 +214,6 @@ export class Identity {
     return new Identity(suite, publicKey, dummyPrivateKey);
   }
 
-  // ===========================================================================
-  // Derived Key Methods - Use derived keys for response encryption
-  // ===========================================================================
-
   /**
    * Encrypt request body and return context for response decryption.
    *
@@ -333,7 +329,7 @@ export class Identity {
   }
 
   /**
-   * Creates a ReadableStream that decrypts response chunks using derived keys.
+   * Creates a ReadableStream that decrypts response chunks.
    */
   private createDecryptStream(
     body: ReadableStream<Uint8Array>,
