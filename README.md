@@ -69,7 +69,7 @@ func main() {
 
   mux := http.NewServeMux()
   mux.HandleFunc(protocol.KeysPath, id.ConfigHandler)
-  mux.Handle("/secure", id.Middleware(false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+  mux.Handle("/secure", id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("ok"))
   })))
 

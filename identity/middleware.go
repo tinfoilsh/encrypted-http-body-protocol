@@ -12,13 +12,14 @@ func sendError(w http.ResponseWriter, err error, text string, status int) {
 	http.Error(w, text, status)
 }
 
-// Middleware wraps an HTTP handler to encrypt/decrypt requests and responses
-func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) http.Handler {
+// Middleware wraps an HTTP handler to encrypt/decrypt requests and responses.
+// Requests with Ehbp-Encapsulated-Key header are decrypted and responses are encrypted.
+// Requests without the header are passed through as plaintext.
+func (i *Identity) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Check for request body - bodyless requests pass through unencrypted
 			// See SPEC.md Section 6.4 for security rationale
-			// Note: No fallback header is set - the client knows it sent a bodyless request
 			if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
 				log.Debugf("bodyless request, passing through unencrypted")
 				next.ServeHTTP(w, r)
@@ -28,13 +29,8 @@ func (i *Identity) Middleware(permitPlaintextFallback bool) func(http.Handler) h
 			// Check for request encryption header
 			requestEncHex := r.Header.Get(protocol.EncapsulatedKeyHeader)
 			if requestEncHex == "" {
-				if permitPlaintextFallback {
-					log.Debugf("missing %s header, using plaintext fallback", protocol.EncapsulatedKeyHeader)
-					w.Header().Set(protocol.FallbackHeader, "1")
-					next.ServeHTTP(w, r)
-					return
-				}
-				sendError(w, nil, "missing request encryption header", http.StatusBadRequest)
+				log.Debugf("no %s header, passing through as plaintext", protocol.EncapsulatedKeyHeader)
+				next.ServeHTTP(w, r)
 				return
 			}
 

@@ -58,9 +58,7 @@ Servers MUST set for encrypted responses:
 - `Ehbp-Response-Nonce`: hex (lowercase, no prefix) of the random nonce used in response key derivation. This MUST be exactly 32 bytes (64 hex characters), matching OHTTP's `max(Nn, Nk)` for AES-256-GCM.
 - `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding.
 
-Servers that accept plaintext fallback (Section 5.3) MUST set:
-
-- `Ehbp-Fallback: 1` on plaintext responses produced due to fallback.
+For plaintext responses corresponding to requests where `Ehbp-Encapsulated-Key` is absent, the server does NOT set any EHBP headers. The absence of `Ehbp-Response-Nonce` indicates the response is plaintext.
 
 ### 4.3 Body Framing (Both Directions)
 
@@ -145,24 +143,23 @@ This derivation ensures:
 
 - Request handling:
 
-  - The middleware checks for `Ehbp-Encapsulated-Key`. If it is missing and plaintext fallback is disabled, the request is rejected with 400.
-  - With fallback enabled and the header missing, the server sets `Ehbp-Fallback: 1`, leaves the body untouched, and delegates to the next handler.
-  - When a non-empty payload body is present, `Ehbp-Encapsulated-Key` MUST be present. The body is decrypted as a chunked stream (Section 4.3). Retain the HPKE receiver context for response encryption. Client-caused errors (missing/invalid headers, invalid hex, HPKE setup failure) produce HTTP 400 responses; other failures return 500.
+  - The middleware checks for `Ehbp-Encapsulated-Key`. The server accepts both encrypted and plaintext requests.
+  - If `Ehbp-Encapsulated-Key` is present, the body is decrypted as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption. If the client request is not well-formed (invalid hex, HPKE setup failure), the server responds with HTTP 400; other failures return 500.
+  - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
   - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 6.4 for the security rationale.
 - Response handling:
 
   - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce`. Use chunked transfer encoding and omit Content-Length.
+  - If no HPKE context was established (plaintext request or bodyless request), the response is sent as plaintext without any EHBP headers.
 
-### 5.3 Plaintext Fallback (Server)
+### 5.3 Mode Detection
 
-Servers MAY support plaintext fallback. If enabled and `Ehbp-Encapsulated-Key` is absent on the request, the server:
+The presence or absence of `Ehbp-Response-Nonce` in the response indicates whether EHBP encryption was used:
 
-- MUST set `Ehbp-Fallback: 1` and pass the request/response through unencrypted.
-- MUST NOT send `Ehbp-Response-Nonce` on the response in this case.
+- `Ehbp-Response-Nonce` present → response body is encrypted
+- `Ehbp-Response-Nonce` absent → response body is plaintext
 
-Fallback is not used for malformed headers; if `Ehbp-Encapsulated-Key` is present but invalid, the handler returns HTTP 400.
-
-Client implementations do not process fallback headers. When an HPKE context was established for a request, clients always attempt to decrypt the response. If the server returns a plaintext response with `Ehbp-Fallback: 1`, decryption will fail.
+Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is present in the response. If the header is missing, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
 
 ## 6. Security Considerations
 
