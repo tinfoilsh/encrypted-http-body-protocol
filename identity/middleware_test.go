@@ -132,7 +132,7 @@ func TestMiddleware(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	// Create test handler
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,14 +171,16 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, "Hello, test message", string(decryptedResponse))
 	})
 
-	t.Run("missing encapsulated key header", func(t *testing.T) {
+	t.Run("missing encapsulated key header passes through as plaintext", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
 		w := httptest.NewRecorder()
 
 		wrapped.ServeHTTP(w, req)
 
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-		assert.Contains(t, w.Body.String(), "missing request encryption header")
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "Hello, test", w.Body.String())
+		// No response nonce header since request was plaintext
+		assert.Empty(t, w.Header().Get(protocol.ResponseNonceHeader))
 	})
 
 	t.Run("invalid encapsulated key", func(t *testing.T) {
@@ -204,11 +206,11 @@ func TestMiddleware(t *testing.T) {
 	})
 }
 
-func TestPlaintextFallback(t *testing.T) {
+func TestPlaintextPassthrough(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(true) // Enable plaintext fallback
+	middleware := serverIdentity.Middleware()
 
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -221,14 +223,15 @@ func TestPlaintextFallback(t *testing.T) {
 
 	wrapped := middleware(testHandler)
 
-	t.Run("plaintext fallback works", func(t *testing.T) {
+	t.Run("plaintext passthrough works", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
 		w := httptest.NewRecorder()
 
 		wrapped.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Equal(t, "1", w.Header().Get(protocol.FallbackHeader))
+		// No Ehbp-Response-Nonce header since request was plaintext
+		assert.Empty(t, w.Header().Get(protocol.ResponseNonceHeader))
 		assert.Equal(t, "Hello, test", w.Body.String())
 	})
 }
@@ -237,7 +240,7 @@ func TestStreamingResponseWriter(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	// Create streaming test handler
 	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +294,7 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	t.Run("multiple chunks are encrypted separately", func(t *testing.T) {
 		client := newTestClient(t)
@@ -375,12 +378,11 @@ func TestChunkEncryptionDecryption(t *testing.T) {
 
 // TestBodylessHTTPMethods verifies that GET, HEAD, DELETE, and OPTIONS pass through
 // unencrypted - see SPEC.md Section 6.4 for security rationale.
-// Note: No fallback header is set because the client knows it sent a bodyless request.
 func TestBodylessHTTPMethods(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Echo back the method used
@@ -400,10 +402,6 @@ func TestBodylessHTTPMethods(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, w.Code, "%s request should succeed", method)
 
-			// Verify NO fallback header (client knows it's bodyless, doesn't need this)
-			fallbackHeader := w.Header().Get(protocol.FallbackHeader)
-			assert.Empty(t, fallbackHeader, "%s response should NOT have fallback header", method)
-
 			// Verify response does NOT have encryption headers
 			responseNonceHeader := w.Header().Get(protocol.ResponseNonceHeader)
 			assert.Empty(t, responseNonceHeader, "%s response should not have nonce header", method)
@@ -422,7 +420,7 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("secret response"))
@@ -476,7 +474,7 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(b, err)
 
-	middleware := serverIdentity.Middleware(false)
+	middleware := serverIdentity.Middleware()
 
 	testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("Hello, World!"))

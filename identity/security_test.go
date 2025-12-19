@@ -377,7 +377,7 @@ func TestEndToEndSecureRoundTrip(t *testing.T) {
 		w.Write([]byte(secretResponse))
 	})
 
-	wrappedHandler := serverIdentity.Middleware(false)(handler)
+	wrappedHandler := serverIdentity.Middleware()(handler)
 
 	// Client creates request with encryption to server's public key
 	req := httptest.NewRequest("POST", "/secret", strings.NewReader("test body"))

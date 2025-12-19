@@ -10,9 +10,6 @@ const (
 	// can derive the same response decryption keys.
 	ResponseNonceHeader = "Ehbp-Response-Nonce"
 
-	// FallbackHeader indicates plaintext fallback was used
-	FallbackHeader = "Ehbp-Fallback"
-
 	// KeysMediaType is the content type for key configuration
 	KeysMediaType = "application/ohttp-keys"
 

@@ -19,10 +19,9 @@ import (
 )
 
 var (
-	listenAddr      = flag.String("l", ":8080", "listen address")
-	identityFile    = flag.String("i", "server_identity.json", "identity file")
-	verbose         = flag.Bool("v", false, "verbose logging")
-	permitPlaintext = flag.Bool("p", false, "permit plaintext requests")
+	listenAddr   = flag.String("l", ":8080", "listen address")
+	identityFile = flag.String("i", "server_identity.json", "identity file")
+	verbose      = flag.Bool("v", false, "verbose logging")
 )
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -54,11 +53,10 @@ func main() {
 		logrus.Fatalf("Failed to get identity: %v", err)
 	}
 
-	middleware := serverIdentity.Middleware(*permitPlaintext)
+	middleware := serverIdentity.Middleware()
 
 	logrus.WithFields(logrus.Fields{
-		"public_key_hex":   hex.EncodeToString(serverIdentity.MarshalPublicKey()),
-		"permit_plaintext": *permitPlaintext,
+		"public_key_hex": hex.EncodeToString(serverIdentity.MarshalPublicKey()),
 	}).Info("Server identity")
 
 	mux := http.NewServeMux()
