@@ -36,6 +36,26 @@ func NewTransport(server string, insecureSkipVerify bool) (*Transport, error) {
 	return t, nil
 }
 
+// NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
+// The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
+func NewTransportWithConfig(server string, hpkeConfig []byte, insecureSkipVerify bool) (*Transport, error) {
+	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
+	}
+
+	return &Transport{
+		serverIdentity: serverIdentity,
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: insecureSkipVerify,
+				},
+			},
+		},
+	}, nil
+}
+
 func (t *Transport) syncServerPublicKey(server string) error {
 	keysURL, err := url.Parse(server)
 	if err != nil {
