@@ -46,3 +46,22 @@ jobs:
     - name: Run npm tests
       run: npm test
       working-directory: js
+
+  test-swift:
+    runs-on: macos-14
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: latest-stable
+
+    - name: Build Swift package
+      run: swift build
+      working-directory: swift
+
+    - name: Run Swift tests
+      run: swift test
+      working-directory: swift
