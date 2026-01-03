@@ -1,13 +1,12 @@
 import Foundation
 import Crypto
 
-/// Request context for response decryption.
-/// Holds the HPKE sender context needed to derive response keys.
+/// Context retained after encrypting a request, used to derive response keys (SPEC Section 4.4)
 public struct RequestContext: Sendable {
-    /// The HPKE sender for exporting secrets
+    /// HPKE sender for exporting the shared secret
     public let sender: HPKE.Sender
 
-    /// The encapsulated key from the request
+    /// Encapsulated key sent in Ehbp-Encapsulated-Key header
     public let requestEnc: Data
 
     public init(sender: HPKE.Sender, requestEnc: Data) {
@@ -16,17 +15,14 @@ public struct RequestContext: Sendable {
     }
 }
 
-/// Identity class for managing HPKE encryption/decryption
+/// Client identity for EHBP encryption/decryption (SPEC Section 5.1)
 public final class Identity: Sendable {
-    /// The server's public key for encryption
     private let publicKey: Curve25519.KeyAgreement.PublicKey
-
-    /// The HPKE ciphersuite to use
     private let ciphersuite: HPKE.Ciphersuite
 
-    /// Creates an Identity from a server's public key bytes
+    /// Creates an Identity from a server's raw public key bytes
     ///
-    /// - Parameter publicKeyBytes: 32 bytes X25519 public key
+    /// - Parameter publicKeyBytes: 32-byte X25519 public key
     public init(publicKeyBytes: Data) throws {
         guard publicKeyBytes.count == 32 else {
             throw EHBPError.invalidInput("public key must be 32 bytes, got \(publicKeyBytes.count)")
@@ -110,15 +106,10 @@ public final class Identity: Sendable {
         )
     }
 
-    /// Encrypts request body and returns context for response decryption.
-    ///
-    /// This method:
-    /// 1. Creates an HPKE sender context to the server's public key
-    /// 2. Encrypts the request body
-    /// 3. Returns a RequestContext that must be used to decrypt the response
+    /// Encrypts request body and returns context for response decryption (SPEC Section 5.1)
     ///
     /// - Parameter body: Request body to encrypt
-    /// - Returns: Tuple of (encrypted body with chunk framing, request context for response decryption)
+    /// - Returns: Encrypted body with chunk framing, and context needed to decrypt the response
     public func encryptRequest(body: Data) throws -> (encryptedBody: Data, context: RequestContext) {
         let info = Data(EHBPConstants.hpkeRequestInfo.utf8)
 
@@ -129,11 +120,9 @@ public final class Identity: Sendable {
         )
 
         let encapsulatedKey = sender.encapsulatedKey
-
-        // Encrypt the body
         let encrypted = try sender.seal(body)
 
-        // Create chunked format: 4-byte length header + encrypted data
+        // Frame as: LEN (4 bytes big-endian) || ciphertext
         var chunkedData = Data()
         var length = UInt32(encrypted.count).bigEndian
         chunkedData.append(Data(bytes: &length, count: 4))
@@ -147,12 +136,12 @@ public final class Identity: Sendable {
         return (chunkedData, context)
     }
 
-    /// Derives response keys from request context and response nonce
+    /// Derives response decryption keys using OHTTP-style derivation (SPEC Section 4.4.1)
     ///
     /// - Parameters:
     ///   - context: Request context from encryptRequest
     ///   - responseNonce: 32 bytes from Ehbp-Response-Nonce header
-    /// - Returns: Key material for decrypting response
+    /// - Returns: Key material for decrypting response chunks
     public func deriveResponseKeys(
         context: RequestContext,
         responseNonce: Data
