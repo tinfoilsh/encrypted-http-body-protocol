@@ -23,11 +23,13 @@ let package = Package(
             name: "EHBP",
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto")
-            ]
+            ],
+            path: "swift/Sources/EHBP"
         ),
         .testTarget(
             name: "EHBPTests",
-            dependencies: ["EHBP"]
+            dependencies: ["EHBP"],
+            path: "swift/Tests/EHBPTests"
         )
     ]
 )
