@@ -220,7 +220,9 @@ public final class EHBPClient: @unchecked Sendable {
         return (stream, httpResponse)
     }
 
-    /// Decrypts response body with chunk framing
+    /// Decrypts response body using EHBP chunk framing (SPEC Section 4.3)
+    ///
+    /// Each chunk: LEN (4 bytes big-endian) || CIPHERTEXT (LEN bytes)
     private func decryptResponseBody(data: Data, keyMaterial: ResponseKeyMaterial) throws -> Data {
         var result = Data()
         var offset = 0

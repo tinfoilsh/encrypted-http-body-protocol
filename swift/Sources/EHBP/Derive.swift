@@ -1,12 +1,12 @@
 import Foundation
 import Crypto
 
-/// Response key material for encryption/decryption
+/// Response key material for AES-256-GCM encryption/decryption (SPEC Section 4.4.1)
 public struct ResponseKeyMaterial: Sendable {
-    /// 32 bytes for AES-256
+    /// 32-byte AES-256 key
     public let key: SymmetricKey
 
-    /// 12 bytes, XORed with sequence number for each chunk
+    /// 12-byte base nonce, XORed with chunk index for each chunk
     public let nonceBase: Data
 
     public init(key: SymmetricKey, nonceBase: Data) {
@@ -15,21 +15,15 @@ public struct ResponseKeyMaterial: Sendable {
     }
 }
 
-/// Derives response encryption keys from the HPKE exported secret.
+/// Derives response encryption keys from the HPKE exported secret (SPEC Section 4.4.1)
 ///
-/// The derivation follows OHTTP (RFC 9458):
+/// Implements OHTTP-style derivation:
 /// ```
 /// salt = concat(enc, response_nonce)
-/// prk = Extract(salt, secret)
-/// aead_key = Expand(prk, "key", Nk)
-/// aead_nonce = Expand(prk, "nonce", Nn)
+/// prk = HKDF-Extract(salt, secret)
+/// aead_key = HKDF-Expand(prk, "key", 32)
+/// aead_nonce = HKDF-Expand(prk, "nonce", 12)
 /// ```
-///
-/// - Parameters:
-///   - exportedSecret: 32 bytes exported from HPKE context
-///   - requestEnc: 32 bytes encapsulated key from request
-///   - responseNonce: 32 bytes random nonce from response
-/// - Returns: Key material for response encryption/decryption
 public func deriveResponseKeys(
     exportedSecret: Data,
     requestEnc: Data,
@@ -45,22 +39,18 @@ public func deriveResponseKeys(
         throw EHBPError.invalidInput("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
     }
 
-    // salt = concat(enc, response_nonce)
     var salt = Data()
     salt.append(requestEnc)
     salt.append(responseNonce)
 
-    // prk = Extract(salt, secret)
     let prk = HKDF<SHA256>.extract(inputKeyMaterial: SymmetricKey(data: exportedSecret), salt: salt)
 
-    // aead_key = Expand(prk, "key", Nk)
     let keyData = HKDF<SHA256>.expand(
         pseudoRandomKey: prk,
         info: Data(EHBPConstants.responseKeyLabel.utf8),
         outputByteCount: EHBPConstants.aes256KeyLength
     )
 
-    // aead_nonce = Expand(prk, "nonce", Nn)
     let nonceBase = HKDF<SHA256>.expand(
         pseudoRandomKey: prk,
         info: Data(EHBPConstants.responseNonceLabel.utf8),
@@ -73,17 +63,10 @@ public func deriveResponseKeys(
     )
 }
 
-/// Computes the nonce for a specific sequence number.
-/// nonce = nonceBase XOR sequence_number (big-endian in last 8 bytes)
-///
-/// - Parameters:
-///   - nonceBase: 12 bytes base nonce
-///   - seq: Sequence number (0-indexed)
-/// - Returns: 12 bytes nonce for this sequence
+/// Computes nonce for chunk: aead_nonce XOR seq (SPEC Section 4.4.2)
 public func computeNonce(nonceBase: Data, seq: UInt64) -> Data {
     var nonce = Data(nonceBase)
 
-    // XOR with sequence number in the last 8 bytes (big-endian)
     for i in 0..<8 {
         let shift = i * 8
         let byteIndex = EHBPConstants.aesGCMNonceLength - 1 - i
@@ -93,13 +76,7 @@ public func computeNonce(nonceBase: Data, seq: UInt64) -> Data {
     return nonce
 }
 
-/// Encrypts a chunk using the response key material
-///
-/// - Parameters:
-///   - keyMaterial: Response key material
-///   - seq: Sequence number for this chunk
-///   - plaintext: Data to encrypt
-/// - Returns: Encrypted ciphertext with authentication tag
+/// Encrypts a chunk using AES-256-GCM. Returns ciphertext || tag.
 public func encryptChunk(
     keyMaterial: ResponseKeyMaterial,
     seq: UInt64,
@@ -116,13 +93,7 @@ public func encryptChunk(
     return sealedBox.ciphertext + sealedBox.tag
 }
 
-/// Decrypts a chunk using the response key material
-///
-/// - Parameters:
-///   - keyMaterial: Response key material
-///   - seq: Sequence number for this chunk
-///   - ciphertext: Encrypted data with authentication tag
-/// - Returns: Decrypted plaintext
+/// Decrypts a chunk using AES-256-GCM. Expects ciphertext || tag format.
 public func decryptChunk(
     keyMaterial: ResponseKeyMaterial,
     seq: UInt64,
