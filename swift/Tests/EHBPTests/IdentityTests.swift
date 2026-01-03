@@ -6,12 +6,19 @@ final class IdentityTests: XCTestCase {
 
     // MARK: - Identity Creation Tests
 
-    func testIdentityFromPublicKey() throws {
+    func testIdentityFromPublicKeyCanEncrypt() throws {
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let publicKeyBytes = privateKey.publicKey.rawRepresentation
 
         let identity = try Identity(publicKeyBytes: Data(publicKeyBytes))
-        XCTAssertNotNil(identity)
+
+        // Verify the identity can actually encrypt data
+        let plaintext = Data("test message".utf8)
+        let (encrypted, context) = try identity.encryptRequest(body: plaintext)
+
+        // Encrypted output should have length prefix + ciphertext + tag
+        XCTAssertGreaterThan(encrypted.count, plaintext.count)
+        XCTAssertEqual(context.requestEnc.count, 32)
     }
 
     func testIdentityFromInvalidPublicKey() {
@@ -33,7 +40,7 @@ final class IdentityTests: XCTestCase {
 
     // MARK: - RFC 9458 Config Parsing Tests
 
-    func testIdentityFromConfig() throws {
+    func testIdentityFromConfigCanEncrypt() throws {
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let publicKeyBytes = privateKey.publicKey.rawRepresentation
 
@@ -63,7 +70,12 @@ final class IdentityTests: XCTestCase {
         config.append(0x02)
 
         let identity = try Identity(config: config)
-        XCTAssertNotNil(identity)
+
+        // Verify the parsed identity can encrypt (proves config was parsed correctly)
+        let plaintext = Data("test".utf8)
+        let (encrypted, context) = try identity.encryptRequest(body: plaintext)
+        XCTAssertGreaterThan(encrypted.count, 4)
+        XCTAssertEqual(context.requestEnc.count, 32)
     }
 
     func testIdentityFromConfigWithWrongKEM() {
@@ -151,7 +163,7 @@ final class IdentityTests: XCTestCase {
 
     // MARK: - Request Encryption Tests
 
-    func testEncryptRequest() throws {
+    func testEncryptRequestCanBeDecryptedByServer() throws {
         let serverPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         let serverPublicKeyBytes = Data(serverPrivateKey.publicKey.rawRepresentation)
 
@@ -160,18 +172,31 @@ final class IdentityTests: XCTestCase {
         let plaintext = Data("Hello, EHBP!".utf8)
         let (encryptedBody, context) = try identity.encryptRequest(body: plaintext)
 
-        // Encrypted body should have 4-byte length prefix + ciphertext
-        XCTAssertGreaterThan(encryptedBody.count, 4)
-
-        // First 4 bytes should be length (big-endian)
+        // Verify framing structure
         let length = Int(encryptedBody[0]) << 24 |
                      Int(encryptedBody[1]) << 16 |
                      Int(encryptedBody[2]) << 8 |
                      Int(encryptedBody[3])
         XCTAssertEqual(length, encryptedBody.count - 4)
-
-        // Request enc should be 32 bytes (X25519 encapsulated key)
         XCTAssertEqual(context.requestEnc.count, 32)
+
+        // Simulate server decryption using HPKE.Recipient
+        let ciphertext = encryptedBody.suffix(from: 4)
+        let ciphersuite = HPKE.Ciphersuite(
+            kem: .Curve25519_HKDF_SHA256,
+            kdf: .HKDF_SHA256,
+            aead: .AES_GCM_256
+        )
+
+        var recipient = try HPKE.Recipient(
+            privateKey: serverPrivateKey,
+            ciphersuite: ciphersuite,
+            info: Data(EHBPConstants.hpkeRequestInfo.utf8),
+            encapsulatedKey: context.requestEnc
+        )
+
+        let decrypted = try recipient.open(ciphertext)
+        XCTAssertEqual(decrypted, plaintext, "Server should be able to decrypt client's request")
     }
 
     func testEncryptRequestProducesDifferentOutputsEachTime() throws {
