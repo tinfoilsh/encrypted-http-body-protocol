@@ -215,6 +215,31 @@ export class Identity {
   }
 
   /**
+   * Create an Identity from a raw public key hex string.
+   * Uses the default cipher suite (X25519/HKDF-SHA256/AES-256-GCM).
+   *
+   * This is used by clients who already have the server's public key
+   * and don't need to fetch it.
+   */
+  static async fromPublicKeyHex(publicKeyHex: string): Promise<Identity> {
+    const publicKeyBytes = hexToBytes(publicKeyHex);
+    if (publicKeyBytes.length !== 32) {
+      throw new Error(`Invalid public key length: expected 32, got ${publicKeyBytes.length}`);
+    }
+
+    const suite = createSuite();
+    const publicKey = await suite.DeserializePublicKey(publicKeyBytes);
+
+    // For server config, we only have the public key, no private key.
+    // We'll create a dummy private key that won't be used.
+    // TODO: maybe refactor Identity to not require a private key for 
+    // client-side use?
+    const dummyPrivateKey = await suite.DeserializePrivateKey(new Uint8Array(32), false);
+
+    return new Identity(suite, publicKey, dummyPrivateKey);
+  }
+
+  /**
    * Encrypt request body and return context for response decryption.
    *
    * This method is called on the SERVER's identity (public key only).
