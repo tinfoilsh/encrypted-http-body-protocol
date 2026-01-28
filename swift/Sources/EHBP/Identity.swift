@@ -36,6 +36,19 @@ public final class Identity: Sendable {
         )
     }
 
+    /// Creates an Identity from a hex-encoded public key string.
+    ///
+    /// This is used by clients who already have the server's public key
+    /// and don't need to fetch it.
+    ///
+    /// - Parameter publicKeyHex: 64-character hex string representing a 32-byte X25519 public key
+    public convenience init(publicKeyHex: String) throws {
+        guard let publicKeyBytes = Data(hexString: publicKeyHex) else {
+            throw EHBPError.invalidInput("invalid hex string")
+        }
+        try self.init(publicKeyBytes: publicKeyBytes)
+    }
+
     /// Creates an Identity from an RFC 9458 key configuration
     ///
     /// Format:
