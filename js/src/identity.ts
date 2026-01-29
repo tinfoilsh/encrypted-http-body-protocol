@@ -201,17 +201,7 @@ export class Identity {
       );
     }
 
-    // Create cipher suite
-    const suite = createSuite();
-
-    // Import public key
-    const publicKey = await suite.DeserializePublicKey(publicKeyBytes);
-
-    // For server config, we only have the public key, no private key
-    // We'll create a dummy private key that won't be used
-    const dummyPrivateKey = await suite.DeserializePrivateKey(new Uint8Array(32), false);
-
-    return new Identity(suite, publicKey, dummyPrivateKey);
+    return Identity.fromPublicKeyBytes(publicKeyBytes);
   }
 
   /**
@@ -227,16 +217,23 @@ export class Identity {
       throw new Error(`Invalid public key length: expected 32, got ${publicKeyBytes.length}`);
     }
 
+    return Identity.fromPublicKeyBytes(publicKeyBytes);
+  }
+
+  /**
+   * Create an Identity from raw public key bytes.
+   * Uses the default cipher suite (X25519/HKDF-SHA256/AES-256-GCM).
+   *
+   * For public-key-only identities (client-side use), we create a placeholder
+   * private key that won't be used. TODO: refactor Identity to not require
+   * a private key for client-side use.
+   */
+  private static async fromPublicKeyBytes(publicKeyBytes: Uint8Array): Promise<Identity> {
     const suite = createSuite();
     const publicKey = await suite.DeserializePublicKey(publicKeyBytes);
+    const placeholderPrivateKey = await suite.DeserializePrivateKey(new Uint8Array(32), false);
 
-    // For server config, we only have the public key, no private key.
-    // We'll create a dummy private key that won't be used.
-    // TODO: maybe refactor Identity to not require a private key for 
-    // client-side use?
-    const dummyPrivateKey = await suite.DeserializePrivateKey(new Uint8Array(32), false);
-
-    return new Identity(suite, publicKey, dummyPrivateKey);
+    return new Identity(suite, publicKey, placeholderPrivateKey);
   }
 
   /**
