@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -204,6 +205,28 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 		assert.Contains(t, w.Body.String(), "failed to decrypt request")
 	})
+
+	t.Run("stale key mismatch returns 422 problem details", func(t *testing.T) {
+		client := newTestClient(t)
+		otherServer, err := NewIdentity()
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
+		// Encrypt to a different server key to simulate stale key config.
+		client.encryptRequest(t, req, otherServer.MarshalPublicKey())
+
+		w := httptest.NewRecorder()
+		wrapped.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+		assert.Equal(t, protocol.ProblemJSONMediaType, w.Header().Get("Content-Type"))
+
+		var problem map[string]string
+		err = json.Unmarshal(w.Body.Bytes(), &problem)
+		require.NoError(t, err)
+		assert.Equal(t, protocol.KeyConfigProblemType, problem["type"])
+		assert.Equal(t, "failed to decrypt request", problem["title"])
+	})
 }
 
 func TestPlaintextPassthrough(t *testing.T) {
@@ -288,6 +311,22 @@ func TestSendError(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "test message")
+}
+
+func TestSendErrorKeyConfigProblem(t *testing.T) {
+	w := httptest.NewRecorder()
+	testError := fmt.Errorf("key mismatch")
+
+	sendError(w, testError, "failed to decrypt request", http.StatusUnprocessableEntity)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	assert.Equal(t, protocol.ProblemJSONMediaType, w.Header().Get("Content-Type"))
+
+	var problem map[string]string
+	err := json.Unmarshal(w.Body.Bytes(), &problem)
+	require.NoError(t, err)
+	assert.Equal(t, protocol.KeyConfigProblemType, problem["type"])
+	assert.Equal(t, "failed to decrypt request", problem["title"])
 }
 
 func TestChunkEncryptionDecryption(t *testing.T) {
