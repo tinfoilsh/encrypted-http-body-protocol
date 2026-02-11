@@ -15,4 +15,11 @@ const (
 
 	// KeysPath is the well-known path for key distribution
 	KeysPath = "/.well-known/hpke-keys"
+
+	// ProblemJSONMediaType is the media type for RFC 7807-style problem details.
+	ProblemJSONMediaType = "application/problem+json"
+
+	// KeyConfigProblemType identifies EHBP key configuration mismatch errors.
+	// Clients can use this signal to refresh key config and retry safely.
+	KeyConfigProblemType = "urn:ietf:params:ehbp:error:key-config"
 )

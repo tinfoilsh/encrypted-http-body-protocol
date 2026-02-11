@@ -37,6 +37,31 @@ func IsClientError(err error) bool {
 	return errors.As(err, &clientErr)
 }
 
+// KeyConfigError represents a client/server key configuration mismatch.
+// This is used for stale or incompatible HPKE key material that requires rekey.
+type KeyConfigError struct {
+	Err error
+}
+
+func (e KeyConfigError) Error() string {
+	return e.Err.Error()
+}
+
+func (e KeyConfigError) Unwrap() error {
+	return e.Err
+}
+
+// NewKeyConfigError wraps an error as a key configuration mismatch.
+func NewKeyConfigError(err error) error {
+	return KeyConfigError{Err: err}
+}
+
+// IsKeyConfigError determines if an error indicates key configuration mismatch.
+func IsKeyConfigError(err error) bool {
+	var keyErr KeyConfigError
+	return errors.As(err, &keyErr)
+}
+
 // StreamingEncryptReader wraps an io.Reader for streaming encryption
 type StreamingEncryptReader struct {
 	reader io.Reader
@@ -146,11 +171,14 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	chunkLenBytes := make([]byte, 4)
 	_, err = io.ReadFull(r.reader, chunkLenBytes)
 	if err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		if err == io.EOF {
 			r.eof = true
 			return 0, io.EOF
 		}
-		return 0, fmt.Errorf("failed to read chunk length: %w", err)
+		if err == io.ErrUnexpectedEOF {
+			return 0, NewClientError(fmt.Errorf("invalid chunk length framing: %w", err))
+		}
+		return 0, NewClientError(fmt.Errorf("failed to read chunk length: %w", err))
 	}
 
 	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
@@ -163,13 +191,15 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	encryptedChunk := make([]byte, chunkLen)
 	_, err = io.ReadFull(r.reader, encryptedChunk)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
+		return 0, NewClientError(fmt.Errorf("failed to read encrypted chunk: %w", err))
 	}
 
 	// Decrypt chunk
 	decryptedChunk, err := r.opener.Open(encryptedChunk, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
+		// Decryption failure at this stage typically indicates request/receiver key mismatch
+		// (for example stale client key after server key rotation).
+		return 0, NewKeyConfigError(fmt.Errorf("failed to decrypt chunk: %w", err))
 	}
 
 	// Return as much as fits in p, buffer the rest
