@@ -2,6 +2,87 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { Identity, Transport, createTransport } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
+import {
+  CipherSuite,
+  KEM_DHKEM_X25519_HKDF_SHA256,
+  KDF_HKDF_SHA256,
+  AEAD_AES_256_GCM,
+} from 'hpke';
+import {
+  bytesToHex,
+  deriveResponseKeys,
+  encryptChunk,
+  hexToBytes,
+  EXPORT_LABEL,
+  EXPORT_LENGTH,
+  HPKE_REQUEST_INFO,
+  RESPONSE_NONCE_LENGTH,
+} from '../derive.js';
+
+function encodeSingleChunk(payload: Uint8Array): Uint8Array {
+  const chunkLength = new Uint8Array(4);
+  new DataView(chunkLength.buffer).setUint32(0, payload.byteLength, false);
+
+  const body = new Uint8Array(4 + payload.byteLength);
+  body.set(chunkLength, 0);
+  body.set(payload, 4);
+  return body;
+}
+
+async function buildEncryptedResponse(request: Request, serverIdentity: Identity): Promise<Response> {
+  const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
+  assert(requestEncHex, `Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header`);
+  const requestEnc = hexToBytes(requestEncHex);
+
+  const encryptedRequestBody = new Uint8Array(await request.arrayBuffer());
+  assert(encryptedRequestBody.byteLength >= 4, 'Encrypted request body must include chunk length');
+
+  const chunkLength = new DataView(
+    encryptedRequestBody.buffer,
+    encryptedRequestBody.byteOffset,
+    encryptedRequestBody.byteLength
+  ).getUint32(0, false);
+  assert.strictEqual(
+    encryptedRequestBody.byteLength,
+    4 + chunkLength,
+    'Expected exactly one encrypted request chunk'
+  );
+  const ciphertext = encryptedRequestBody.slice(4);
+
+  const suite = new CipherSuite(
+    KEM_DHKEM_X25519_HKDF_SHA256,
+    KDF_HKDF_SHA256,
+    AEAD_AES_256_GCM
+  );
+  const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
+  const recipientContext = await suite.SetupRecipient(serverIdentity.getPrivateKey(), requestEnc, {
+    info: infoBytes,
+  });
+
+  const decryptedRequest = await recipientContext.Open(ciphertext);
+  const decryptedText = new TextDecoder().decode(decryptedRequest);
+  const responseText = `processed:${decryptedText}`;
+
+  const responseNonce = new Uint8Array(RESPONSE_NONCE_LENGTH);
+  crypto.getRandomValues(responseNonce);
+
+  const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
+  const exportedSecret = await recipientContext.Export(exportLabelBytes, EXPORT_LENGTH);
+  const keyMaterial = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
+
+  const responseCiphertext = await encryptChunk(
+    keyMaterial,
+    0,
+    new TextEncoder().encode(responseText)
+  );
+
+  return new Response(encodeSingleChunk(responseCiphertext), {
+    status: 200,
+    headers: {
+      [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(responseNonce),
+    },
+  });
+}
 
 describe('Transport', () => {
   let serverIdentity: Identity;
@@ -93,5 +174,69 @@ describe('Transport', () => {
     assert.strictEqual(responseText, `Hello, ${testName}`, 'Server should respond with Hello, {name}');
 
     console.log(`✓ Integration test passed: ${responseText}`);
+  });
+
+  it('should refresh key config and retry once on key mismatch responses', async () => {
+    const serverURL = 'https://server.test';
+    const initialServerIdentity = await Identity.generate();
+    const rotatedServerIdentity = await Identity.generate();
+    const initialConfig = await initialServerIdentity.marshalConfig();
+    const rotatedConfig = await rotatedServerIdentity.marshalConfig();
+
+    const originalFetch = globalThis.fetch;
+    let keysFetches = 0;
+    let encryptedRequestAttempts = 0;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      const requestURL = new URL(request.url);
+
+      if (requestURL.pathname === PROTOCOL.KEYS_PATH) {
+        keysFetches++;
+        const config = keysFetches === 1 ? initialConfig : rotatedConfig;
+        return new Response(config, {
+          status: 200,
+          headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
+        });
+      }
+
+      encryptedRequestAttempts++;
+      if (encryptedRequestAttempts === 1) {
+        return new Response(
+          JSON.stringify({
+            type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
+            title: 'key configuration mismatch',
+          }),
+          {
+            status: 422,
+            headers: {
+              'content-type': `${PROTOCOL.PROBLEM_JSON_MEDIA_TYPE}; charset=utf-8`,
+            },
+          }
+        );
+      }
+
+      if (encryptedRequestAttempts === 2) {
+        return buildEncryptedResponse(request, rotatedServerIdentity);
+      }
+
+      throw new Error('Unexpected request count in fetch mock');
+    }) as typeof fetch;
+
+    try {
+      const transport = await createTransport(serverURL);
+      const response = await transport.post(`${serverURL}/secure`, 'hello');
+      const responseText = await response.text();
+
+      assert.strictEqual(responseText, 'processed:hello');
+      assert.strictEqual(keysFetches, 2, 'Client should refresh keys exactly once');
+      assert.strictEqual(
+        encryptedRequestAttempts,
+        2,
+        'Client should retry encrypted request exactly once after key mismatch'
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
