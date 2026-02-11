@@ -6,6 +6,8 @@ export const PROTOCOL = {
   RESPONSE_NONCE_HEADER: 'Ehbp-Response-Nonce',
   KEYS_MEDIA_TYPE: 'application/ohttp-keys',
   KEYS_PATH: '/.well-known/hpke-keys',
+  PROBLEM_JSON_MEDIA_TYPE: 'application/problem+json',
+  KEY_CONFIG_PROBLEM_TYPE: 'urn:ietf:params:ehbp:error:key-config',
 } as const;
 
 /**
