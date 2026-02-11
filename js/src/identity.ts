@@ -18,6 +18,7 @@ import {
   RESPONSE_NONCE_LENGTH,
   ResponseKeyMaterial,
 } from './derive.js';
+import { ProtocolError, DecryptionError } from './errors.js';
 
 /**
  * Request context for response decryption.
@@ -188,7 +189,7 @@ export class Identity {
     }
 
     if (suites.length === 0) {
-      throw new Error('No cipher suites found in config');
+      throw new ProtocolError('No cipher suites found in config');
     }
 
     // Use the first cipher suite
@@ -196,7 +197,7 @@ export class Identity {
 
     // Validate that we support this cipher suite
     if (firstSuite.kdfId !== HPKE_CONFIG.KDF || firstSuite.aeadId !== HPKE_CONFIG.AEAD) {
-      throw new Error(
+      throw new ProtocolError(
         `Unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
       );
     }
@@ -214,7 +215,7 @@ export class Identity {
   static async fromPublicKeyHex(publicKeyHex: string): Promise<Identity> {
     const publicKeyBytes = hexToBytes(publicKeyHex);
     if (publicKeyBytes.length !== 32) {
-      throw new Error(`Invalid public key length: expected 32, got ${publicKeyBytes.length}`);
+      throw new ProtocolError(`Invalid public key length: expected 32, got ${publicKeyBytes.length}`);
     }
 
     return Identity.fromPublicKeyBytes(publicKeyBytes);
@@ -323,12 +324,12 @@ export class Identity {
     // Get response nonce from header
     const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
     if (!responseNonceHex) {
-      throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+      throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
     }
 
     const responseNonce = hexToBytes(responseNonceHex);
     if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
-      throw new Error(
+      throw new ProtocolError(
         `Invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`
       );
     }
@@ -384,7 +385,10 @@ export class Identity {
                 controller.enqueue(plaintext);
                 return;
               } catch (error) {
-                controller.error(new Error(`Decryption failed at chunk ${seq - 1}: ${error}`));
+                controller.error(new DecryptionError(
+                  `Decryption failed at chunk ${seq - 1}`,
+                  { cause: error }
+                ));
                 return;
               }
             }

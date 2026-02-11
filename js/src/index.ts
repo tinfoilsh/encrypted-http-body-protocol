@@ -10,6 +10,12 @@ export { Identity } from './identity.js';
 export type { RequestContext } from './identity.js';
 export { Transport, createTransport } from './client.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+export {
+  EhbpError,
+  KeyConfigMismatchError,
+  ProtocolError,
+  DecryptionError,
+} from './errors.js';
 
 // Export key derivation utilities for advanced usage
 export {
