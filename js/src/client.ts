@@ -1,5 +1,6 @@
 import { Identity } from './identity.js';
 import { PROTOCOL } from './protocol.js';
+import { KeyConfigMismatchError, ProtocolError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -23,16 +24,10 @@ export class Transport {
    * Create a new transport by fetching server public key.
    */
   static async create(serverURL: string): Promise<Transport> {
-    const { serverIdentity, serverHost } = await Transport.fetchServerIdentity(serverURL);
-    return new Transport(serverIdentity, serverHost);
-  }
-
-  private static async fetchServerIdentity(
-    serverURL: string
-  ): Promise<{ serverIdentity: Identity; serverHost: string }> {
     const url = new URL(serverURL);
     const serverHost = url.host;
 
+    // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
     const response = await fetch(keysURL.toString());
 
@@ -48,13 +43,7 @@ export class Transport {
     const keysData = new Uint8Array(await response.arrayBuffer());
     const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
 
-    return { serverIdentity, serverHost };
-  }
-
-  private async refreshServerPublicKey(serverURL: string): Promise<void> {
-    const { serverIdentity, serverHost } = await Transport.fetchServerIdentity(serverURL);
-    this.serverIdentity = serverIdentity;
-    this.serverHost = serverHost;
+    return new Transport(serverIdentity, serverHost);
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -65,25 +54,20 @@ export class Transport {
     return mediaType === PROTOCOL.PROBLEM_JSON_MEDIA_TYPE;
   }
 
-  private async isKeyConfigMismatchResponse(
-    response: Response
-  ): Promise<{ mismatch: boolean; title: string }> {
-    if (response.status !== 422) {
-      return { mismatch: false, title: '' };
-    }
+  private static async checkKeyConfigMismatch(response: Response): Promise<void> {
+    if (response.status !== 422) return;
+    if (!Transport.isProblemJSONContentType(response.headers.get('content-type'))) return;
 
-    if (!Transport.isProblemJSONContentType(response.headers.get('content-type'))) {
-      return { mismatch: false, title: '' };
-    }
-
+    let problem: ProblemDetails | undefined;
     try {
-      const problem = (await response.clone().json()) as ProblemDetails;
-      if (problem?.type !== PROTOCOL.KEY_CONFIG_PROBLEM_TYPE) {
-        return { mismatch: false, title: '' };
-      }
-      return { mismatch: true, title: typeof problem.title === 'string' ? problem.title : '' };
+      problem = (await response.clone().json()) as ProblemDetails;
     } catch {
-      return { mismatch: false, title: '' };
+      return; // Not valid JSON — not a key config mismatch
+    }
+    if (problem?.type === PROTOCOL.KEY_CONFIG_PROBLEM_TYPE) {
+      throw new KeyConfigMismatchError(
+        typeof problem.title === 'string' ? problem.title : undefined
+      );
     }
   }
 
@@ -148,52 +132,37 @@ export class Transport {
 
     url.host = this.serverHost;
 
-    const maxConfigRetries = 1;
+    const request = new Request(url.toString(), {
+      method,
+      headers,
+      body: requestBody,
+      duplex: 'half',
+    } as RequestInit);
 
-    for (let attempt = 0; attempt <= maxConfigRetries; attempt++) {
-      const request = new Request(url.toString(), {
-        method,
-        headers,
-        body: requestBody,
-        duplex: 'half',
-      } as RequestInit);
+    // Encrypt request (returns context for response decryption)
+    // For bodyless requests, context will be null and request passes through unmodified
+    const { request: encryptedRequest, context } =
+      await this.serverIdentity.encryptRequestWithContext(request);
 
-      // Encrypt request (returns context for response decryption)
-      // For bodyless requests, context will be null and request passes through unmodified
-      const { request: encryptedRequest, context } =
-        await this.serverIdentity.encryptRequestWithContext(request);
+    // Make the request
+    const response = await fetch(encryptedRequest);
 
-      // Make the request
-      const response = await fetch(encryptedRequest);
-
-      // Bodyless requests: context is null, response is plaintext
-      if (context === null) {
-        return response;
-      }
-
-      const { mismatch, title } = await this.isKeyConfigMismatchResponse(response);
-      if (mismatch) {
-        if (attempt < maxConfigRetries) {
-          await response.body?.cancel();
-          await this.refreshServerPublicKey(url.origin);
-          continue;
-        }
-        throw new Error(
-          `Server key configuration mismatch after retry: ${title || 'key configuration mismatch'}`
-        );
-      }
-
-      // Check for response nonce header (required for response decryption)
-      const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
-      if (!responseNonceHeader) {
-        throw new Error(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
-      }
-
-      // Decrypt response
-      return await this.serverIdentity.decryptResponseWithContext(response, context);
+    // Bodyless requests: context is null, response is plaintext
+    if (context === null) {
+      return response;
     }
 
-    throw new Error('Request failed after key refresh retry');
+    // Throws KeyConfigMismatchError if server returned 422 key-config mismatch
+    await Transport.checkKeyConfigMismatch(response);
+
+    // Check for response nonce header (required for response decryption)
+    const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
+    if (!responseNonceHeader) {
+      throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    }
+
+    // Decrypt response
+    return await this.serverIdentity.decryptResponseWithContext(response, context);
   }
 
   /**

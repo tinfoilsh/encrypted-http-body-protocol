@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
-import { Identity, Transport, createTransport } from '../index.js';
+import { Identity, Transport, createTransport, KeyConfigMismatchError } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 import {
   CipherSuite,
@@ -176,65 +176,98 @@ describe('Transport', () => {
     console.log(`✓ Integration test passed: ${responseText}`);
   });
 
-  it('should refresh key config and retry once on key mismatch responses', async () => {
+  it('should throw KeyConfigMismatchError on 422 key mismatch response', async () => {
     const serverURL = 'https://server.test';
-    const initialServerIdentity = await Identity.generate();
-    const rotatedServerIdentity = await Identity.generate();
-    const initialConfig = await initialServerIdentity.marshalConfig();
-    const rotatedConfig = await rotatedServerIdentity.marshalConfig();
+    const serverIdentity = await Identity.generate();
+    const config = await serverIdentity.marshalConfig();
 
     const originalFetch = globalThis.fetch;
-    let keysFetches = 0;
-    let encryptedRequestAttempts = 0;
 
     globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
       const request = input instanceof Request ? input : new Request(input);
       const requestURL = new URL(request.url);
 
       if (requestURL.pathname === PROTOCOL.KEYS_PATH) {
-        keysFetches++;
-        const config = keysFetches === 1 ? initialConfig : rotatedConfig;
         return new Response(config, {
           status: 200,
           headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
         });
       }
 
-      encryptedRequestAttempts++;
-      if (encryptedRequestAttempts === 1) {
-        return new Response(
-          JSON.stringify({
-            type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
-            title: 'key configuration mismatch',
-          }),
-          {
-            status: 422,
-            headers: {
-              'content-type': `${PROTOCOL.PROBLEM_JSON_MEDIA_TYPE}; charset=utf-8`,
-            },
-          }
-        );
-      }
-
-      if (encryptedRequestAttempts === 2) {
-        return buildEncryptedResponse(request, rotatedServerIdentity);
-      }
-
-      throw new Error('Unexpected request count in fetch mock');
+      // Server returns 422 key-config mismatch
+      return new Response(
+        JSON.stringify({
+          type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
+          title: 'key configuration mismatch',
+        }),
+        {
+          status: 422,
+          headers: {
+            'content-type': `${PROTOCOL.PROBLEM_JSON_MEDIA_TYPE}; charset=utf-8`,
+          },
+        }
+      );
     }) as typeof fetch;
 
     try {
       const transport = await createTransport(serverURL);
-      const response = await transport.post(`${serverURL}/secure`, 'hello');
-      const responseText = await response.text();
-
-      assert.strictEqual(responseText, 'processed:hello');
-      assert.strictEqual(keysFetches, 2, 'Client should refresh keys exactly once');
-      assert.strictEqual(
-        encryptedRequestAttempts,
-        2,
-        'Client should retry encrypted request exactly once after key mismatch'
+      await assert.rejects(
+        () => transport.post(`${serverURL}/secure`, 'hello'),
+        (err: unknown) => {
+          assert(err instanceof KeyConfigMismatchError, `Expected KeyConfigMismatchError, got ${(err as Error).constructor.name}`);
+          assert.strictEqual(err.title, 'key configuration mismatch');
+          return true;
+        }
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should not throw KeyConfigMismatchError for 422 without problem+json', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (): Promise<Response> => {
+      // 422 without problem+json content type — not a key mismatch
+      return new Response('Unprocessable', {
+        status: 422,
+        headers: { 'content-type': 'text/plain' },
+      });
+    }) as typeof fetch;
+
+    try {
+      // Should not throw KeyConfigMismatchError — but will throw ProtocolError
+      // because the response has no Ehbp-Response-Nonce header
+      await assert.rejects(
+        () => transport.post('https://server.test/secure', 'hello'),
+        (err: unknown) => {
+          assert(!(err instanceof KeyConfigMismatchError), 'Should not be KeyConfigMismatchError');
+          return true;
+        }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should encrypt, send, and decrypt a full round-trip', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      return buildEncryptedResponse(request, serverIdentity);
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+      const responseText = await response.text();
+      assert.strictEqual(responseText, 'processed:hello');
     } finally {
       globalThis.fetch = originalFetch;
     }
