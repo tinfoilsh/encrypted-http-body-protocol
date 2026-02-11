@@ -136,7 +136,8 @@ This derivation ensures:
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 6.4 for the security rationale.
 - Inbound response:
 
-  - For requests with encrypted bodies: Require `Ehbp-Response-Nonce`; derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key. If the header is missing or invalid, treat the response as an error and fail the request.
+  - For requests with encrypted bodies: Require `Ehbp-Response-Nonce`; derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.
+  - If `Ehbp-Response-Nonce` is missing or invalid, the client MUST fail the request and MUST NOT treat the response body as authenticated application data. The client MAY parse plaintext error details only for diagnostics and recovery (Section 5.4), but this does not make the response trustworthy.
   - For bodyless requests: The response is unencrypted. Process as a normal HTTP response.
 
 ### 5.2 Server
@@ -144,7 +145,12 @@ This derivation ensures:
 - Request handling:
 
   - The middleware checks for `Ehbp-Encapsulated-Key`. The server accepts both encrypted and plaintext requests.
-  - If `Ehbp-Encapsulated-Key` is present, the body is decrypted as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption. If the client request is not well-formed (invalid hex, HPKE setup failure), the server responds with HTTP 400; other failures return 500.
+  - If `Ehbp-Encapsulated-Key` is present, the body is decrypted as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption.
+  - If the encrypted request is malformed, decapsulation fails, decryption/authentication fails, or framing is invalid, the server MUST fail closed and reject the request before application processing completes.
+  - Error status mapping:
+    - malformed encapsulated request or cryptographic verification failure: HTTP 400
+    - key/configuration mismatch (for example, stale client key after rotation): HTTP 422 (Unprocessable Content) with optional `application/problem+json` details as defined in Section 5.4.2
+    - internal failures unrelated to client input: HTTP 500
   - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
   - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 6.4 for the security rationale.
 - Response handling:
@@ -160,6 +166,61 @@ The presence or absence of `Ehbp-Response-Nonce` in the response indicates wheth
 - `Ehbp-Response-Nonce` absent → response body is plaintext
 
 Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is present in the response. If the header is missing, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
+
+### 5.4 Error Handling and Recovery
+
+This section aligns EHBP error handling with OHTTP guidance and HPKE security considerations.
+
+#### 5.4.1 Failure Classes
+
+EHBP implementations MUST treat these as protocol failures:
+
+- invalid `Ehbp-Encapsulated-Key` (format, length, or unsupported parameters)
+- HPKE setup/decapsulation failure
+- chunk framing violation
+- AEAD authentication/decryption failure
+- missing/invalid `Ehbp-Response-Nonce` when an encrypted response is expected
+
+Implementations MUST fail closed: no plaintext fallback for encrypted exchanges and no partial decrypted data exposure after authentication failure.
+
+#### 5.4.2 HTTP Error Signaling
+
+Servers SHOULD return HTTP status codes as follows:
+
+- `400 Bad Request`: malformed encapsulated request or cryptographic/framing failure attributable to request input
+- `422 Unprocessable Content`: key configuration mismatch (for example, unknown/replaced key identifier or decryption failure with the selected key, including stale client configuration after key rotation)
+- `500 Internal Server Error`: server-side processing failure not attributable to client input
+
+For `422` key configuration mismatch responses, servers SHOULD use:
+
+- `Content-Type: application/problem+json`
+- JSON body with:
+  - `"type": "urn:ietf:params:ehbp:error:key-config"`
+  - `"title": "<human-readable summary>"`
+
+This mirrors OHTTP key-management guidance while keeping EHBP-specific error typing.
+
+#### 5.4.3 Client Rekey and Retry Behavior
+
+Clients MUST NOT automatically retry failed requests unless they receive a positive signal that the request was not processed at the application layer.
+
+A `422` key-configuration mismatch signal (`"type" = "urn:ietf:params:ehbp:error:key-config"` or equivalent local mapping) is such a positive signal for EHBP.
+
+On this signal, clients SHOULD:
+
+1. Refresh server key configuration by refetching `/.well-known/hpke-keys`.
+2. Recreate the EHBP transport context.
+3. Retry the request at most once automatically.
+
+For non-idempotent requests, clients SHOULD only auto-retry when idempotency protection exists (for example, an idempotency key) or application policy explicitly allows replay.
+
+On `400` protocol failures without explicit config mismatch signaling, clients MAY perform a bounded rekey attempt once, then surface an unrecoverable protocol error.
+
+#### 5.4.4 Side-Channel and Oracle Considerations
+
+Error responses MUST NOT disclose fine-grained cryptographic failure causes (for example, whether decapsulation failed versus AEAD authentication failed). Implementations SHOULD use stable external error shapes/status families to reduce oracle risk.
+
+For DHKEM implementations, developers SHOULD follow RFC 9180 guidance on implicit rejection to limit side-channel leakage from malformed public keys.
 
 ## 6. Security Considerations
 
@@ -183,6 +244,8 @@ EHBP cryptographically binds responses to their corresponding requests. This pre
 - Public keys SHOULD be distributed and verified via a trusted channel.
 - Key configurations SHOULD be rotated periodically; clients may cache the advertised `key_config` until rotated.
 - The reference implementation uses KEM X25519_HKDF_SHA256, KDF HKDF_SHA256, AEAD AES_256_GCM; AAD is empty for all seals/opens.
+- EHBP implementations MUST ensure HPKE keys are not reused in other protocols that use the same HPKE context labels and framing semantics.
+- Protocols that reuse EHBP framing MUST use distinct HPKE `info`/export labels to ensure key diversity and avoid cross-protocol key reuse.
 
 ### 6.4 Bodyless Requests
 
