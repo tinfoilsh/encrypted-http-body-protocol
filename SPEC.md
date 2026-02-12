@@ -200,21 +200,14 @@ For `422` key configuration mismatch responses, servers SHOULD use:
 
 This mirrors OHTTP key-management guidance while keeping EHBP-specific error typing.
 
-#### 5.4.3 Client Rekey and Retry Behavior
+#### 5.4.3 Key-Configuration Mismatch Recovery
 
-Clients MUST NOT automatically retry failed requests unless they receive a positive signal that the request was not processed at the application layer.
+On receiving a key-configuration mismatch (Section 5.4.2), the client knows the server rejected the request before application processing completed (per Section 5.2). It is safe to:
 
-A `422` key-configuration mismatch signal (`"type" = "urn:ietf:params:ehbp:error:key-config"` or equivalent local mapping) is such a positive signal for EHBP.
+1. Refresh server key configuration (e.g., by refetching `/.well-known/hpke-keys` or through a trusted out-of-band channel per Section 6.3).
+2. Recreate the EHBP transport with the new key.
+3. Re-send the original request.
 
-On this signal, clients SHOULD:
-
-1. Refresh server key configuration by refetching `/.well-known/hpke-keys`.
-2. Recreate the EHBP transport context.
-3. Retry the request at most once automatically.
-
-For non-idempotent requests, clients SHOULD only auto-retry when idempotency protection exists (for example, an idempotency key) or application policy explicitly allows replay.
-
-On `400` protocol failures without explicit config mismatch signaling, clients MAY perform a bounded rekey attempt once, then surface an unrecoverable protocol error.
 
 #### 5.4.4 Side-Channel and Oracle Considerations
 
