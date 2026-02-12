@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
-import { Identity, Transport, createTransport, KeyConfigMismatchError } from '../index.js';
+import { Identity, Transport, KeyConfigMismatchError } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
@@ -94,10 +94,7 @@ describe('Transport', () => {
   });
 
   it('should create transport with server public key', () => {
-    const transport = new Transport(
-      serverIdentity,
-      'localhost:8080'
-    );
+    const transport = new Transport(serverIdentity);
 
     assert(transport instanceof Transport, 'Should create transport instance');
   });
@@ -157,7 +154,8 @@ describe('Transport', () => {
       return;
     }
 
-    const transport = await createTransport(serverURL);
+    const identity = await Identity.fetchFromServer(serverURL);
+    const transport = new Transport(identity);
 
     const testName = 'Integration Test User';
 
@@ -212,7 +210,8 @@ describe('Transport', () => {
     }) as typeof fetch;
 
     try {
-      const transport = await createTransport(serverURL);
+      const identity = await Identity.fetchFromServer(serverURL);
+      const transport = new Transport(identity);
       await assert.rejects(
         () => transport.post(`${serverURL}/secure`, 'hello'),
         (err: unknown) => {
@@ -228,7 +227,7 @@ describe('Transport', () => {
 
   it('should not throw KeyConfigMismatchError for 422 without problem+json', async () => {
     const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
+    const transport = new Transport(serverIdentity);
 
     const originalFetch = globalThis.fetch;
 
@@ -257,7 +256,7 @@ describe('Transport', () => {
 
   it('should encrypt, send, and decrypt a full round-trip', async () => {
     const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
+    const transport = new Transport(serverIdentity);
 
     const originalFetch = globalThis.fetch;
 
