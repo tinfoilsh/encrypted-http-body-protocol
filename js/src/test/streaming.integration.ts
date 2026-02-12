@@ -7,7 +7,7 @@
  * Run with: npm run test:integration
  */
 
-import { createTransport } from '../index.js';
+import { Identity, Transport } from '../index.js';
 
 async function streamingIntegrationTest() {
   console.log('EHBP Streaming Integration Test');
@@ -17,7 +17,8 @@ async function streamingIntegrationTest() {
     // Create transport
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080';
-    const transport = await createTransport(serverURL);
+    const identity = await Identity.fetchFromServer(serverURL);
+    const transport = new Transport(identity, new URL(serverURL).host);
     console.log('Transport created');
 
     // Test 1: GET streaming (unencrypted - bodyless request)

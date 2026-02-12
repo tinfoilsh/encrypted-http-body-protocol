@@ -20,32 +20,6 @@ export class Transport {
     this.serverHost = serverHost;
   }
 
-  /**
-   * Create a new transport by fetching server public key.
-   */
-  static async create(serverURL: string): Promise<Transport> {
-    const url = new URL(serverURL);
-    const serverHost = url.host;
-
-    // Fetch server public key
-    const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
-    const response = await fetch(keysURL.toString());
-
-    if (!response.ok) {
-      throw new Error(`Failed to get server public key: ${response.status}`);
-    }
-
-    const contentType = response.headers.get('content-type');
-    if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
-      throw new Error(`Invalid content type: ${contentType}`);
-    }
-
-    const keysData = new Uint8Array(await response.arrayBuffer());
-    const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
-
-    return new Transport(serverIdentity, serverHost);
-  }
-
   private static isProblemJSONContentType(contentType: string | null): boolean {
     if (!contentType) {
       return false;
@@ -192,11 +166,4 @@ export class Transport {
   async delete(url: string | URL, init?: RequestInit): Promise<Response> {
     return this.request(url, { ...init, method: 'DELETE' });
   }
-}
-
-/**
- * Create a new transport instance.
- */
-export async function createTransport(serverURL: string): Promise<Transport> {
-  return Transport.create(serverURL);
 }

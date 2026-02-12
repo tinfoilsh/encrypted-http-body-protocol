@@ -8,7 +8,7 @@
 
 export { Identity } from './identity.js';
 export type { RequestContext } from './identity.js';
-export { Transport, createTransport } from './client.js';
+export { Transport } from './client.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 export {
   EhbpError,

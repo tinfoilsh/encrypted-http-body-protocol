@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
-import { Identity, Transport, createTransport, KeyConfigMismatchError } from '../index.js';
+import { Identity, Transport, KeyConfigMismatchError } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
@@ -25,11 +25,6 @@ function encodeSingleChunk(payload: Uint8Array): Uint8Array {
   return body;
 }
 
-function toArrayBuffer(bytes: Uint8Array<ArrayBufferLike>): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
 
 async function buildEncryptedResponse(request: Request, serverIdentity: Identity): Promise<Response> {
   const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
@@ -78,7 +73,7 @@ async function buildEncryptedResponse(request: Request, serverIdentity: Identity
     new TextEncoder().encode(responseText)
   );
 
-  return new Response(toArrayBuffer(encodeSingleChunk(responseCiphertext)), {
+  return new Response(encodeSingleChunk(responseCiphertext) as unknown as BodyInit, {
     status: 200,
     headers: {
       [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(responseNonce),
@@ -94,10 +89,7 @@ describe('Transport', () => {
   });
 
   it('should create transport with server public key', () => {
-    const transport = new Transport(
-      serverIdentity,
-      'localhost:8080'
-    );
+    const transport = new Transport(serverIdentity);
 
     assert(transport instanceof Transport, 'Should create transport instance');
   });
@@ -157,7 +149,8 @@ describe('Transport', () => {
       return;
     }
 
-    const transport = await createTransport(serverURL);
+    const identity = await Identity.fetchFromServer(serverURL);
+    const transport = new Transport(identity);
 
     const testName = 'Integration Test User';
 
@@ -190,7 +183,7 @@ describe('Transport', () => {
       const requestURL = new URL(request.url);
 
       if (requestURL.pathname === PROTOCOL.KEYS_PATH) {
-        return new Response(toArrayBuffer(config), {
+        return new Response(config as unknown as BodyInit, {
           status: 200,
           headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
         });
@@ -212,7 +205,8 @@ describe('Transport', () => {
     }) as typeof fetch;
 
     try {
-      const transport = await createTransport(serverURL);
+      const identity = await Identity.fetchFromServer(serverURL);
+      const transport = new Transport(identity);
       await assert.rejects(
         () => transport.post(`${serverURL}/secure`, 'hello'),
         (err: unknown) => {
@@ -228,7 +222,7 @@ describe('Transport', () => {
 
   it('should not throw KeyConfigMismatchError for 422 without problem+json', async () => {
     const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
+    const transport = new Transport(serverIdentity);
 
     const originalFetch = globalThis.fetch;
 
@@ -257,7 +251,7 @@ describe('Transport', () => {
 
   it('should encrypt, send, and decrypt a full round-trip', async () => {
     const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
+    const transport = new Transport(serverIdentity);
 
     const originalFetch = globalThis.fetch;
 
