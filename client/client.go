@@ -104,27 +104,6 @@ func (t *Transport) ServerIdentity() *identity.Identity {
 	return t.serverIdentity
 }
 
-func cloneRequestWithBody(req *http.Request, body []byte) *http.Request {
-	cloned := req.Clone(req.Context())
-	cloned.Header = req.Header.Clone()
-	if len(body) > 0 {
-		cloned.Body = io.NopCloser(bytes.NewReader(body))
-		cloned.ContentLength = int64(len(body))
-	} else {
-		cloned.Body = nil
-		cloned.ContentLength = 0
-	}
-	cloned.GetBody = nil
-	return cloned
-}
-
-func serverOriginFromRequest(req *http.Request) string {
-	return (&url.URL{
-		Scheme: req.URL.Scheme,
-		Host:   req.URL.Host,
-	}).String()
-}
-
 func isProblemJSONContentType(contentType string) bool {
 	if contentType == "" {
 		return false
@@ -163,81 +142,41 @@ func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	var body []byte
-	if req.Body != nil && req.Body != http.NoBody {
-		if req.GetBody != nil {
-			rc, err := req.GetBody()
-			if err != nil {
-				return nil, fmt.Errorf("failed to clone request body: %v", err)
+	// Create a copy of the request to avoid modifying the original
+	newReq := req.Clone(req.Context())
+
+	// Encrypt request to server's public key and get context for response decryption
+	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
+	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt request: %v", err)
+	}
+
+	resp, err := t.httpClient.Do(newReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %v", err)
+	}
+
+	// Only decrypt if we encrypted the request (had a body)
+	if reqCtx != nil {
+		rekey, title, checkErr := isKeyConfigMismatchResponse(resp)
+		if checkErr != nil {
+			resp.Body.Close()
+			return nil, checkErr
+		}
+		if rekey {
+			resp.Body.Close()
+			if title == "" {
+				title = "key configuration mismatch"
 			}
-			defer rc.Close()
-			payload, err := io.ReadAll(rc)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read request body: %v", err)
-			}
-			body = payload
-		} else {
-			payload, err := io.ReadAll(req.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read request body: %v", err)
-			}
-			_ = req.Body.Close()
-			body = payload
+			return nil, fmt.Errorf("server key configuration mismatch: %s", title)
+		}
+
+		if err := reqCtx.DecryptResponse(resp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decrypt response: %v", err)
 		}
 	}
 
-	const maxConfigRetries = 1
-	for attempt := 0; attempt <= maxConfigRetries; attempt++ {
-		// Create a copy of the request to avoid modifying the original
-		newReq := cloneRequestWithBody(req, body)
-
-		// Encrypt request to server's public key and get context for response decryption
-		// For bodyless requests, reqCtx will be nil - response passes through unencrypted
-		reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt request: %v", err)
-		}
-
-		resp, err := t.httpClient.Do(newReq)
-		if err != nil {
-			return nil, fmt.Errorf("failed to make request: %v", err)
-		}
-
-		// Only decrypt if we encrypted the request (had a body)
-		if reqCtx != nil {
-			rekey, title, err := isKeyConfigMismatchResponse(resp)
-			if err != nil {
-				resp.Body.Close()
-				return nil, err
-			}
-			if rekey {
-				// This response explicitly signals that the request was not processed due
-				// to key configuration mismatch; refresh keys and retry once.
-				if attempt < maxConfigRetries {
-					_, _ = io.Copy(io.Discard, resp.Body)
-					_ = resp.Body.Close()
-
-					if err := t.syncServerPublicKey(serverOriginFromRequest(req)); err != nil {
-						return nil, fmt.Errorf("failed to refresh server public key after key mismatch: %v", err)
-					}
-					continue
-				}
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-				if title == "" {
-					title = "key configuration mismatch"
-				}
-				return nil, fmt.Errorf("server key configuration mismatch after retry: %s", title)
-			}
-
-			if err := reqCtx.DecryptResponse(resp); err != nil {
-				resp.Body.Close()
-				return nil, fmt.Errorf("failed to decrypt response: %v", err)
-			}
-		}
-
-		return resp, nil
-	}
-
-	return nil, fmt.Errorf("request failed after key refresh retry")
+	return resp, nil
 }
