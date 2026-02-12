@@ -18,7 +18,7 @@ async function streamingIntegrationTest() {
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080';
     const identity = await Identity.fetchFromServer(serverURL);
-    const transport = new Transport(identity, new URL(serverURL).host);
+    const transport = new Transport(identity);
     console.log('Transport created');
 
     // Test 1: GET streaming (unencrypted - bodyless request)

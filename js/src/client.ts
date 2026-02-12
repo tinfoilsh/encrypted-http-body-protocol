@@ -13,11 +13,9 @@ interface ProblemDetails {
  */
 export class Transport {
   private serverIdentity: Identity;
-  private serverHost: string;
 
-  constructor(serverIdentity: Identity, serverHost: string) {
+  constructor(serverIdentity: Identity) {
     this.serverIdentity = serverIdentity;
-    this.serverHost = serverHost;
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -89,7 +87,7 @@ export class Transport {
       requestBody = init?.body || null;
     }
 
-    // Create the URL with correct host
+    // Parse request parameters
     let url: URL;
     let method: string;
     let headers: HeadersInit;
@@ -103,8 +101,6 @@ export class Transport {
       method = init?.method || 'GET';
       headers = init?.headers || {};
     }
-
-    url.host = this.serverHost;
 
     const request = new Request(url.toString(), {
       method,
