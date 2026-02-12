@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,21 +110,18 @@ func TestSecureClient(t *testing.T) {
 	})
 }
 
-func TestTransportRekeysOnKeyConfigMismatch(t *testing.T) {
+func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	identityA, err := identity.NewIdentity()
 	assert.NoError(t, err)
 	identityB, err := identity.NewIdentity()
 	assert.NoError(t, err)
 
 	var (
-		mu           sync.RWMutex
-		active       = identityA
-		keysFetches  int32
-		requestsSeen int32
+		mu     sync.RWMutex
+		active = identityA
 	)
 
 	secureHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requestsSeen, 1)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -136,7 +132,6 @@ func TestTransportRekeysOnKeyConfigMismatch(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.KeysPath, func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&keysFetches, 1)
 		mu.RLock()
 		current := active
 		mu.RUnlock()
@@ -155,7 +150,7 @@ func TestTransportRekeysOnKeyConfigMismatch(t *testing.T) {
 	transport, err := NewTransport(server.URL, false)
 	assert.NoError(t, err)
 
-	// Rotate key after client initialization to force a stale-key first attempt.
+	// Rotate key after client initialization to force a stale-key attempt.
 	mu.Lock()
 	active = identityB
 	mu.Unlock()
@@ -164,16 +159,7 @@ func TestTransportRekeysOnKeyConfigMismatch(t *testing.T) {
 	req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
 	assert.NoError(t, err)
 
-	resp, err := httpClient.Do(req)
-	assert.NoError(t, err)
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	assert.NoError(t, err)
-	assert.Equal(t, "Hello, test", string(body))
-
-	// Initial transport setup fetch + refresh after 422 mismatch.
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&keysFetches), int32(2))
-	// Handler should only observe one successful processed request.
-	assert.Equal(t, int32(1), atomic.LoadInt32(&requestsSeen))
+	_, err = httpClient.Do(req)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "key configuration mismatch")
 }
