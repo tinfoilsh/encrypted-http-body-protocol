@@ -554,7 +554,7 @@ describe('Session Recovery Token', () => {
     it('should throw before any request is made', async () => {
       const { identity } = await generateTestKeys();
       const { Transport } = await import('../client.js');
-      const transport = new Transport(identity, 'server.test');
+      const transport = new Transport(identity);
 
       assert.throws(
         () => transport.getSessionRecoveryToken(),
@@ -565,7 +565,7 @@ describe('Session Recovery Token', () => {
     it('should return a working token after a request', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const { Transport } = await import('../client.js');
-      const transport = new Transport(identity, 'server.test');
+      const transport = new Transport(identity);
 
       const originalFetch = globalThis.fetch;
 
@@ -591,7 +591,7 @@ describe('Session Recovery Token', () => {
     it('should update the token on each new request', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const { Transport } = await import('../client.js');
-      const transport = new Transport(identity, 'server.test');
+      const transport = new Transport(identity);
 
       const originalFetch = globalThis.fetch;
 
@@ -621,7 +621,7 @@ describe('Session Recovery Token', () => {
     it('should clear the token for bodyless requests', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const { Transport } = await import('../client.js');
-      const transport = new Transport(identity, 'server.test');
+      const transport = new Transport(identity);
 
       const originalFetch = globalThis.fetch;
 
