@@ -194,7 +194,7 @@ describe('Transport', () => {
       const requestURL = new URL(request.url);
 
       if (requestURL.pathname === PROTOCOL.KEYS_PATH) {
-        return new Response(config, {
+        return new Response(toArrayBuffer(config), {
           status: 200,
           headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
         });
