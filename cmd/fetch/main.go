@@ -14,7 +14,6 @@ import (
 
 var (
 	requestMethod = pflag.StringP("method", "X", "GET", "request method")
-	insecure      = pflag.Bool("insecure", false, "insecure mode")
 	headers       = pflag.StringSliceP("header", "H", []string{}, "request header (can be used multiple times)")
 	data          = pflag.StringP("data", "d", "", "request data")
 
@@ -33,7 +32,7 @@ func main() {
 		log.Fatalf("URL is required")
 	}
 
-	secureTransport, err := client.NewTransport(url, *insecure)
+	secureTransport, err := client.NewTransport(url)
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}

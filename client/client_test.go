@@ -61,7 +61,7 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureTransport, err := NewTransport(server.URL, false)
+	secureTransport, err := NewTransport(server.URL)
 	assert.NoError(t, err)
 	httpClient := &http.Client{
 		Transport: secureTransport,
@@ -147,7 +147,7 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	transport, err := NewTransport(server.URL, false)
+	transport, err := NewTransport(server.URL)
 	assert.NoError(t, err)
 
 	// Rotate key after client initialization to force a stale-key attempt.

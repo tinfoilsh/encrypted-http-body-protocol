@@ -2,7 +2,6 @@ package client
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,15 +26,9 @@ type problemDetails struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
-func NewTransport(server string, insecureSkipVerify bool) (*Transport, error) {
+func NewTransport(server string) (*Transport, error) {
 	t := &Transport{
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: insecureSkipVerify,
-				},
-			},
-		},
+		httpClient: &http.Client{},
 	}
 
 	if err := t.syncServerPublicKey(server); err != nil {
@@ -47,7 +40,7 @@ func NewTransport(server string, insecureSkipVerify bool) (*Transport, error) {
 
 // NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
 // The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
-func NewTransportWithConfig(server string, hpkeConfig []byte, insecureSkipVerify bool) (*Transport, error) {
+func NewTransportWithConfig(server string, hpkeConfig []byte) (*Transport, error) {
 	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
@@ -55,13 +48,7 @@ func NewTransportWithConfig(server string, hpkeConfig []byte, insecureSkipVerify
 
 	return &Transport{
 		serverIdentity: serverIdentity,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: insecureSkipVerify,
-				},
-			},
-		},
+		httpClient:     &http.Client{},
 	}, nil
 }
 
