@@ -1,11 +1,5 @@
-import {
-  CipherSuite,
-  KEM_DHKEM_X25519_HKDF_SHA256,
-  KDF_HKDF_SHA256,
-  AEAD_AES_256_GCM,
-  type SenderContext,
-  type Key,
-} from 'hpke';
+import { CipherSuite, type SenderContext, type Key } from 'hpke';
+import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
 import { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 import {
   deriveResponseKeys,

@@ -2,12 +2,8 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
 import { Identity, Transport, createTransport, KeyConfigMismatchError } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
-import {
-  CipherSuite,
-  KEM_DHKEM_X25519_HKDF_SHA256,
-  KDF_HKDF_SHA256,
-  AEAD_AES_256_GCM,
-} from 'hpke';
+import { CipherSuite } from 'hpke';
+import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
 import {
   bytesToHex,
   deriveResponseKeys,
