@@ -29,6 +29,12 @@ function encodeSingleChunk(payload: Uint8Array): Uint8Array {
   return body;
 }
 
+function toArrayBuffer(bytes: Uint8Array<ArrayBufferLike>): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 async function buildEncryptedResponse(request: Request, serverIdentity: Identity): Promise<Response> {
   const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
   assert(requestEncHex, `Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header`);
@@ -76,7 +82,7 @@ async function buildEncryptedResponse(request: Request, serverIdentity: Identity
     new TextEncoder().encode(responseText)
   );
 
-  return new Response(encodeSingleChunk(responseCiphertext), {
+  return new Response(toArrayBuffer(encodeSingleChunk(responseCiphertext)), {
     status: 200,
     headers: {
       [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(responseNonce),

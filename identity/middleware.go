@@ -89,7 +89,7 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 			n, readErr := r.Body.Read(probe)
 			if readErr != nil && readErr != io.EOF {
 				status := statusForProtocolError(readErr)
-				sendError(w, readErr, "failed to decrypt request", status)
+				sendError(w, readErr, "failed to read decrypted request body", status)
 				_ = r.Body.Close()
 				return
 			}
@@ -107,6 +107,7 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				_ = originalBody.Close()
 				r.Body = http.NoBody
 				r.ContentLength = 0
+				r.Header.Del("Content-Length")
 			} else {
 				r.Body = originalBody
 			}
