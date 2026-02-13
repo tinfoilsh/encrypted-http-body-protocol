@@ -6,8 +6,8 @@ describe('Identity', () => {
   it('should generate a new identity', async () => {
     const identity = await Identity.generate();
     
-    assert(identity.getPublicKey() instanceof CryptoKey, 'Public key should be a CryptoKey');
-    assert(identity.getPrivateKey() instanceof CryptoKey, 'Private key should be a CryptoKey');
+    assert(identity.getPublicKey().type === 'public', 'Public key should have type "public"');
+    assert(identity.getPrivateKey().type === 'private', 'Private key should have type "private"');
     const publicKeyHex = await identity.getPublicKeyHex();
     assert(publicKeyHex.length > 0, 'Public key hex should not be empty');
   });
@@ -20,8 +20,8 @@ describe('Identity', () => {
     const originalHex = await original.getPublicKeyHex();
     const restoredHex = await restored.getPublicKeyHex();
     assert(originalHex === restoredHex, 'Public keys should match');
-    assert(original.getPrivateKey() instanceof CryptoKey, 'Private key should be a CryptoKey');
-    assert(restored.getPrivateKey() instanceof CryptoKey, 'Private key should be a CryptoKey');
+    assert(original.getPrivateKey().type === 'private', 'Private key should have type "private"');
+    assert(restored.getPrivateKey().type === 'private', 'Private key should have type "private"');
   });
 
   it('should marshal configuration', async () => {

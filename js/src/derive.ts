@@ -10,7 +10,8 @@
  *   aead_nonce = Expand(prk, "nonce", Nn)
  */
 
-import { KDF_HKDF_SHA256, AEAD_AES_256_GCM, type KDF, type AEAD } from 'hpke';
+import { type KDF, type AEAD } from 'hpke';
+import { KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
 
 const kdf: KDF = KDF_HKDF_SHA256();
 const aead: AEAD = AEAD_AES_256_GCM();
