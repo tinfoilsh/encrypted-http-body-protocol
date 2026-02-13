@@ -225,7 +225,47 @@ func TestMiddleware(t *testing.T) {
 		err = json.Unmarshal(w.Body.Bytes(), &problem)
 		require.NoError(t, err)
 		assert.Equal(t, protocol.KeyConfigProblemType, problem["type"])
-		assert.Equal(t, "failed to decrypt request", problem["title"])
+		assert.Equal(t, "failed to read decrypted request body", problem["title"])
+	})
+
+	t.Run("probe eof clears stale content-length header", func(t *testing.T) {
+		client := newTestClient(t)
+
+		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
+		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
+
+		staleLength := req.ContentLength
+		assert.Greater(t, staleLength, int64(0))
+
+		// Force probe read to hit EOF immediately while preserving a stale encrypted length.
+		req.Body = io.NopCloser(bytes.NewReader(nil))
+		req.ContentLength = staleLength
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", staleLength))
+
+		var seenHeaderValue string
+		var seenContentLength int64
+
+		inspectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seenHeaderValue = r.Header.Get("Content-Length")
+			seenContentLength = r.ContentLength
+
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.Empty(t, body)
+
+			w.Write([]byte("ok"))
+		})
+
+		wrappedInspect := middleware(inspectHandler)
+		w := httptest.NewRecorder()
+		wrappedInspect.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, seenHeaderValue)
+		assert.Equal(t, int64(0), seenContentLength)
+
+		decryptedResponse := client.decryptResponse(t, w)
+		assert.Equal(t, "ok", string(decryptedResponse))
 	})
 }
 
