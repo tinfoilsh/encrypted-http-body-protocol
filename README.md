@@ -93,7 +93,7 @@ import (
 )
 
 func main() {
-  tr, err := client.NewTransport("http://localhost:8080", false)
+  tr, err := client.NewTransport("http://localhost:8080")
   if err != nil {
     log.Fatalf("client exited: %v", err)
   }
