@@ -24,6 +24,14 @@ export interface RequestContext {
 }
 
 /**
+ * Serializable token containing the pre-computed bytes needed to decrypt a response.
+ */
+export interface SessionRecoveryToken {
+  exportedSecret: Uint8Array;
+  requestEnc: Uint8Array;
+}
+
+/**
  * Creates a new CipherSuite for X25519/HKDF-SHA256/AES-256-GCM
  */
 function createSuite(): CipherSuite {
@@ -311,101 +319,105 @@ export class Identity {
     response: Response,
     context: RequestContext
   ): Promise<Response> {
-    if (!response.body) {
-      return response;
-    }
+    const token = await extractSessionRecoveryToken(context);
+    return decryptResponseWithToken(response, token);
+  }
+}
 
-    // Get response nonce from header
-    const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
-    if (!responseNonceHex) {
-      throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
-    }
+/**
+ * Extract a serializable token from a RequestContext by exporting the HPKE secret.
+ * The returned token contains only plain bytes and can be stored/serialized.
+ */
+export async function extractSessionRecoveryToken(context: RequestContext): Promise<SessionRecoveryToken> {
+  const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
+  const exportedSecret = new Uint8Array(await context.senderContext.Export(exportLabelBytes, EXPORT_LENGTH));
+  return {
+    exportedSecret,
+    requestEnc: new Uint8Array(context.requestEnc),
+  };
+}
 
-    const responseNonce = hexToBytes(responseNonceHex);
-    if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
-      throw new ProtocolError(
-        `Invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`
-      );
-    }
+/**
+ * Decrypt a response using a SessionRecoveryToken.
+ */
+export async function decryptResponseWithToken(
+  response: Response,
+  token: SessionRecoveryToken,
+): Promise<Response> {
+  if (!response.body) return response;
 
-    // Export secret from request context
-    const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
-    const exportedSecret = await context.senderContext.Export(exportLabelBytes, EXPORT_LENGTH);
-
-    // Derive response keys
-    const km = await deriveResponseKeys(exportedSecret, context.requestEnc, responseNonce);
-
-    // Create decrypting stream
-    const decryptedStream = this.createDecryptStream(response.body, km);
-
-    return new Response(decryptedStream, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+  const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
+  if (!responseNonceHex) {
+    throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
 
-  /**
-   * Creates a ReadableStream that decrypts response chunks.
-   */
-  private createDecryptStream(
-    body: ReadableStream<Uint8Array>,
-    km: ResponseKeyMaterial
-  ): ReadableStream<Uint8Array> {
-    let buffer = new Uint8Array(0);
-    let seq = 0;
-    const reader = body.getReader();
+  const responseNonce = hexToBytes(responseNonceHex);
+  if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
+    throw new ProtocolError(`Invalid response nonce length`);
+  }
 
-    return new ReadableStream({
-      async pull(controller) {
-        while (true) {
-          // Try to read a complete chunk from buffer
-          if (buffer.length >= 4) {
-            const chunkLength =
-              (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+  const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
+  const decryptedStream = createDecryptStream(response.body, km);
 
-            if (chunkLength === 0) {
-              // Skip empty chunk
-              buffer = buffer.slice(4);
-              continue;
-            }
+  return new Response(decryptedStream, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
 
-            if (buffer.length >= 4 + chunkLength) {
-              const ciphertext = buffer.slice(4, 4 + chunkLength);
-              buffer = buffer.slice(4 + chunkLength);
+function createDecryptStream(
+  body: ReadableStream<Uint8Array>,
+  km: ResponseKeyMaterial,
+): ReadableStream<Uint8Array> {
+  let buffer = new Uint8Array(0);
+  let seq = 0;
+  const reader = body.getReader();
 
-              try {
-                const plaintext = await decryptChunk(km, seq++, ciphertext);
-                controller.enqueue(plaintext);
-                return;
-              } catch (error) {
-                controller.error(new DecryptionError(
-                  `Decryption failed at chunk ${seq - 1}`,
-                  { cause: error }
-                ));
-                return;
-              }
-            }
+  return new ReadableStream({
+    async pull(controller) {
+      while (true) {
+        if (buffer.length >= 4) {
+          const chunkLength =
+            (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+
+          if (chunkLength === 0) {
+            buffer = buffer.slice(4);
+            continue;
           }
 
-          // Need more data
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.close();
-            return;
-          }
+          if (buffer.length >= 4 + chunkLength) {
+            const ciphertext = buffer.slice(4, 4 + chunkLength);
+            buffer = buffer.slice(4 + chunkLength);
 
-          // Append to buffer
-          const newBuffer = new Uint8Array(buffer.length + value.length);
-          newBuffer.set(buffer);
-          newBuffer.set(value, buffer.length);
-          buffer = newBuffer;
+            try {
+              const plaintext = await decryptChunk(km, seq++, ciphertext);
+              controller.enqueue(plaintext);
+              return;
+            } catch (error) {
+              controller.error(new DecryptionError(
+                `Decryption failed at chunk ${seq - 1}`,
+                { cause: error }
+              ));
+              return;
+            }
+          }
         }
-      },
-      cancel(reason) {
-        // Release the underlying reader when the stream is cancelled
-        return reader.cancel(reason);
-      },
-    });
-  }
+
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+
+        const newBuffer = new Uint8Array(buffer.length + value.length);
+        newBuffer.set(buffer);
+        newBuffer.set(value, buffer.length);
+        buffer = newBuffer;
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
 }
