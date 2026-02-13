@@ -10,11 +10,13 @@ EHBP encrypts HTTP request and response bodies end-to-end using HPKE ([RFC 9180]
 npm install ehbp
 ```
 
-## Requirements
+## Compatible Runtimes
 
-- Node.js 20+
-- Works in both Node.js and modern browsers
+- **Node.js** 20+
+- **Bun** 1.x+
+- **Browsers** with ES2020 support
 
+All HPKE key operations use [`@noble/curves`](https://github.com/paulmillr/noble-curves) (via `@panva/hpke-noble`) instead of WebCrypto, so X25519 support in the runtime's `crypto.subtle` is **not** required.
 
 ## Quick Start
 
@@ -74,10 +76,6 @@ await transport.delete('/users/123');
   console.log(await response.text());
 </script>
 ```
-
-## Requirements
-
-- Node.js 20+ or modern browsers with Web Crypto API
 
 ## Development
 
