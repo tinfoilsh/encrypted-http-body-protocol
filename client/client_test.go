@@ -161,5 +161,5 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 
 	_, err = httpClient.Do(req)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "key configuration mismatch")
+	assert.True(t, identity.IsKeyConfigError(err))
 }

@@ -156,7 +156,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if title == "" {
 				title = "key configuration mismatch"
 			}
-			return nil, fmt.Errorf("server key configuration mismatch: %s", title)
+			return nil, identity.NewKeyConfigError(fmt.Errorf("%s", title))
 		}
 
 		if err := reqCtx.DecryptResponse(resp); err != nil {
