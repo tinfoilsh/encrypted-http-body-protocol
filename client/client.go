@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
@@ -17,6 +18,9 @@ import (
 type Transport struct {
 	serverIdentity *identity.Identity
 	httpClient     *http.Client
+
+	mu                       sync.Mutex
+	lastSessionRecoveryToken *identity.SessionRecoveryToken
 }
 
 type problemDetails struct {
@@ -91,6 +95,15 @@ func (t *Transport) ServerIdentity() *identity.Identity {
 	return t.serverIdentity
 }
 
+// GetSessionRecoveryToken returns the session recovery token from the most
+// recent request that had a body. Returns nil if no token is available (e.g.
+// no request has been made yet, or the last request was bodyless).
+func (t *Transport) GetSessionRecoveryToken() *identity.SessionRecoveryToken {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastSessionRecoveryToken
+}
+
 func isProblemJSONContentType(contentType string) bool {
 	if contentType == "" {
 		return false
@@ -139,6 +152,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
 
+	var token *identity.SessionRecoveryToken
+	if reqCtx != nil {
+		token = identity.ExtractSessionRecoveryToken(reqCtx)
+	}
+
+	// Clear token for bodyless requests immediately
+	if reqCtx == nil {
+		t.mu.Lock()
+		t.lastSessionRecoveryToken = nil
+		t.mu.Unlock()
+	}
+
 	resp, err := t.httpClient.Do(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %v", err)
@@ -159,10 +184,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, identity.NewKeyConfigError(fmt.Errorf("%s", title))
 		}
 
-		if err := reqCtx.DecryptResponse(resp); err != nil {
+		if err := identity.DecryptResponseWithToken(resp, token); err != nil {
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decrypt response: %v", err)
 		}
+
+		t.mu.Lock()
+		t.lastSessionRecoveryToken = token
+		t.mu.Unlock()
 	}
 
 	return resp, nil

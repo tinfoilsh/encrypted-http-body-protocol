@@ -1,4 +1,6 @@
 import { Identity } from './identity.js';
+import { extractSessionRecoveryToken, decryptResponseWithToken } from './identity.js';
+import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { KeyConfigMismatchError, ProtocolError } from './errors.js';
 import type { Key } from 'hpke';
@@ -14,10 +16,18 @@ interface ProblemDetails {
 export class Transport {
   private serverIdentity: Identity;
   private serverHost: string;
+  private _lastSessionRecoveryToken?: SessionRecoveryToken;
 
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
+  }
+
+  getSessionRecoveryToken(): SessionRecoveryToken {
+    if (!this._lastSessionRecoveryToken) {
+      throw new Error('No session recovery token available — no request has been made yet');
+    }
+    return this._lastSessionRecoveryToken;
   }
 
   /**
@@ -144,11 +154,16 @@ export class Transport {
     const { request: encryptedRequest, context } =
       await this.serverIdentity.encryptRequestWithContext(request);
 
+    const token = context
+      ? await extractSessionRecoveryToken(context)
+      : undefined;
+
     // Make the request
     const response = await fetch(encryptedRequest);
 
     // Bodyless requests: context is null, response is plaintext
-    if (context === null) {
+    if (!token) {
+      this._lastSessionRecoveryToken = undefined;
       return response;
     }
 
@@ -161,8 +176,11 @@ export class Transport {
       throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
     }
 
-    // Decrypt response
-    return await this.serverIdentity.decryptResponseWithContext(response, context);
+    // Publish token only after confirming the response is valid
+    this._lastSessionRecoveryToken = token;
+
+    // Decrypt response using the already-extracted token
+    return await decryptResponseWithToken(response, token);
   }
 
   /**

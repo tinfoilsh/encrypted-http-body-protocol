@@ -5,6 +5,8 @@ public final class EHBPClient: @unchecked Sendable {
     private let identity: Identity
     private let baseURL: String
     private let session: URLSession
+    private let tokenLock = NSLock()
+    private var _lastSessionRecoveryToken: SessionRecoveryToken?
 
     /// Creates a new EHBP client
     ///
@@ -28,6 +30,19 @@ public final class EHBPClient: @unchecked Sendable {
         self.identity = try Identity(config: config)
         self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         self.session = session
+    }
+
+    /// Returns the session recovery token from the last request with a body
+    ///
+    /// - Throws: `EHBPError.invalidInput` if no token is available
+    public func getSessionRecoveryToken() throws -> SessionRecoveryToken {
+        tokenLock.lock()
+        let token = _lastSessionRecoveryToken
+        tokenLock.unlock()
+        guard let token else {
+            throw EHBPError.invalidInput("no session recovery token available")
+        }
+        return token
     }
 
     /// Makes an encrypted request and returns the decrypted response
@@ -57,16 +72,22 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         var requestContext: RequestContext?
+        var token: SessionRecoveryToken?
 
         if let body = body, !body.isEmpty {
             let (encryptedBody, context) = try identity.encryptRequest(body: body)
             requestContext = context
+            token = try extractSessionRecoveryToken(context: context)
 
             request.setValue(
                 context.requestEnc.hexString,
                 forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
             )
             request.httpBody = encryptedBody
+        } else {
+            tokenLock.lock()
+            _lastSessionRecoveryToken = nil
+            tokenLock.unlock()
         }
 
         let (data, response) = try await session.data(for: request)
@@ -75,7 +96,7 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.networkError("expected HTTP response")
         }
 
-        guard let context = requestContext else {
+        guard requestContext != nil else {
             return (data, httpResponse)
         }
 
@@ -91,8 +112,15 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.invalidResponse("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
         }
 
-        let keyMaterial = try identity.deriveResponseKeys(context: context, responseNonce: responseNonce)
-        let decryptedData = try decryptResponseBody(data: data, keyMaterial: keyMaterial)
+        let decryptedData = try EHBP.decryptResponseBody(
+            token: token!,
+            responseNonce: responseNonce,
+            encryptedData: data
+        )
+
+        tokenLock.lock()
+        _lastSessionRecoveryToken = token
+        tokenLock.unlock()
 
         return (decryptedData, httpResponse)
     }
@@ -124,16 +152,22 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         var requestContext: RequestContext?
+        var token: SessionRecoveryToken?
 
         if let body = body, !body.isEmpty {
             let (encryptedBody, context) = try identity.encryptRequest(body: body)
             requestContext = context
+            token = try extractSessionRecoveryToken(context: context)
 
             request.setValue(
                 context.requestEnc.hexString,
                 forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
             )
             request.httpBody = encryptedBody
+        } else {
+            tokenLock.lock()
+            _lastSessionRecoveryToken = nil
+            tokenLock.unlock()
         }
 
         let (asyncBytes, response) = try await session.bytes(for: request)
@@ -142,7 +176,7 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.networkError("expected HTTP response")
         }
 
-        guard let context = requestContext else {
+        guard requestContext != nil else {
             let stream = AsyncThrowingStream<Data, Error> { continuation in
                 Task {
                     do {
@@ -170,7 +204,15 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.invalidResponse("invalid response nonce hex")
         }
 
-        let keyMaterial = try identity.deriveResponseKeys(context: context, responseNonce: responseNonce)
+        let keyMaterial = try EHBP.deriveResponseKeys(
+            exportedSecret: token!.exportedSecret,
+            requestEnc: token!.requestEnc,
+            responseNonce: responseNonce
+        )
+
+        tokenLock.lock()
+        _lastSessionRecoveryToken = token
+        tokenLock.unlock()
 
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             Task {
@@ -220,44 +262,6 @@ public final class EHBPClient: @unchecked Sendable {
         return (stream, httpResponse)
     }
 
-    /// Decrypts response body using EHBP chunk framing (SPEC Section 4.3)
-    ///
-    /// Each chunk: LEN (4 bytes big-endian) || CIPHERTEXT (LEN bytes)
-    private func decryptResponseBody(data: Data, keyMaterial: ResponseKeyMaterial) throws -> Data {
-        var result = Data()
-        var offset = 0
-        var seq: UInt64 = 0
-
-        while offset + 4 <= data.count {
-            let chunkLength = Int(data[offset]) << 24 |
-                              Int(data[offset + 1]) << 16 |
-                              Int(data[offset + 2]) << 8 |
-                              Int(data[offset + 3])
-            offset += 4
-
-            if chunkLength == 0 {
-                continue
-            }
-
-            guard offset + chunkLength <= data.count else {
-                throw EHBPError.invalidResponse("incomplete chunk at offset \(offset)")
-            }
-
-            let ciphertext = data.subdata(in: offset..<(offset + chunkLength))
-            offset += chunkLength
-
-            let plaintext = try decryptChunk(
-                keyMaterial: keyMaterial,
-                seq: seq,
-                ciphertext: ciphertext
-            )
-            seq += 1
-
-            result.append(plaintext)
-        }
-
-        return result
-    }
 }
 
 // MARK: - Data Extensions

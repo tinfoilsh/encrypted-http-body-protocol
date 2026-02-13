@@ -441,47 +441,8 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 		return fmt.Errorf("request context is nil")
 	}
 
-	// Get response nonce from header
-	responseNonceHex := resp.Header.Get(protocol.ResponseNonceHeader)
-	if responseNonceHex == "" {
-		return fmt.Errorf("missing %s header", protocol.ResponseNonceHeader)
-	}
-
-	responseNonce, err := hex.DecodeString(responseNonceHex)
-	if err != nil {
-		return fmt.Errorf("invalid response nonce: %w", err)
-	}
-
-	if len(responseNonce) != ResponseNonceLength {
-		return fmt.Errorf("invalid response nonce length: expected %d, got %d",
-			ResponseNonceLength, len(responseNonce))
-	}
-
-	// Export secret from request context
-	exportedSecret := ctx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
-
-	// Derive response keys
-	km, err := DeriveResponseKeys(exportedSecret, ctx.RequestEnc, responseNonce)
-	if err != nil {
-		return fmt.Errorf("failed to derive response keys: %w", err)
-	}
-
-	// Create AEAD for decryption
-	aead, err := km.NewResponseAEAD()
-	if err != nil {
-		return fmt.Errorf("failed to create AEAD: %w", err)
-	}
-
-	// Wrap response body with streaming decryption
-	resp.Body = &DerivedStreamingDecryptReader{
-		reader: resp.Body,
-		aead:   aead,
-		buffer: nil,
-		eof:    false,
-	}
-	resp.ContentLength = -1
-
-	return nil
+	token := ExtractSessionRecoveryToken(ctx)
+	return DecryptResponseWithToken(resp, token)
 }
 
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.

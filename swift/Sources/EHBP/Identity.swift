@@ -15,6 +15,115 @@ public struct RequestContext: Sendable {
     }
 }
 
+/// Serializable token for decrypting a response without a live HPKE context
+public struct SessionRecoveryToken: Sendable, Codable {
+    public let exportedSecret: Data
+    public let requestEnc: Data
+
+    public init(exportedSecret: Data, requestEnc: Data) {
+        self.exportedSecret = exportedSecret
+        self.requestEnc = requestEnc
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case exportedSecret
+        case requestEnc
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(exportedSecret.hexString, forKey: .exportedSecret)
+        try container.encode(requestEnc.hexString, forKey: .requestEnc)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        let exportedSecretHex = try container.decode(String.self, forKey: .exportedSecret)
+        guard let exportedSecretData = Data(hexString: exportedSecretHex),
+              exportedSecretData.count == EHBPConstants.exportLength else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .exportedSecret,
+                in: container,
+                debugDescription: "invalid exportedSecret hex"
+            )
+        }
+        self.exportedSecret = exportedSecretData
+
+        let requestEncHex = try container.decode(String.self, forKey: .requestEnc)
+        guard let requestEncData = Data(hexString: requestEncHex),
+              requestEncData.count == EHBPConstants.requestEncLength else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .requestEnc,
+                in: container,
+                debugDescription: "invalid requestEnc hex"
+            )
+        }
+        self.requestEnc = requestEncData
+    }
+}
+
+/// Extracts a session recovery token from an HPKE request context
+public func extractSessionRecoveryToken(context: RequestContext) throws -> SessionRecoveryToken {
+    let exportLabel = Data(EHBPConstants.exportLabel.utf8)
+    let exportedSecret = try context.sender.exportSecret(
+        context: exportLabel,
+        outputByteCount: EHBPConstants.exportLength
+    )
+
+    return SessionRecoveryToken(
+        exportedSecret: exportedSecret.withUnsafeBytes { Data($0) },
+        requestEnc: context.requestEnc
+    )
+}
+
+/// Decrypts a response body using a session recovery token
+public func decryptResponseBody(
+    token: SessionRecoveryToken,
+    responseNonce: Data,
+    encryptedData: Data
+) throws -> Data {
+    let keyMaterial = try deriveResponseKeys(
+        exportedSecret: token.exportedSecret,
+        requestEnc: token.requestEnc,
+        responseNonce: responseNonce
+    )
+
+    var result = Data()
+    var offset = 0
+    var seq: UInt64 = 0
+
+    while offset + 4 <= encryptedData.count {
+        let chunkLength = Int(encryptedData[offset]) << 24 |
+                          Int(encryptedData[offset + 1]) << 16 |
+                          Int(encryptedData[offset + 2]) << 8 |
+                          Int(encryptedData[offset + 3])
+        offset += 4
+
+        if chunkLength == 0 {
+            continue
+        }
+
+        guard offset + chunkLength <= encryptedData.count else {
+            throw EHBPError.invalidResponse("incomplete chunk at offset \(offset)")
+        }
+
+        let ciphertext = encryptedData.subdata(in: offset..<(offset + chunkLength))
+        offset += chunkLength
+
+        let plaintext = try decryptChunk(
+            keyMaterial: keyMaterial,
+            seq: seq,
+            ciphertext: ciphertext
+        )
+        seq += 1
+
+        result.append(plaintext)
+    }
+
+    return result
+}
+
 /// Client identity for EHBP encryption/decryption (SPEC Section 5.1)
 public final class Identity: Sendable {
     private let publicKey: Curve25519.KeyAgreement.PublicKey
@@ -159,16 +268,11 @@ public final class Identity: Sendable {
         context: RequestContext,
         responseNonce: Data
     ) throws -> ResponseKeyMaterial {
-        let exportLabel = Data(EHBPConstants.exportLabel.utf8)
-
-        let exportedSecret = try context.sender.exportSecret(
-            context: exportLabel,
-            outputByteCount: EHBPConstants.exportLength
-        )
+        let token = try extractSessionRecoveryToken(context: context)
 
         return try EHBP.deriveResponseKeys(
-            exportedSecret: exportedSecret.withUnsafeBytes { Data($0) },
-            requestEnc: context.requestEnc,
+            exportedSecret: token.exportedSecret,
+            requestEnc: token.requestEnc,
             responseNonce: responseNonce
         )
     }
