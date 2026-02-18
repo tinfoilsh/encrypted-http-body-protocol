@@ -19,6 +19,15 @@ jobs:
     - name: Download Go dependencies
       run: go mod download
     
+    - name: Check go fix
+      run: |
+        go fix ./...
+        if [ -n "$(git diff)" ]; then
+          git diff
+          echo "::error::go fix has suggestions. Run 'go fix ./...' and commit the result."
+          exit 1
+        fi
+
     - name: Run Go tests
       run: go test -race -v ./...
 
