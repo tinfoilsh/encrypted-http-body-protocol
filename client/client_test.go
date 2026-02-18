@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,12 +89,12 @@ func TestSecureClient(t *testing.T) {
 		assert.NoError(t, err)
 		defer resp.Body.Close()
 
-		completeResponse := ""
+		var completeResponse strings.Builder
 		buf := make([]byte, 1024)
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
-				completeResponse += string(buf[:n])
+				completeResponse.WriteString(string(buf[:n]))
 			}
 
 			if err == io.EOF {
@@ -106,7 +107,7 @@ func TestSecureClient(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, "Number: 1\nNumber: 2\nNumber: 3\nNumber: 4\nNumber: 5\nNumber: 6\nNumber: 7\nNumber: 8\nNumber: 9\nNumber: 10\n", completeResponse)
+		assert.Equal(t, "Number: 1\nNumber: 2\nNumber: 3\nNumber: 4\nNumber: 5\nNumber: 6\nNumber: 7\nNumber: 8\nNumber: 9\nNumber: 10\n", completeResponse.String())
 	})
 }
 
