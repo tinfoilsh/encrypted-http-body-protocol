@@ -170,7 +170,7 @@ func (r *ResponseAEAD) nonceForSeq(seq uint64) []byte {
 	nonce := make([]byte, AESGCMNonceLength)
 	copy(nonce, r.nonceBase)
 	// XOR with sequence number in the last 8 bytes (big-endian)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		nonce[AESGCMNonceLength-1-i] ^= byte(seq >> (i * 8))
 	}
 	return nonce

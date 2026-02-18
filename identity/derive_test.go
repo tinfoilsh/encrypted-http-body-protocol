@@ -120,7 +120,7 @@ func TestNonceComputation(t *testing.T) {
 	}
 
 	// Verify first 4 bytes are unchanged for small sequence numbers
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if nonce1[i] != 0xFF {
 			t.Errorf("Byte %d should be 0xFF for seq=1, got 0x%02X", i, nonce1[i])
 		}
@@ -128,7 +128,7 @@ func TestNonceComputation(t *testing.T) {
 
 	// Verify all nonces are unique for first 1000 sequences
 	seen := make(map[string]bool)
-	for i := uint64(0); i < 1000; i++ {
+	for i := range uint64(1000) {
 		nonce := aead.NonceForSeq(i)
 		key := string(nonce)
 		if seen[key] {
