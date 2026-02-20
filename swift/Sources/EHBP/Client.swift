@@ -3,7 +3,6 @@ import Foundation
 /// Streaming EHBP client for making encrypted HTTP requests
 public final class EHBPClient: @unchecked Sendable {
     private let identity: Identity
-    private let baseURL: String
     private let session: URLSession
     private let tokenLock = NSLock()
     private var _lastSessionRecoveryToken: SessionRecoveryToken?
@@ -11,24 +10,10 @@ public final class EHBPClient: @unchecked Sendable {
     /// Creates a new EHBP client
     ///
     /// - Parameters:
-    ///   - baseURL: Base URL for the server (e.g., "https://api.example.com")
-    ///   - publicKey: Server's X25519 public key (32 bytes)
+    ///   - identity: Server identity (public key) for encryption
     ///   - session: URLSession to use (defaults to shared)
-    public init(baseURL: String, publicKey: Data, session: URLSession = .shared) throws {
-        self.identity = try Identity(publicKeyBytes: publicKey)
-        self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        self.session = session
-    }
-
-    /// Creates a new EHBP client from RFC 9458 key configuration
-    ///
-    /// - Parameters:
-    ///   - baseURL: Base URL for the server
-    ///   - config: RFC 9458 key configuration data
-    ///   - session: URLSession to use (defaults to shared)
-    public init(baseURL: String, config: Data, session: URLSession = .shared) throws {
-        self.identity = try Identity(config: config)
-        self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+    public init(identity: Identity, session: URLSession = .shared) {
+        self.identity = identity
         self.session = session
     }
 
@@ -49,17 +34,16 @@ public final class EHBPClient: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - method: HTTP method
-    ///   - path: URL path (will be appended to baseURL)
+    ///   - url: Full URL string (e.g., "https://api.example.com/v1/chat")
     ///   - headers: Additional headers to include
     ///   - body: Request body (will be encrypted)
     /// - Returns: Decrypted response data
     public func request(
         method: String,
-        path: String,
+        url urlString: String,
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let urlString = baseURL + path
         guard let url = URL(string: urlString) else {
             throw EHBPError.invalidInput("invalid URL: \(urlString)")
         }
@@ -129,17 +113,16 @@ public final class EHBPClient: @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - method: HTTP method
-    ///   - path: URL path
+    ///   - url: Full URL string
     ///   - headers: Additional headers
     ///   - body: Request body (will be encrypted)
     /// - Returns: AsyncThrowingStream of decrypted response chunks
     public func requestStream(
         method: String,
-        path: String,
+        url urlString: String,
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let urlString = baseURL + path
         guard let url = URL(string: urlString) else {
             throw EHBPError.invalidInput("invalid URL: \(urlString)")
         }

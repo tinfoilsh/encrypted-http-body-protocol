@@ -6,10 +6,11 @@
 //
 // Usage:
 //
-//     let client = try EHBPClient(baseURL: "https://api.example.com", publicKey: serverPublicKey)
+//     let identity = try Identity(publicKeyBytes: serverPublicKey)
+//     let client = EHBPClient(identity: identity)
 //     let (data, response) = try await client.request(
 //         method: "POST",
-//         path: "/v1/chat/completions",
+//         url: "https://api.example.com/v1/chat/completions",
 //         headers: ["Authorization": "Bearer \(apiKey)"],
 //         body: requestBody
 //     )
