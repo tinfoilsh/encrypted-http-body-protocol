@@ -8,7 +8,7 @@
 
 export { Identity } from './identity.js';
 export type { RequestContext, SessionRecoveryToken } from './identity.js';
-export { extractSessionRecoveryToken, decryptResponseWithToken } from './identity.js';
+export { extractSessionRecoveryToken, decryptResponseWithToken, serializeSessionRecoveryToken, deserializeSessionRecoveryToken } from './identity.js';
 export { Transport, createTransport } from './client.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 export {

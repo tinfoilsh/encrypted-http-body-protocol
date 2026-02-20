@@ -12,6 +12,8 @@ import {
   Identity,
   extractSessionRecoveryToken,
   decryptResponseWithToken,
+  serializeSessionRecoveryToken,
+  deserializeSessionRecoveryToken,
 } from '../index.js';
 import type { SessionRecoveryToken } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
@@ -467,16 +469,15 @@ describe('Session Recovery Token', () => {
 
       const originalToken = await extractSessionRecoveryToken(context);
 
-      // Simulate localStorage: serialize to JSON and back
-      const serialized = JSON.stringify({
-        exportedSecret: Array.from(originalToken.exportedSecret),
-        requestEnc: Array.from(originalToken.requestEnc),
-      });
-      const parsed = JSON.parse(serialized);
-      const restoredToken: SessionRecoveryToken = {
-        exportedSecret: new Uint8Array(parsed.exportedSecret),
-        requestEnc: new Uint8Array(parsed.requestEnc),
-      };
+      // Simulate localStorage: serialize to JSON and back using hex helpers
+      const serialized = serializeSessionRecoveryToken(originalToken);
+
+      // Verify the JSON contains hex strings
+      const raw = JSON.parse(serialized);
+      assert.strictEqual(raw.exportedSecret, bytesToHex(originalToken.exportedSecret));
+      assert.strictEqual(raw.requestEnc, bytesToHex(originalToken.requestEnc));
+
+      const restoredToken = deserializeSessionRecoveryToken(serialized);
 
       // Decrypt with the deserialized token
       const encryptedResponse = await buildEncryptedResponse(

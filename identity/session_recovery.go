@@ -2,6 +2,7 @@ package identity
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -14,6 +15,40 @@ import (
 type SessionRecoveryToken struct {
 	ExportedSecret []byte `json:"exportedSecret"`
 	RequestEnc     []byte `json:"requestEnc"`
+}
+
+// MarshalJSON encodes both fields as lowercase hex strings for cross-language
+// interoperability (see SPEC.md Section 6.1.1).
+func (t *SessionRecoveryToken) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		ExportedSecret string `json:"exportedSecret"`
+		RequestEnc     string `json:"requestEnc"`
+	}{
+		ExportedSecret: hex.EncodeToString(t.ExportedSecret),
+		RequestEnc:     hex.EncodeToString(t.RequestEnc),
+	})
+}
+
+// UnmarshalJSON decodes both fields from lowercase hex strings.
+func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ExportedSecret string `json:"exportedSecret"`
+		RequestEnc     string `json:"requestEnc"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	var err error
+	t.ExportedSecret, err = hex.DecodeString(raw.ExportedSecret)
+	if err != nil {
+		return fmt.Errorf("invalid exportedSecret hex: %w", err)
+	}
+	t.RequestEnc, err = hex.DecodeString(raw.RequestEnc)
+	if err != nil {
+		return fmt.Errorf("invalid requestEnc hex: %w", err)
+	}
+	return nil
 }
 
 // ExtractSessionRecoveryToken exports the HPKE shared secret from a

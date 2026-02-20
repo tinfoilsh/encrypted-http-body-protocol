@@ -323,6 +323,13 @@ func TestSessionRecoveryTokenJSONRoundTrip(t *testing.T) {
 	jsonBytes, err := json.Marshal(originalToken)
 	require.NoError(t, err)
 
+	// Verify the JSON contains hex strings, not base64
+	var raw map[string]interface{}
+	err = json.Unmarshal(jsonBytes, &raw)
+	require.NoError(t, err)
+	assert.Equal(t, hex.EncodeToString(originalToken.ExportedSecret), raw["exportedSecret"])
+	assert.Equal(t, hex.EncodeToString(originalToken.RequestEnc), raw["requestEnc"])
+
 	var restoredToken SessionRecoveryToken
 	err = json.Unmarshal(jsonBytes, &restoredToken)
 	require.NoError(t, err)
