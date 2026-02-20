@@ -45,7 +45,9 @@ Creates a transport that encrypts requests and decrypts responses using the give
 // With an attested key (recommended for production)
 const identity = await Identity.fromPublicKeyHex(attestedPublicKey);
 const transport = new Transport(identity);
+```
 
+```javascript
 // Or fetch directly (standalone usage, no verification)
 const identity = await Identity.fetchFromServer('https://example.com');
 const transport = new Transport(identity);
