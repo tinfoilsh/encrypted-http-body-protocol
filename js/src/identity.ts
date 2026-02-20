@@ -200,6 +200,29 @@ export class Identity {
   }
 
   /**
+   * Fetch and parse the server's public identity from its HPKE key endpoint.
+   *
+   * This fetches without out-of-band verification. For production use,
+   * make sure this is sufficient or prefer using an attested key.
+   */
+  static async fetchFromServer(serverURL: string): Promise<Identity> {
+    const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
+    const response = await fetch(keysURL.toString());
+    if (!response.ok) {
+      throw new ProtocolError(`Failed to fetch server public key: HTTP ${response.status}`);
+    }
+    const contentType = response.headers.get('content-type');
+    const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+    if (mediaType !== PROTOCOL.KEYS_MEDIA_TYPE) {
+      throw new ProtocolError(
+        `Invalid content type from key endpoint: expected "${PROTOCOL.KEYS_MEDIA_TYPE}", got "${contentType}"`
+      );
+    }
+    const keysData = new Uint8Array(await response.arrayBuffer());
+    return Identity.unmarshalPublicConfig(keysData);
+  }
+
+  /**
    * Create an Identity from a raw public key hex string.
    * Uses the default cipher suite (X25519/HKDF-SHA256/AES-256-GCM).
    *

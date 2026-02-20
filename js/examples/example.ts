@@ -4,7 +4,7 @@
  * Example usage of the EHBP JavaScript client
  */
 
-import { createTransport } from '../dist/esm/index.js';
+import { Identity, Transport } from '../dist/esm/index.js';
 
 async function main() {
   console.log('EHBP JavaScript Client Example');
@@ -14,9 +14,10 @@ async function main() {
     // Create transport (this will fetch server public key)
     console.log('Creating transport...');
     const serverURL = 'http://localhost:8080'; // Adjust as needed
-    const transport = await createTransport(serverURL);
+    const identity = await Identity.fetchFromServer(serverURL);
+    const transport = new Transport(identity);
     console.log('Transport created successfully');
-    console.log('Server public key:', await transport.getServerPublicKeyHex());
+    console.log('Server public key:', await identity.getPublicKeyHex());
 
     // Example 1: GET request to secure endpoint
     console.log('\n--- GET Request ---');

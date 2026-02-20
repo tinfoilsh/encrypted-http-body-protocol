@@ -122,7 +122,7 @@
     </div>
 
     <script type="module">
-        import { createTransport } from '../dist/browser.js';
+        import { Identity, Transport } from '../dist/browser.js';
 
         let transport = null;
 
@@ -130,7 +130,8 @@
             try {
                 updateStatus('serverStatus', 'info', 'Initializing client...');
                 const serverUrl = document.getElementById('serverUrl').value;
-                transport = await createTransport(serverUrl);
+                const identity = await Identity.fetchFromServer(serverUrl);
+                transport = new Transport(identity);
                 updateStatus('serverStatus', 'success', `Connected to ${serverUrl}`);
                 return true;
             } catch (error) {

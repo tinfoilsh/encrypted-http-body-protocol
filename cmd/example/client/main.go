@@ -11,6 +11,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 var (
@@ -25,13 +26,13 @@ func main() {
 		log.Debug("Verbose logging enabled")
 	}
 
-	secureTransport, err := client.NewTransport(*serverURL)
+	serverIdent, err := identity.FetchFromServer(*serverURL)
 	if err != nil {
-		log.Fatalf("failed to create secure client: %v", err)
+		log.Fatalf("failed to fetch server identity: %v", err)
 	}
 
 	httpClient := &http.Client{
-		Transport: secureTransport,
+		Transport: client.NewTransport(serverIdent),
 	}
 
 	testSecureEndpoint(httpClient)

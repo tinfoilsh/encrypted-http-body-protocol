@@ -21,13 +21,14 @@ All HPKE key operations use [`@noble/curves`](https://github.com/paulmillr/noble
 ## Quick Start
 
 ```javascript
-import { createTransport } from 'ehbp';
+import { Identity, Transport } from 'ehbp';
 
-// Create transport (fetches server public key automatically)
-const transport = await createTransport('https://example.com');
+// Fetch server identity (standalone usage without attestation)
+const identity = await Identity.fetchFromServer('https://example.com');
+const transport = new Transport(identity);
 
 // Make encrypted requests - works like fetch()
-const response = await transport.post('/api/data', JSON.stringify({ message: 'hello' }), {
+const response = await transport.post('https://example.com/api/data', JSON.stringify({ message: 'hello' }), {
   headers: { 'Content-Type': 'application/json' }
 });
 
@@ -36,12 +37,20 @@ const data = await response.json();
 
 ## API
 
-### `createTransport(serverURL: string): Promise<Transport>`
+### `new Transport(serverIdentity: Identity)`
 
-Creates a transport that automatically encrypts requests and decrypts responses.
+Creates a transport that encrypts requests and decrypts responses using the given server identity.
 
 ```javascript
-const transport = await createTransport('https://example.com');
+// With an attested key (recommended for production)
+const identity = await Identity.fromPublicKeyHex(attestedPublicKey);
+const transport = new Transport(identity);
+```
+
+```javascript
+// Or fetch directly (standalone usage, no verification)
+const identity = await Identity.fetchFromServer('https://example.com');
+const transport = new Transport(identity);
 ```
 
 ### `transport.request(input, init?): Promise<Response>`
@@ -69,10 +78,11 @@ await transport.delete('/users/123');
 
 ```html
 <script type="module">
-  import { createTransport } from './dist/browser.js';
+  import { Identity, Transport } from './dist/browser.js';
 
-  const transport = await createTransport('https://example.com');
-  const response = await transport.post('/api', 'Hello!');
+  const identity = await Identity.fetchFromServer('https://example.com');
+  const transport = new Transport(identity);
+  const response = await transport.post('https://example.com/api', 'Hello!');
   console.log(await response.text());
 </script>
 ```

@@ -62,10 +62,10 @@ func TestSecureClient(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	secureTransport, err := NewTransport(server.URL)
+	serverIdent, err := identity.FetchFromServer(server.URL)
 	assert.NoError(t, err)
 	httpClient := &http.Client{
-		Transport: secureTransport,
+		Transport: NewTransport(serverIdent),
 	}
 
 	t.Run("secure endpoint", func(t *testing.T) {
@@ -148,7 +148,7 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	transport, err := NewTransport(server.URL)
+	serverIdent, err := identity.FetchFromServer(server.URL)
 	assert.NoError(t, err)
 
 	// Rotate key after client initialization to force a stale-key attempt.
@@ -156,7 +156,7 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	active = identityB
 	mu.Unlock()
 
-	httpClient := &http.Client{Transport: transport}
+	httpClient := &http.Client{Transport: NewTransport(serverIdent)}
 	req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
 	assert.NoError(t, err)
 

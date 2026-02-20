@@ -1,7 +1,6 @@
 import { Identity } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { KeyConfigMismatchError, ProtocolError } from './errors.js';
-import type { Key } from 'hpke';
 
 interface ProblemDetails {
   type?: string;
@@ -13,37 +12,9 @@ interface ProblemDetails {
  */
 export class Transport {
   private serverIdentity: Identity;
-  private serverHost: string;
 
-  constructor(serverIdentity: Identity, serverHost: string) {
+  constructor(serverIdentity: Identity) {
     this.serverIdentity = serverIdentity;
-    this.serverHost = serverHost;
-  }
-
-  /**
-   * Create a new transport by fetching server public key.
-   */
-  static async create(serverURL: string): Promise<Transport> {
-    const url = new URL(serverURL);
-    const serverHost = url.host;
-
-    // Fetch server public key
-    const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
-    const response = await fetch(keysURL.toString());
-
-    if (!response.ok) {
-      throw new Error(`Failed to get server public key: ${response.status}`);
-    }
-
-    const contentType = response.headers.get('content-type');
-    if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
-      throw new Error(`Invalid content type: ${contentType}`);
-    }
-
-    const keysData = new Uint8Array(await response.arrayBuffer());
-    const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
-
-    return new Transport(serverIdentity, serverHost);
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -72,27 +43,6 @@ export class Transport {
   }
 
   /**
-   * Get the server identity
-   */
-  getServerIdentity(): Identity {
-    return this.serverIdentity;
-  }
-
-  /**
-   * Get the server public key
-   */
-  getServerPublicKey(): Key {
-    return this.serverIdentity.getPublicKey();
-  }
-
-  /**
-   * Get the server public key as hex string
-   */
-  async getServerPublicKeyHex(): Promise<string> {
-    return this.serverIdentity.getPublicKeyHex();
-  }
-
-  /**
    * Make an encrypted HTTP request.
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -115,7 +65,7 @@ export class Transport {
       requestBody = init?.body || null;
     }
 
-    // Create the URL with correct host
+    // Parse request parameters
     let url: URL;
     let method: string;
     let headers: HeadersInit;
@@ -129,8 +79,6 @@ export class Transport {
       method = init?.method || 'GET';
       headers = init?.headers || {};
     }
-
-    url.host = this.serverHost;
 
     const request = new Request(url.toString(), {
       method,
@@ -192,11 +140,4 @@ export class Transport {
   async delete(url: string | URL, init?: RequestInit): Promise<Response> {
     return this.request(url, { ...init, method: 'DELETE' });
   }
-}
-
-/**
- * Create a new transport instance.
- */
-export async function createTransport(serverURL: string): Promise<Transport> {
-  return Transport.create(serverURL);
 }
