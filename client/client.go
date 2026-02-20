@@ -33,10 +33,6 @@ func NewTransport(serverIdentity *identity.Identity) *Transport {
 	}
 }
 
-func (t *Transport) ServerIdentity() *identity.Identity {
-	return t.serverIdentity
-}
-
 func isProblemJSONContentType(contentType string) bool {
 	if contentType == "" {
 		return false

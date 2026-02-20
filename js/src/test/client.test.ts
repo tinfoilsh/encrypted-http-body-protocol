@@ -154,7 +154,7 @@ describe('Transport', () => {
 
     const testName = 'Integration Test User';
 
-    const serverPubKeyHex = await transport.getServerPublicKeyHex();
+    const serverPubKeyHex = await identity.getPublicKeyHex();
     assert.strictEqual(serverPubKeyHex.length, 64, 'Server public key should be 64 hex chars (32 bytes)');
 
     // Make actual POST request to /secure endpoint
