@@ -40,7 +40,7 @@ func NewTransport(server string) (*Transport, error) {
 
 // NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
 // The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
-func NewTransportWithConfig(server string, hpkeConfig []byte) (*Transport, error) {
+func NewTransportWithConfig(hpkeConfig []byte) (*Transport, error) {
 	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
