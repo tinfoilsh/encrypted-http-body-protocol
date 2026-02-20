@@ -13,6 +13,11 @@ import (
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
+// maxChunkLength is the maximum allowed encrypted chunk size (1 MB).
+// The write side uses 8 KB chunks; this limit provides headroom while
+// preventing a malicious peer from triggering a multi-GB allocation.
+const maxChunkLength = 1 << 20
+
 // ClientError represents an error caused by invalid client input
 type ClientError struct {
 	Err error
@@ -187,6 +192,10 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 		if chunkLen != 0 {
 			break
 		}
+	}
+
+	if chunkLen > maxChunkLength {
+		return 0, NewClientError(fmt.Errorf("chunk length %d exceeds maximum %d", chunkLen, maxChunkLength))
 	}
 
 	// Read encrypted chunk
@@ -524,6 +533,10 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		if chunkLen != 0 {
 			break
 		}
+	}
+
+	if chunkLen > maxChunkLength {
+		return 0, fmt.Errorf("chunk length %d exceeds maximum %d", chunkLen, maxChunkLength)
 	}
 
 	// Read encrypted chunk
