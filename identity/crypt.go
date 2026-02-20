@@ -167,24 +167,26 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 		return n, nil
 	}
 
-	// Read chunk length (4 bytes)
+	// Read chunk length (4 bytes), skipping empty chunks
+	var chunkLen uint32
 	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF {
-			r.eof = true
-			return 0, io.EOF
+	for {
+		_, err = io.ReadFull(r.reader, chunkLenBytes)
+		if err != nil {
+			if err == io.EOF {
+				r.eof = true
+				return 0, io.EOF
+			}
+			if err == io.ErrUnexpectedEOF {
+				return 0, NewClientError(fmt.Errorf("invalid chunk length framing: %w", err))
+			}
+			return 0, NewClientError(fmt.Errorf("failed to read chunk length: %w", err))
 		}
-		if err == io.ErrUnexpectedEOF {
-			return 0, NewClientError(fmt.Errorf("invalid chunk length framing: %w", err))
-		}
-		return 0, NewClientError(fmt.Errorf("failed to read chunk length: %w", err))
-	}
 
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		// Empty chunk, try reading next chunk
-		return r.Read(p)
+		chunkLen = binary.BigEndian.Uint32(chunkLenBytes)
+		if chunkLen != 0 {
+			break
+		}
 	}
 
 	// Read encrypted chunk
@@ -505,20 +507,23 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		return n, nil
 	}
 
-	// Read chunk length (4 bytes)
+	// Read chunk length (4 bytes), skipping empty chunks
+	var chunkLen uint32
 	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			r.eof = true
-			return 0, io.EOF
+	for {
+		_, err = io.ReadFull(r.reader, chunkLenBytes)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				r.eof = true
+				return 0, io.EOF
+			}
+			return 0, fmt.Errorf("failed to read chunk length: %w", err)
 		}
-		return 0, fmt.Errorf("failed to read chunk length: %w", err)
-	}
 
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		return r.Read(p) // Skip empty chunks
+		chunkLen = binary.BigEndian.Uint32(chunkLenBytes)
+		if chunkLen != 0 {
+			break
+		}
 	}
 
 	// Read encrypted chunk
