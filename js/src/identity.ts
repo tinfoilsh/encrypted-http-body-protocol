@@ -344,6 +344,29 @@ export async function extractSessionRecoveryToken(context: RequestContext): Prom
 }
 
 /**
+ * Serialize a SessionRecoveryToken to a JSON string with hex-encoded fields.
+ * See SPEC.md Section 6.1.1.
+ */
+export function serializeSessionRecoveryToken(token: SessionRecoveryToken): string {
+  return JSON.stringify({
+    exportedSecret: bytesToHex(token.exportedSecret),
+    requestEnc: bytesToHex(token.requestEnc),
+  });
+}
+
+/**
+ * Deserialize a SessionRecoveryToken from a JSON string with hex-encoded fields.
+ * See SPEC.md Section 6.1.1.
+ */
+export function deserializeSessionRecoveryToken(json: string): SessionRecoveryToken {
+  const parsed = JSON.parse(json);
+  return {
+    exportedSecret: hexToBytes(parsed.exportedSecret),
+    requestEnc: hexToBytes(parsed.requestEnc),
+  };
+}
+
+/**
  * Decrypt a response using a SessionRecoveryToken.
  */
 export async function decryptResponseWithToken(

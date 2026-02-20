@@ -226,6 +226,18 @@ A session recovery token consists of:
 - `exported_secret`: `context.Export("ehbp response", Nk)` — the HPKE export secret.
 - `request_enc`: the HPKE encapsulated key (`enc`) from the request.
 
+### 6.1.1 JSON Serialization
+
+When serialized to JSON (for storage or cross-language interchange), both fields MUST be encoded as **lowercase hex strings**:
+
+```json
+{
+  "exportedSecret": "ab01cd...",
+  "requestEnc": "ef23ab..."
+}
+```
+
+
 ### 6.2 Response Decryption with a Token
 
 To decrypt a response using a session recovery token:
