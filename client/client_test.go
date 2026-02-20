@@ -163,3 +163,88 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	assert.Error(t, err)
 	assert.True(t, identity.IsKeyConfigError(err))
 }
+
+func TestTransportGetSessionRecoveryToken(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	middleware := serverIdentity.Middleware()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
+
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte("Hello, " + string(body)))
+	})))
+
+	mux.Handle("/plain", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("plaintext"))
+	}))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	transport, err := NewTransport(server.URL)
+	assert.NoError(t, err)
+	httpClient := &http.Client{Transport: transport}
+
+	t.Run("nil before any request", func(t *testing.T) {
+		token := transport.GetSessionRecoveryToken()
+		assert.Nil(t, token)
+	})
+
+	t.Run("available after POST with body", func(t *testing.T) {
+		req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
+		assert.NoError(t, err)
+
+		resp, err := httpClient.Do(req)
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		io.ReadAll(resp.Body)
+
+		token := transport.GetSessionRecoveryToken()
+		assert.NotNil(t, token)
+		assert.Len(t, token.ExportedSecret, 32)
+		assert.Len(t, token.RequestEnc, 32)
+	})
+
+	t.Run("updates on each new request", func(t *testing.T) {
+		req1, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("req1")))
+		resp1, err := httpClient.Do(req1)
+		assert.NoError(t, err)
+		resp1.Body.Close()
+		token1 := transport.GetSessionRecoveryToken()
+
+		req2, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("req2")))
+		resp2, err := httpClient.Do(req2)
+		assert.NoError(t, err)
+		resp2.Body.Close()
+		token2 := transport.GetSessionRecoveryToken()
+
+		assert.NotEqual(t, token1.ExportedSecret, token2.ExportedSecret,
+			"Tokens from different requests must have different exported secrets")
+	})
+
+	t.Run("cleared for bodyless requests", func(t *testing.T) {
+		// First make a POST to set a token
+		req1, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("body")))
+		resp1, err := httpClient.Do(req1)
+		assert.NoError(t, err)
+		resp1.Body.Close()
+		assert.NotNil(t, transport.GetSessionRecoveryToken())
+
+		// GET without body should clear the token
+		req2, _ := http.NewRequest("GET", server.URL+"/plain", nil)
+		resp2, err := httpClient.Do(req2)
+		assert.NoError(t, err)
+		resp2.Body.Close()
+
+		assert.Nil(t, transport.GetSessionRecoveryToken(),
+			"Token should be cleared after bodyless request")
+	})
+}
