@@ -55,7 +55,10 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 // RequestContext and returns a serializable token that can decrypt the
 // corresponding response independently.
 func ExtractSessionRecoveryToken(ctx *RequestContext) *SessionRecoveryToken {
-	exportedSecret := ctx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+	exportedSecret, err := ctx.Sender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		return nil
+	}
 	requestEnc := make([]byte, len(ctx.RequestEnc))
 	copy(requestEnc, ctx.RequestEnc)
 	return &SessionRecoveryToken{

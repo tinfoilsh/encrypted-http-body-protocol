@@ -39,11 +39,12 @@ func TestSessionRecoveryTokenMatchesDirectExport(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	directExport := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+	directExport, err := reqCtx.Sender.Export(ExportLabel, ExportLength)
+	require.NoError(t, err)
 	token := ExtractSessionRecoveryToken(reqCtx)
 
 	assert.Equal(t, directExport, token.ExportedSecret,
-		"Token exportedSecret must match direct Sealer.Export result")
+		"Token exportedSecret must match direct Sender.Export result")
 	assert.Equal(t, reqCtx.RequestEnc, token.RequestEnc,
 		"Token requestEnc must match context requestEnc")
 }

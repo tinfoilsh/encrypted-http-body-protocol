@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"crypto/hpke"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -155,8 +156,9 @@ func TestV2EncryptDecryptRoundTrip(t *testing.T) {
 		responseNonce, err := hex.DecodeString(responseNonceHex)
 		require.NoError(t, err)
 
-		// Export secret from client's sealer
-		exportedSecret := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+		// Export secret from client's sender
+		exportedSecret, err := reqCtx.Sender.Export(ExportLabel, ExportLength)
+		require.NoError(t, err)
 
 		// Derive response keys
 		km, err := DeriveResponseKeys(exportedSecret, reqCtx.RequestEnc, responseNonce)
@@ -249,8 +251,8 @@ func TestClientError(t *testing.T) {
 // mockCloser tracks whether Close was called
 type mockCloser struct {
 	io.Reader
-	closed    bool
-	closeErr  error
+	closed   bool
+	closeErr error
 }
 
 func (m *mockCloser) Close() error {
@@ -265,14 +267,12 @@ func TestStreamingEncryptReaderClose(t *testing.T) {
 	t.Run("Close propagates to underlying closeable reader", func(t *testing.T) {
 		underlying := &mockCloser{Reader: strings.NewReader("test data")}
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		_, sealer, err := sender.Setup(rand.Reader)
+		_, sender, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
 		reader := &StreamingEncryptReader{
 			reader: underlying,
-			sealer: sealer,
+			sender: sender,
 		}
 
 		err = reader.Close()
@@ -287,14 +287,12 @@ func TestStreamingEncryptReaderClose(t *testing.T) {
 			closeErr: expectedErr,
 		}
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		_, sealer, err := sender.Setup(rand.Reader)
+		_, sender, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
 		reader := &StreamingEncryptReader{
 			reader: underlying,
-			sealer: sealer,
+			sender: sender,
 		}
 
 		err = reader.Close()
@@ -305,14 +303,12 @@ func TestStreamingEncryptReaderClose(t *testing.T) {
 		// strings.Reader does not implement io.Closer
 		underlying := strings.NewReader("test data")
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		_, sealer, err := sender.Setup(rand.Reader)
+		_, sender, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
 		reader := &StreamingEncryptReader{
 			reader: underlying,
-			sealer: sealer,
+			sender: sender,
 		}
 
 		err = reader.Close()
@@ -327,18 +323,13 @@ func TestStreamingDecryptReaderClose(t *testing.T) {
 	t.Run("Close propagates to underlying closeable reader", func(t *testing.T) {
 		underlying := &mockCloser{Reader: strings.NewReader("")}
 
-		receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+		encapKey, _, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		encapKey, _, err := sender.Setup(rand.Reader)
+		recipient, err := hpke.NewRecipient(encapKey, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		opener, err := receiver.Setup(encapKey)
-		require.NoError(t, err)
-
-		reader := NewStreamingDecryptReader(underlying, opener)
+		reader := NewStreamingDecryptReader(underlying, recipient)
 
 		err = reader.Close()
 		assert.NoError(t, err)
@@ -352,18 +343,13 @@ func TestStreamingDecryptReaderClose(t *testing.T) {
 			closeErr: expectedErr,
 		}
 
-		receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+		encapKey, _, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		encapKey, _, err := sender.Setup(rand.Reader)
+		recipient, err := hpke.NewRecipient(encapKey, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		opener, err := receiver.Setup(encapKey)
-		require.NoError(t, err)
-
-		reader := NewStreamingDecryptReader(underlying, opener)
+		reader := NewStreamingDecryptReader(underlying, recipient)
 
 		err = reader.Close()
 		assert.Equal(t, expectedErr, err)
@@ -373,18 +359,13 @@ func TestStreamingDecryptReaderClose(t *testing.T) {
 		// strings.Reader does not implement io.Closer
 		underlying := strings.NewReader("")
 
-		receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+		encapKey, _, err := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		sender, err := serverIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		encapKey, _, err := sender.Setup(rand.Reader)
+		recipient, err := hpke.NewRecipient(encapKey, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
-		opener, err := receiver.Setup(encapKey)
-		require.NoError(t, err)
-
-		reader := NewStreamingDecryptReader(underlying, opener)
+		reader := NewStreamingDecryptReader(underlying, recipient)
 
 		err = reader.Close()
 		assert.NoError(t, err)
@@ -433,13 +414,11 @@ func TestDecryptRequestWithContextErrors(t *testing.T) {
 		otherServer, err := NewIdentity()
 		require.NoError(t, err)
 
-		sender, err := otherServer.Suite().NewSender(otherServer.PublicKey(), []byte(HPKERequestInfo))
-		require.NoError(t, err)
-		encapKey, sealer, err := sender.Setup(rand.Reader)
+		encapKey, sender, err := hpke.NewSender(otherServer.PublicKey(), otherServer.KDF(), otherServer.AEAD(), []byte(HPKERequestInfo))
 		require.NoError(t, err)
 
 		// Encrypt some data
-		ciphertext, err := sealer.Seal([]byte("secret"), nil)
+		ciphertext, err := sender.Seal(nil, []byte("secret"))
 		require.NoError(t, err)
 
 		// Build chunk format
@@ -1021,7 +1000,8 @@ func TestDerivedStreamingDecryptReaderClose(t *testing.T) {
 		writer.Flush()
 
 		// Create a DerivedStreamingDecryptReader with non-closeable underlying reader
-		exportedSecret := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+		exportedSecret, err := reqCtx.Sender.Export(ExportLabel, ExportLength)
+		require.NoError(t, err)
 		responseNonce, _ := hex.DecodeString(w.Header().Get(protocol.ResponseNonceHeader))
 		km, err := DeriveResponseKeys(exportedSecret, reqCtx.RequestEnc, responseNonce)
 		require.NoError(t, err)
