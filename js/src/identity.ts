@@ -212,7 +212,8 @@ export class Identity {
       throw new ProtocolError(`Failed to fetch server public key: HTTP ${response.status}`);
     }
     const contentType = response.headers.get('content-type');
-    if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
+    const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+    if (mediaType !== PROTOCOL.KEYS_MEDIA_TYPE) {
       throw new ProtocolError(
         `Invalid content type from key endpoint: expected "${PROTOCOL.KEYS_MEDIA_TYPE}", got "${contentType}"`
       );
