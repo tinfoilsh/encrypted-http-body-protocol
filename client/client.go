@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
@@ -26,65 +25,12 @@ type problemDetails struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
-func NewTransport(server string) (*Transport, error) {
-	t := &Transport{
-		httpClient: &http.Client{},
-	}
-
-	if err := t.syncServerPublicKey(server); err != nil {
-		return nil, fmt.Errorf("failed to sync server public key: %v", err)
-	}
-
-	return t, nil
-}
-
-// NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
-// The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
-func NewTransportWithConfig(hpkeConfig []byte) (*Transport, error) {
-	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
-	}
-
+// NewTransport creates a new Transport with the given server identity.
+func NewTransport(serverIdentity *identity.Identity) *Transport {
 	return &Transport{
 		serverIdentity: serverIdentity,
 		httpClient:     &http.Client{},
-	}, nil
-}
-
-func (t *Transport) syncServerPublicKey(server string) error {
-	keysURL, err := url.Parse(server)
-	if err != nil {
-		return fmt.Errorf("failed to parse server URL: %v", err)
 	}
-	keysURL.Path = protocol.KeysPath
-
-	resp, err := t.httpClient.Get(keysURL.String())
-	if err != nil {
-		return fmt.Errorf("failed to get server public key: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
-	}
-
-	if resp.Header.Get("Content-Type") != protocol.KeysMediaType {
-		return fmt.Errorf("server returned invalid content type: %s", resp.Header.Get("Content-Type"))
-	}
-
-	ohttpKeys, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %v", err)
-	}
-
-	serverIdentity, err := identity.UnmarshalPublicConfig(ohttpKeys)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal public key: %v", err)
-	}
-	t.serverIdentity = serverIdentity
-
-	return nil
 }
 
 func (t *Transport) ServerIdentity() *identity.Identity {

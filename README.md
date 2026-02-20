@@ -90,15 +90,16 @@ import (
   "net/http"
 
   "github.com/tinfoilsh/encrypted-http-body-protocol/client"
+  "github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 func main() {
-  tr, err := client.NewTransport("http://localhost:8080")
+  serverIdent, err := identity.FetchFromServer("http://localhost:8080")
   if err != nil {
     log.Fatalf("client exited: %v", err)
   }
 
-  httpClient := &http.Client{Transport: tr}
+  httpClient := &http.Client{Transport: client.NewTransport(serverIdent)}
   resp, err := httpClient.Post("http://localhost:8080/secure", "text/plain", bytes.NewBufferString("hi"))
   if err != nil {
     log.Fatalf("client exited: %v", err)

@@ -4,8 +4,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/cloudflare/circl/hpke"
 	"github.com/cloudflare/circl/kem"
@@ -203,6 +207,41 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 		pk:    pk,
 		sk:    nil, // public key only
 	}, nil
+}
+
+// FetchFromServer fetches and parses the server's public identity from its HPKE key endpoint.
+func FetchFromServer(serverURL string) (*Identity, error) {
+	keysURL, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server URL: %v", err)
+	}
+	keysURL.Path = protocol.KeysPath
+
+	resp, err := http.Get(keysURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch server public key: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil {
+		mediaType = strings.ToLower(contentType)
+	}
+	if !strings.EqualFold(mediaType, protocol.KeysMediaType) {
+		return nil, fmt.Errorf("invalid content type: %s", contentType)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	return UnmarshalPublicConfig(body)
 }
 
 // Export returns a JSON representation of the identity
