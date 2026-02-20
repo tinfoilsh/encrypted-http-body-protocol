@@ -133,7 +133,7 @@ This derivation ensures:
 - Outbound request:
 
   - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key and stream‑encrypt using the chunk framing in Section 4.3 of this document. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length. Retain the HPKE sender context for response decryption.
-  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 6.4 for the security rationale.
+  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
 - Inbound response:
 
   - For requests with encrypted bodies: Require `Ehbp-Response-Nonce`; derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.
@@ -152,7 +152,7 @@ This derivation ensures:
     - key/configuration mismatch (for example, stale client key after rotation): HTTP 422 (Unprocessable Content) with optional `application/problem+json` details as defined in Section 5.4.2
     - internal failures unrelated to client input: HTTP 500
   - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
-  - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 6.4 for the security rationale.
+  - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
 - Response handling:
 
   - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce`. Use chunked transfer encoding and omit Content-Length.
@@ -204,7 +204,7 @@ This mirrors OHTTP key-management guidance while keeping EHBP-specific error typ
 
 On receiving a key-configuration mismatch (Section 5.4.2), the client knows the server rejected the request before application processing completed (per Section 5.2). It is safe to:
 
-1. Refresh server key configuration (e.g., by refetching `/.well-known/hpke-keys` or through a trusted out-of-band channel per Section 6.3).
+1. Refresh server key configuration (e.g., by refetching `/.well-known/hpke-keys` or through a trusted out-of-band channel per Section 7.3).
 2. Recreate the EHBP transport with the new key.
 3. Re-send the original request.
 
@@ -215,9 +215,34 @@ Error responses MUST NOT disclose fine-grained cryptographic failure causes (for
 
 For DHKEM implementations, developers SHOULD follow RFC 9180 guidance on implicit rejection to limit side-channel leakage from malformed public keys.
 
-## 6. Security Considerations
+## 6. Session Recovery Tokens (Optional)
 
-### 6.1 Request-Response Binding
+Clients MAY extract a **session recovery token** from the HPKE sender context after encrypting a request. This token contains the minimal cryptographic material needed to derive response decryption keys (Section 4.4) without retaining the live HPKE context, enabling response decryption in a different process or session than the one that sent the request. For example, a client can persist the token before issuing a long-running request so that the response can be decrypted even if the original process is interrupted.
+
+### 6.1 Token Structure
+
+A session recovery token consists of:
+
+- `exported_secret`: `context.Export("ehbp response", Nk)` — the HPKE export secret.
+- `request_enc`: the HPKE encapsulated key (`enc`) from the request.
+
+### 6.2 Response Decryption with a Token
+
+To decrypt a response using a session recovery token:
+
+1. Read the `Ehbp-Response-Nonce` header from the response (Section 4.2).
+2. Derive response keys using the procedure in Section 4.4, substituting the token's `exported_secret` for the HPKE export and the token's `request_enc` for `enc`.
+3. Decrypt the response body using the derived AES-256-GCM key and the chunked framing in Section 4.3.
+
+### 6.3 Security Considerations for Tokens
+
+- A session recovery token is equivalent in power to the ability to decrypt a single response. It MUST be treated as sensitive key material.
+- Tokens are scoped to a single request-response exchange. Each encrypted request produces a unique token; tokens cannot be reused across requests.
+- A token is considered consumed once the corresponding response has been fully decrypted, or once a new request supersedes it. Implementations MUST delete all representations of a consumed token immediately. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
+
+## 7. Security Considerations
+
+### 7.1 Request-Response Binding
 
 EHBP cryptographically binds responses to their corresponding requests. This prevents:
 
@@ -225,13 +250,13 @@ EHBP cryptographically binds responses to their corresponding requests. This pre
 - **Response forgery:** A MitM cannot create valid encrypted responses
 - **Response swapping:** Responses cannot be replayed or swapped between different requests
 
-### 6.2 Scope of Protection
+### 7.2 Scope of Protection
 
 - EHBP encrypts HTTP bodies only. HTTP headers remain in cleartext.
 - Request encryption uses a fresh HPKE setup per HTTP exchange; response encryption uses keys derived from the request context.
 - Streaming frame lengths (4‑byte prefixes) reveal ciphertext chunk sizes and boundaries.
 
-### 6.3 Keys and Suites
+### 7.3 Keys and Suites
 
 - Private keys MUST be protected and never transmitted.
 - Public keys SHOULD be distributed and verified via a trusted channel.
@@ -240,7 +265,7 @@ EHBP cryptographically binds responses to their corresponding requests. This pre
 - EHBP implementations MUST ensure HPKE keys are not reused in other protocols that use the same HPKE context labels and framing semantics.
 - Protocols that reuse EHBP framing MUST use distinct HPKE `info`/export labels to ensure key diversity and avoid cross-protocol key reuse.
 
-### 6.4 Bodyless Requests
+### 7.4 Bodyless Requests
 
 EHBP does not support encrypted responses for requests without a payload body (e.g., GET, HEAD, DELETE, OPTIONS without a body). Such requests pass through unencrypted.
 
@@ -257,7 +282,7 @@ Applications requiring confidential responses to bodyless requests should either
 - Include a minimal body (even if semantically empty) to enable EHBP protection
 - Use an alternative mechanism such as TLS with mutual authentication
 
-## 7. References
+## 8. References
 
 - RFC 9180: Hybrid Public Key Encryption (HPKE)
 - RFC 9458: Oblivious HTTP (for `application/ohttp-keys` `key_config` format)
