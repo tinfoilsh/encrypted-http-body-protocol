@@ -55,4 +55,9 @@ public enum EHBPConstants {
 
     /// Label for deriving response nonce
     public static let responseNonceLabel = "nonce"
+
+    /// Maximum allowed encrypted chunk size (1 MB).
+    /// The write side uses small chunks; this limit provides headroom while
+    /// preventing a malicious peer from triggering a multi-GB allocation.
+    public static let maxChunkLength = 1 << 20
 }
