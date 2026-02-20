@@ -8,11 +8,23 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cloudflare/circl/hpke"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
+
+func requireIdentitiesEqual(t *testing.T, expected, actual *Identity) {
+	t.Helper()
+	assert.Equal(t, expected.pk.Bytes(), actual.pk.Bytes())
+	expectedSK, err := expected.sk.Bytes()
+	require.NoError(t, err)
+	actualSK, err := actual.sk.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, expectedSK, actualSK)
+	assert.Equal(t, expected.kem.ID(), actual.kem.ID())
+	assert.Equal(t, expected.kdf.ID(), actual.kdf.ID())
+	assert.Equal(t, expected.aead.ID(), actual.aead.ID())
+}
 
 func TestIdentityExportImport(t *testing.T) {
 	// Create a new identity
@@ -28,9 +40,7 @@ func TestIdentityExportImport(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Compare
-	assert.True(t, original.pk.Equal(imported.pk))
-	assert.True(t, original.sk.Equal(imported.sk))
-	assert.Equal(t, original.suite, imported.suite)
+	requireIdentitiesEqual(t, original, imported)
 }
 
 func TestNewIdentity(t *testing.T) {
@@ -41,13 +51,14 @@ func TestNewIdentity(t *testing.T) {
 	// Verify the identity has valid components
 	assert.NotNil(t, identity.pk)
 	assert.NotNil(t, identity.sk)
-	assert.NotNil(t, identity.suite)
+	assert.NotNil(t, identity.kem)
+	assert.NotNil(t, identity.kdf)
+	assert.NotNil(t, identity.aead)
 
-	// Verify suite parameters
-	kemID, kdfID, aeadID := identity.suite.Params()
-	assert.Equal(t, hpke.KEM_X25519_HKDF_SHA256, kemID)
-	assert.Equal(t, hpke.KDF_HKDF_SHA256, kdfID)
-	assert.Equal(t, hpke.AEAD_AES256GCM, aeadID)
+	// Verify suite parameters (DHKEM(X25519) = 0x0020, HKDF-SHA256 = 0x0001, AES-256-GCM = 0x0002)
+	assert.Equal(t, uint16(0x0020), identity.kem.ID())
+	assert.Equal(t, uint16(0x0001), identity.kdf.ID())
+	assert.Equal(t, uint16(0x0002), identity.aead.ID())
 }
 
 func TestIdentityMethods(t *testing.T) {
@@ -57,20 +68,19 @@ func TestIdentityMethods(t *testing.T) {
 	// Test PublicKey method
 	pk := identity.PublicKey()
 	assert.NotNil(t, pk)
-	assert.True(t, identity.pk.Equal(pk))
+	assert.Equal(t, identity.pk.Bytes(), pk.Bytes())
 
 	// Test PrivateKey method
 	sk := identity.PrivateKey()
 	assert.NotNil(t, sk)
-	assert.True(t, identity.sk.Equal(sk))
 
-	// Test Suite method
-	suite := identity.Suite()
-	assert.Equal(t, identity.suite, suite)
-
-	// Test KEMScheme method
-	kemScheme := identity.KEMScheme()
-	assert.NotNil(t, kemScheme)
+	// Test KEM/KDF/AEAD methods
+	kem := identity.KEM()
+	assert.NotNil(t, kem)
+	kdf := identity.KDF()
+	assert.NotNil(t, kdf)
+	aead := identity.AEAD()
+	assert.NotNil(t, aead)
 }
 
 func TestMarshalPublicKey(t *testing.T) {
@@ -82,10 +92,9 @@ func TestMarshalPublicKey(t *testing.T) {
 	assert.Equal(t, 32, len(pkBytes)) // X25519 public key size
 
 	// Verify we can unmarshal it back
-	kemScheme := identity.KEMScheme()
-	pk, err := kemScheme.UnmarshalBinaryPublicKey(pkBytes)
+	pk, err := identity.KEM().NewPublicKey(pkBytes)
 	assert.NoError(t, err)
-	assert.True(t, identity.pk.Equal(pk))
+	assert.Equal(t, identity.pk.Bytes(), pk.Bytes())
 }
 
 func TestMarshalConfig(t *testing.T) {
@@ -100,8 +109,10 @@ func TestMarshalConfig(t *testing.T) {
 	parsedIdentity, err := UnmarshalPublicConfig(config)
 	require.NoError(t, err)
 	assert.NotNil(t, parsedIdentity)
-	assert.True(t, identity.pk.Equal(parsedIdentity.pk))
-	assert.Equal(t, identity.suite, parsedIdentity.suite)
+	assert.Equal(t, identity.pk.Bytes(), parsedIdentity.pk.Bytes())
+	assert.Equal(t, identity.kem.ID(), parsedIdentity.kem.ID())
+	assert.Equal(t, identity.kdf.ID(), parsedIdentity.kdf.ID())
+	assert.Equal(t, identity.aead.ID(), parsedIdentity.aead.ID())
 	assert.Nil(t, parsedIdentity.sk) // public key only
 }
 
@@ -137,8 +148,10 @@ func TestUnmarshalPublicConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify parsed identity
-	assert.True(t, identity.pk.Equal(parsedIdentity.pk))
-	assert.Equal(t, identity.suite, parsedIdentity.suite)
+	assert.Equal(t, identity.pk.Bytes(), parsedIdentity.pk.Bytes())
+	assert.Equal(t, identity.kem.ID(), parsedIdentity.kem.ID())
+	assert.Equal(t, identity.kdf.ID(), parsedIdentity.kdf.ID())
+	assert.Equal(t, identity.aead.ID(), parsedIdentity.aead.ID())
 	assert.Nil(t, parsedIdentity.sk) // should be nil for public key only
 }
 
@@ -155,9 +168,9 @@ func TestExportImportErrorCases(t *testing.T) {
 	malformedData := IdentityStore{
 		PublicKey: []byte("invalid"),
 		SecretKey: []byte("invalid"),
-		KEM:       hpke.KEM_X25519_HKDF_SHA256,
-		KDF:       hpke.KDF_HKDF_SHA256,
-		AEAD:      hpke.AEAD_AES256GCM,
+		KEM:       0x0020, // DHKEM(X25519, HKDF-SHA256)
+		KDF:       0x0001, // HKDF-SHA256
+		AEAD:      0x0002, // AES-256-GCM
 	}
 	malformedJSON, err := json.Marshal(malformedData)
 	require.NoError(t, err)
@@ -184,9 +197,7 @@ func TestFromFile(t *testing.T) {
 	assert.NotNil(t, identity2)
 
 	// Verify identities are the same
-	assert.True(t, identity1.pk.Equal(identity2.pk))
-	assert.True(t, identity1.sk.Equal(identity2.sk))
-	assert.Equal(t, identity1.suite, identity2.suite)
+	requireIdentitiesEqual(t, identity1, identity2)
 }
 
 func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
@@ -223,7 +234,7 @@ func TestIdentityStoreStruct(t *testing.T) {
 	// Verify all fields are populated
 	assert.NotEmpty(t, store.PublicKey)
 	assert.NotEmpty(t, store.SecretKey)
-	assert.Equal(t, hpke.KEM_X25519_HKDF_SHA256, store.KEM)
-	assert.Equal(t, hpke.KDF_HKDF_SHA256, store.KDF)
-	assert.Equal(t, hpke.AEAD_AES256GCM, store.AEAD)
+	assert.Equal(t, uint16(0x0020), store.KEM)
+	assert.Equal(t, uint16(0x0001), store.KDF)
+	assert.Equal(t, uint16(0x0002), store.AEAD)
 }

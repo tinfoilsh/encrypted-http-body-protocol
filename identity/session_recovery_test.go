@@ -25,7 +25,8 @@ func TestSessionRecoveryTokenFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, reqCtx)
 
-	token := ExtractSessionRecoveryToken(reqCtx)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	assert.Len(t, token.ExportedSecret, ExportLength, "ExportedSecret must be 32 bytes")
 	assert.Len(t, token.RequestEnc, 32, "RequestEnc must be 32 bytes")
@@ -39,11 +40,13 @@ func TestSessionRecoveryTokenMatchesDirectExport(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	directExport := reqCtx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
-	token := ExtractSessionRecoveryToken(reqCtx)
+	directExport, err := reqCtx.Sender.Export(ExportLabel, ExportLength)
+	require.NoError(t, err)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	assert.Equal(t, directExport, token.ExportedSecret,
-		"Token exportedSecret must match direct Sealer.Export result")
+		"Token exportedSecret must match direct Sender.Export result")
 	assert.Equal(t, reqCtx.RequestEnc, token.RequestEnc,
 		"Token requestEnc must match context requestEnc")
 }
@@ -60,8 +63,10 @@ func TestSessionRecoveryTokenDiffersPerRequest(t *testing.T) {
 	ctx2, err := serverIdentity.EncryptRequestWithContext(req2)
 	require.NoError(t, err)
 
-	token1 := ExtractSessionRecoveryToken(ctx1)
-	token2 := ExtractSessionRecoveryToken(ctx2)
+	token1, err := ExtractSessionRecoveryToken(ctx1)
+	require.NoError(t, err)
+	token2, err := ExtractSessionRecoveryToken(ctx2)
+	require.NoError(t, err)
 
 	assert.NotEqual(t, token1.ExportedSecret, token2.ExportedSecret,
 		"Different requests must produce different exported secrets")
@@ -77,13 +82,15 @@ func TestSessionRecoveryTokenDoesNotMutateContext(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	token := ExtractSessionRecoveryToken(reqCtx)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	// Mutate the token's slices — the context should be unaffected
 	token.RequestEnc[0] ^= 0xFF
 	token.ExportedSecret[0] ^= 0xFF
 
-	token2 := ExtractSessionRecoveryToken(reqCtx)
+	token2, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 	assert.NotEqual(t, token.RequestEnc[0], token2.RequestEnc[0],
 		"Mutating token must not affect the original context")
 }
@@ -99,7 +106,8 @@ func TestDecryptResponseWithTokenSingleChunk(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	token := ExtractSessionRecoveryToken(reqCtx)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	// Server decrypts and responds
 	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
@@ -135,7 +143,8 @@ func TestDecryptResponseWithTokenMultiChunk(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	token := ExtractSessionRecoveryToken(reqCtx)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	// Server decrypts and responds with multiple chunks
 	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
@@ -174,7 +183,8 @@ func TestDecryptResponseWithTokenEquivalentToContextPath(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	token := ExtractSessionRecoveryToken(reqCtx)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	// Server decrypts and builds response
 	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
@@ -318,7 +328,8 @@ func TestSessionRecoveryTokenJSONRoundTrip(t *testing.T) {
 	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	require.NoError(t, err)
 
-	originalToken := ExtractSessionRecoveryToken(reqCtx)
+	originalToken, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
 
 	// Serialize to JSON and back
 	jsonBytes, err := json.Marshal(originalToken)

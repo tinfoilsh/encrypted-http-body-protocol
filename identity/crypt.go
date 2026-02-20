@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"crypto/hpke"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -9,7 +10,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/cloudflare/circl/hpke"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
@@ -65,7 +65,7 @@ func IsKeyConfigError(err error) bool {
 // StreamingEncryptReader wraps an io.Reader for streaming encryption
 type StreamingEncryptReader struct {
 	reader io.Reader
-	sealer hpke.Sealer
+	sender *hpke.Sender
 	buffer []byte
 	eof    bool
 }
@@ -108,7 +108,7 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	}
 
 	// Encrypt chunk
-	encrypted, err := r.sealer.Seal(plaintext[:bytesRead], nil)
+	encrypted, err := r.sender.Seal(nil, plaintext[:bytesRead])
 	if err != nil {
 		return 0, fmt.Errorf("failed to encrypt chunk: %w", err)
 	}
@@ -138,19 +138,19 @@ func (r *StreamingEncryptReader) Close() error {
 
 // StreamingDecryptReader wraps an io.Reader for streaming decryption
 type StreamingDecryptReader struct {
-	reader io.Reader
-	opener hpke.Opener
-	buffer []byte
-	eof    bool
+	reader    io.Reader
+	recipient *hpke.Recipient
+	buffer    []byte
+	eof       bool
 }
 
 // NewStreamingDecryptReader creates a new streaming decrypt reader
-func NewStreamingDecryptReader(reader io.Reader, opener hpke.Opener) *StreamingDecryptReader {
+func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *StreamingDecryptReader {
 	return &StreamingDecryptReader{
-		reader: reader,
-		opener: opener,
-		buffer: nil,
-		eof:    false,
+		reader:    reader,
+		recipient: recipient,
+		buffer:    nil,
+		eof:       false,
 	}
 }
 
@@ -195,7 +195,7 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	}
 
 	// Decrypt chunk
-	decryptedChunk, err := r.opener.Open(encryptedChunk, nil)
+	decryptedChunk, err := r.recipient.Open(nil, encryptedChunk)
 	if err != nil {
 		// Decryption failure at this stage typically indicates request/receiver key mismatch
 		// (for example stale client key after server key rotation).
@@ -226,8 +226,8 @@ func (r *StreamingDecryptReader) Close() error {
 // ResponseContext holds the HPKE context information needed for response encryption.
 // This is returned by DecryptRequestWithContext and passed to SetupDerivedResponseEncryption.
 type ResponseContext struct {
-	opener     hpke.Opener // The opener from request decryption (has Export method)
-	RequestEnc []byte      // The encapsulated key from the request
+	recipient  *hpke.Recipient // The recipient from request decryption (has Export method)
+	RequestEnc []byte          // The encapsulated key from the request
 }
 
 // DerivedResponseWriter wraps an http.ResponseWriter for streaming encryption
@@ -285,7 +285,7 @@ func (w *DerivedResponseWriter) Flush() {
 // DecryptRequestWithContext decrypts the request body and returns the HPKE context
 // needed for response encryption.
 //
-// The returned ResponseContext contains the HPKE opener which can be used to
+// The returned ResponseContext contains the HPKE recipient which can be used to
 // export the shared secret for response key derivation.
 func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContext, error) {
 	if req.Body == nil || req.Body == http.NoBody {
@@ -303,24 +303,19 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
 	}
 
-	// Create receiver and setup decryption
+	// Create recipient and setup decryption
 	// The info parameter must match the sender's info for domain separation
-	receiver, err := i.Suite().NewReceiver(i.sk, []byte(HPKERequestInfo))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create receiver: %w", err)
-	}
-
-	opener, err := receiver.Setup(encapKey)
+	recipient, err := hpke.NewRecipient(encapKey, i.sk, i.kdf, i.aead, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
 	}
 
 	// Wrap the body with streaming decryption
 	streamingReader := &StreamingDecryptReader{
-		reader: req.Body,
-		opener: opener,
-		buffer: nil,
-		eof:    false,
+		reader:    req.Body,
+		recipient: recipient,
+		buffer:    nil,
+		eof:       false,
 	}
 
 	req.Body = streamingReader
@@ -328,7 +323,7 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 
 	// Return the context for response encryption
 	return &ResponseContext{
-		opener:     opener,
+		recipient:  recipient,
 		RequestEnc: encapKey,
 	}, nil
 }
@@ -344,7 +339,10 @@ func (i *Identity) SetupDerivedResponseEncryption(
 	}
 
 	// Export secret from the request's HPKE context
-	exportedSecret := respCtx.opener.Export([]byte(ExportLabel), uint(ExportLength))
+	exportedSecret, err := respCtx.recipient.Export(ExportLabel, ExportLength)
+	if err != nil {
+		return nil, fmt.Errorf("failed to export secret: %w", err)
+	}
 
 	// Generate random response nonce
 	responseNonce := make([]byte, ResponseNonceLength)
@@ -383,8 +381,8 @@ func (i *Identity) SetupDerivedResponseEncryption(
 // RequestContext holds the HPKE context needed for response decryption.
 // This is returned by EncryptRequestWithContext and passed to DecryptResponseWithContext.
 type RequestContext struct {
-	Sealer     hpke.Sealer // The sealer from request encryption (has Export method)
-	RequestEnc []byte      // The encapsulated key we sent
+	Sender     *hpke.Sender // The sender from request encryption (has Export method)
+	RequestEnc []byte       // The encapsulated key we sent
 }
 
 // EncryptRequestWithContext encrypts the request body TO this identity's public key
@@ -400,12 +398,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	}
 
 	// Set up encryption to this identity's public key
-	sender, err := i.Suite().NewSender(i.pk, []byte(HPKERequestInfo))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create sender: %w", err)
-	}
-
-	encapKey, sealer, err := sender.Setup(rand.Reader)
+	encapKey, sender, err := hpke.NewSender(i.pk, i.kdf, i.aead, []byte(HPKERequestInfo))
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup encryption: %w", err)
 	}
@@ -417,7 +410,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	// Wrap body with streaming encryption
 	streamingReader := &StreamingEncryptReader{
 		reader: req.Body,
-		sealer: sealer,
+		sender: sender,
 		buffer: nil,
 		eof:    false,
 	}
@@ -425,7 +418,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	req.ContentLength = -1
 
 	return &RequestContext{
-		Sealer:     sealer,
+		Sender:     sender,
 		RequestEnc: encapKey,
 	}, nil
 }
@@ -441,7 +434,10 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 		return fmt.Errorf("request context is nil")
 	}
 
-	token := ExtractSessionRecoveryToken(ctx)
+	token, err := ExtractSessionRecoveryToken(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to extract session recovery token: %w", err)
+	}
 	return DecryptResponseWithToken(resp, token)
 }
 

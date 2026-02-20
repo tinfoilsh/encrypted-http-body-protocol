@@ -154,7 +154,10 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	var token *identity.SessionRecoveryToken
 	if reqCtx != nil {
-		token = identity.ExtractSessionRecoveryToken(reqCtx)
+		token, err = identity.ExtractSessionRecoveryToken(reqCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract session recovery token: %v", err)
+		}
 	}
 
 	// Clear token for bodyless requests immediately
