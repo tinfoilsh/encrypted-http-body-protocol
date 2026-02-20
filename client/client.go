@@ -37,10 +37,6 @@ func NewTransport(serverIdentity *identity.Identity) *Transport {
 	}
 }
 
-func (t *Transport) ServerIdentity() *identity.Identity {
-	return t.serverIdentity
-}
-
 // GetSessionRecoveryToken returns the session recovery token from the most
 // recent request that had a body. Returns nil if no token is available (e.g.
 // no request has been made yet, or the last request was bodyless).

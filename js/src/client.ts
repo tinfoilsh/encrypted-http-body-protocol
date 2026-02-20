@@ -3,7 +3,6 @@ import { extractSessionRecoveryToken, decryptResponseWithToken } from './identit
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { KeyConfigMismatchError, ProtocolError } from './errors.js';
-import type { Key } from 'hpke';
 
 interface ProblemDetails {
   type?: string;
@@ -51,27 +50,6 @@ export class Transport {
         typeof problem.title === 'string' ? problem.title : undefined
       );
     }
-  }
-
-  /**
-   * Get the server identity
-   */
-  getServerIdentity(): Identity {
-    return this.serverIdentity;
-  }
-
-  /**
-   * Get the server public key
-   */
-  getServerPublicKey(): Key {
-    return this.serverIdentity.getPublicKey();
-  }
-
-  /**
-   * Get the server public key as hex string
-   */
-  async getServerPublicKeyHex(): Promise<string> {
-    return this.serverIdentity.getPublicKeyHex();
   }
 
   /**
