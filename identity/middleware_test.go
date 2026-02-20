@@ -2,7 +2,7 @@ package identity
 
 import (
 	"bytes"
-	"crypto/rand"
+	"crypto/hpke"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -13,17 +13,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudflare/circl/hpke"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
 // TestClient is a test helper that simulates a client with request/response encryption.
-// It stores the HPKE sealer from request encryption so it can derive response decryption keys.
+// It stores the HPKE sender from request encryption so it can derive response decryption keys.
 type TestClient struct {
 	identity   *Identity
-	sealer     hpke.Sealer
+	sender     *hpke.Sender
 	requestEnc []byte
 }
 
@@ -37,18 +36,15 @@ func newTestClient(t *testing.T) *TestClient {
 // encryptRequest encrypts a request to the server and stores the context for response decryption
 func (c *TestClient) encryptRequest(t *testing.T, req *http.Request, serverPubKey []byte) {
 	// Set up encryption to server
-	pk, err := c.identity.KEMScheme().UnmarshalBinaryPublicKey(serverPubKey)
+	pk, err := c.identity.KEM().NewPublicKey(serverPubKey)
 	require.NoError(t, err)
 
 	// Use HPKERequestInfo for domain separation (must match server's info)
-	sender, err := c.identity.Suite().NewSender(pk, []byte(HPKERequestInfo))
-	require.NoError(t, err)
-
-	encapKey, sealer, err := sender.Setup(rand.Reader)
+	encapKey, sender, err := hpke.NewSender(pk, c.identity.KDF(), c.identity.AEAD(), []byte(HPKERequestInfo))
 	require.NoError(t, err)
 
 	// Store for response decryption
-	c.sealer = sealer
+	c.sender = sender
 	c.requestEnc = encapKey
 
 	// Set the request header
@@ -60,7 +56,7 @@ func (c *TestClient) encryptRequest(t *testing.T, req *http.Request, serverPubKe
 		require.NoError(t, err)
 
 		if len(body) > 0 {
-			encrypted, err := sealer.Seal(body, nil)
+			encrypted, err := sender.Seal(nil, body)
 			require.NoError(t, err)
 
 			// Create chunked format
@@ -85,8 +81,9 @@ func (c *TestClient) decryptResponse(t *testing.T, resp *httptest.ResponseRecord
 	responseNonce, err := hex.DecodeString(responseNonceHex)
 	require.NoError(t, err)
 
-	// Export secret from sealer context
-	exportedSecret := c.sealer.Export([]byte(ExportLabel), uint(ExportLength))
+	// Export secret from sender context
+	exportedSecret, err := c.sender.Export(ExportLabel, ExportLength)
+	require.NoError(t, err)
 
 	// Derive response keys
 	km, err := DeriveResponseKeys(exportedSecret, c.requestEnc, responseNonce)
@@ -528,12 +525,13 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 		responseNonceHex := w.Header().Get(protocol.ResponseNonceHeader)
 		responseNonce, _ := hex.DecodeString(responseNonceHex)
 
-		// Client 2 tries to derive keys with their sealer (wrong shared secret)
-		// First set up client2's sealer by encrypting a dummy request
+		// Client 2 tries to derive keys with their sender (wrong shared secret)
+		// First set up client2's sender by encrypting a dummy request
 		dummyReq := httptest.NewRequest("POST", "/dummy", strings.NewReader("dummy body"))
 		client2.encryptRequest(t, dummyReq, serverIdentity.MarshalPublicKey())
 
-		client2ExportedSecret := client2.sealer.Export([]byte(ExportLabel), uint(ExportLength))
+		client2ExportedSecret, err := client2.sender.Export(ExportLabel, ExportLength)
+		require.NoError(t, err)
 		client2KM, _ := DeriveResponseKeys(client2ExportedSecret, client1.requestEnc, responseNonce)
 		client2AEAD, _ := client2KM.NewResponseAEAD()
 
@@ -544,7 +542,7 @@ func TestDerivedResponseEncryptionSecurity(t *testing.T) {
 		encryptedChunk := make([]byte, chunkLen)
 		io.ReadFull(reader, encryptedChunk)
 
-		_, err := client2AEAD.Open(encryptedChunk, nil)
+		_, err = client2AEAD.Open(encryptedChunk, nil)
 		assert.Error(t, err, "client 2 should not be able to decrypt client 1's response")
 	})
 }
@@ -565,13 +563,13 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// Create a fresh client for each iteration (realistic scenario)
 		clientIdentity, _ := NewIdentity()
-		sender, _ := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
-		encapKey, _, _ := sender.Setup(rand.Reader)
+		encapKey, _, _ := hpke.NewSender(serverIdentity.PublicKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 
 		req := httptest.NewRequest("GET", "/test", nil)
 		req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(encapKey))
 
 		w := httptest.NewRecorder()
 		wrapped.ServeHTTP(w, req)
+		_ = clientIdentity
 	}
 }

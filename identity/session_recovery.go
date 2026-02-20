@@ -54,14 +54,17 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 // ExtractSessionRecoveryToken exports the HPKE shared secret from a
 // RequestContext and returns a serializable token that can decrypt the
 // corresponding response independently.
-func ExtractSessionRecoveryToken(ctx *RequestContext) *SessionRecoveryToken {
-	exportedSecret := ctx.Sealer.Export([]byte(ExportLabel), uint(ExportLength))
+func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, error) {
+	exportedSecret, err := ctx.Sender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		return nil, fmt.Errorf("failed to export HPKE secret: %w", err)
+	}
 	requestEnc := make([]byte, len(ctx.RequestEnc))
 	copy(requestEnc, ctx.RequestEnc)
 	return &SessionRecoveryToken{
 		ExportedSecret: exportedSecret,
 		RequestEnc:     requestEnc,
-	}
+	}, nil
 }
 
 // DecryptResponseWithToken decrypts an HTTP response using only a

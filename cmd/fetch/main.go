@@ -40,9 +40,12 @@ func main() {
 		Transport: secureTransport,
 	}
 
+	serverID := secureTransport.ServerIdentity()
 	log.WithFields(log.Fields{
-		"public_key_hex": secureTransport.ServerIdentity().MarshalPublicKeyHex(),
-		"hpke_suite":     secureTransport.ServerIdentity().Suite(),
+		"public_key_hex": serverID.MarshalPublicKeyHex(),
+		"hpke_kem":       serverID.KEM().ID(),
+		"hpke_kdf":       serverID.KDF().ID(),
+		"hpke_aead":      serverID.AEAD().ID(),
 	}).Debug("Server Identity")
 
 	var body io.Reader

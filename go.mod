@@ -1,9 +1,8 @@
 module github.com/tinfoilsh/encrypted-http-body-protocol
 
-go 1.26.0
+go 1.26
 
 require (
-	github.com/cloudflare/circl v1.6.3
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1

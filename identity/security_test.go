@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"crypto/hpke"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -48,28 +49,20 @@ func TestMitMCannotReadResponse(t *testing.T) {
 	}
 
 	// Client (Alice) encrypts a request to server
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
+	requestEnc, clientSender, err := hpke.NewSender(serverIdentity.PublicKey(), clientIdentity.KDF(), clientIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
-	requestEnc, clientSealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to setup sender: %v", err)
-	}
 
-	// Server receives and decrypts (simulated by setting up receiver)
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+	// Server receives and decrypts (simulated by setting up recipient)
+	serverRecipient, err := hpke.NewRecipient(requestEnc, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
-		t.Fatalf("Failed to create receiver: %v", err)
-	}
-	serverOpener, err := receiver.Setup(requestEnc)
-	if err != nil {
-		t.Fatalf("Failed to setup receiver: %v", err)
+		t.Fatalf("Failed to setup recipient: %v", err)
 	}
 
 	// Server creates response encryption context
 	respCtx := &ResponseContext{
-		opener:     serverOpener,
+		recipient:  serverRecipient,
 		RequestEnc: requestEnc,
 	}
 
@@ -87,7 +80,10 @@ func TestMitMCannotReadResponse(t *testing.T) {
 	}
 
 	// CLIENT (Alice) can derive the correct keys
-	clientExported := clientSealer.Export([]byte(ExportLabel), uint(ExportLength))
+	clientExported, err := clientSender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Client export failed: %v", err)
+	}
 	clientKM, err := DeriveResponseKeys(clientExported, requestEnc, responseNonce)
 	if err != nil {
 		t.Fatalf("Client key derivation failed: %v", err)
@@ -99,17 +95,16 @@ func TestMitMCannotReadResponse(t *testing.T) {
 
 	// Eve tries to create her own HPKE context to the server
 	// Even with correct info, Eve's shared secret is different from Alice's
-	eveSender, err := eveIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
+	_, eveSender, err := hpke.NewSender(serverIdentity.PublicKey(), eveIdentity.KDF(), eveIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Eve failed to create sender: %v", err)
 	}
-	_, eveSealer, err := eveSender.Setup(rand.Reader)
-	if err != nil {
-		t.Fatalf("Eve failed to setup sender: %v", err)
-	}
 
 	// Eve exports from HER context (wrong shared secret)
-	eveExported := eveSealer.Export([]byte(ExportLabel), uint(ExportLength))
+	eveExported, err := eveSender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Eve export failed: %v", err)
+	}
 	eveKM, err := DeriveResponseKeys(eveExported, requestEnc, responseNonce)
 	if err != nil {
 		t.Fatalf("Eve key derivation failed unexpectedly: %v", err)
@@ -146,17 +141,16 @@ func TestMitMCannotForgeResponse(t *testing.T) {
 	}
 
 	// Client encrypts request
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
+	requestEnc, clientSender, err := hpke.NewSender(serverIdentity.PublicKey(), clientIdentity.KDF(), clientIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
-	requestEnc, clientSealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to setup sender: %v", err)
-	}
 
 	// Client's expected key derivation
-	clientExported := clientSealer.Export([]byte(ExportLabel), uint(ExportLength))
+	clientExported, err := clientSender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Client export failed: %v", err)
+	}
 
 	// Attacker tries to forge a response
 	// They can create any nonce they want
@@ -223,28 +217,23 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 	}
 
 	// Original request encryption
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
+	originalEnc, clientSender, err := hpke.NewSender(serverIdentity.PublicKey(), clientIdentity.KDF(), clientIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
-	}
-	originalEnc, clientSealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to setup sender: %v", err)
 	}
 
 	// Server decrypts with original enc (in real scenario, it would use modified enc
 	// but that would fail decryption - here we test key derivation mismatch)
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+	serverRecipient, err := hpke.NewRecipient(originalEnc, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
-		t.Fatalf("Failed to create receiver: %v", err)
-	}
-	serverOpener, err := receiver.Setup(originalEnc)
-	if err != nil {
-		t.Fatalf("Failed to setup receiver: %v", err)
+		t.Fatalf("Failed to setup recipient: %v", err)
 	}
 
 	// Server creates response
-	serverExported := serverOpener.Export([]byte(ExportLabel), uint(ExportLength))
+	serverExported, err := serverRecipient.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Server export failed: %v", err)
+	}
 	responseNonce := make([]byte, ResponseNonceLength)
 	if _, err := rand.Read(responseNonce); err != nil {
 		t.Fatalf("Failed to generate response nonce: %v", err)
@@ -268,7 +257,10 @@ func TestModifiedRequestEncCausesFailure(t *testing.T) {
 	modifiedEnc[0] ^= 0xFF // Flip some bits
 
 	// Client derives keys with wrong enc
-	clientExported := clientSealer.Export([]byte(ExportLabel), uint(ExportLength))
+	clientExported, err := clientSender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Client export failed: %v", err)
+	}
 	clientKM, err := DeriveResponseKeys(clientExported, modifiedEnc, responseNonce)
 	if err != nil {
 		t.Fatalf("Client key derivation failed: %v", err)
@@ -300,26 +292,21 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 		t.Fatalf("Failed to create client identity: %v", err)
 	}
 
-	sender, err := clientIdentity.Suite().NewSender(serverIdentity.PublicKey(), []byte(HPKERequestInfo))
+	requestEnc, clientSender, err := hpke.NewSender(serverIdentity.PublicKey(), clientIdentity.KDF(), clientIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
 		t.Fatalf("Failed to create sender: %v", err)
 	}
-	requestEnc, clientSealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		t.Fatalf("Failed to setup sender: %v", err)
-	}
 
-	receiver, err := serverIdentity.Suite().NewReceiver(serverIdentity.PrivateKey(), []byte(HPKERequestInfo))
+	serverRecipient, err := hpke.NewRecipient(requestEnc, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
 	if err != nil {
-		t.Fatalf("Failed to create receiver: %v", err)
-	}
-	serverOpener, err := receiver.Setup(requestEnc)
-	if err != nil {
-		t.Fatalf("Failed to setup receiver: %v", err)
+		t.Fatalf("Failed to setup recipient: %v", err)
 	}
 
 	// Server creates response with specific nonce
-	serverExported := serverOpener.Export([]byte(ExportLabel), uint(ExportLength))
+	serverExported, err := serverRecipient.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Server export failed: %v", err)
+	}
 	originalNonce := make([]byte, ResponseNonceLength)
 	if _, err := rand.Read(originalNonce); err != nil {
 		t.Fatalf("Failed to generate original nonce: %v", err)
@@ -343,7 +330,10 @@ func TestModifiedNonceCausesFailure(t *testing.T) {
 	modifiedNonce[0] ^= 0xFF
 
 	// Client derives keys with wrong nonce
-	clientExported := clientSealer.Export([]byte(ExportLabel), uint(ExportLength))
+	clientExported, err := clientSender.Export(ExportLabel, ExportLength)
+	if err != nil {
+		t.Fatalf("Client export failed: %v", err)
+	}
 	clientKM, err := DeriveResponseKeys(clientExported, requestEnc, modifiedNonce)
 	if err != nil {
 		t.Fatalf("Client key derivation failed: %v", err)
