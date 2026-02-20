@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -324,7 +325,7 @@ func TestSessionRecoveryTokenJSONRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the JSON contains hex strings, not base64
-	var raw map[string]interface{}
+	var raw map[string]any
 	err = json.Unmarshal(jsonBytes, &raw)
 	require.NoError(t, err)
 	assert.Equal(t, hex.EncodeToString(originalToken.ExportedSecret), raw["exportedSecret"])
@@ -360,4 +361,68 @@ func TestSessionRecoveryTokenJSONRoundTrip(t *testing.T) {
 	decrypted, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, responseData, string(decrypted))
+}
+
+func TestResponseDecryptionInteropVector(t *testing.T) {
+	vectorJSON, err := os.ReadFile("../test-vectors/response-decryption.json")
+	require.NoError(t, err)
+
+	var vector struct {
+		ExportedSecret    string `json:"exportedSecret"`
+		RequestEnc        string `json:"requestEnc"`
+		ResponseNonce     string `json:"responseNonce"`
+		Plaintext         string `json:"plaintext"`
+		EncryptedResponse string `json:"encryptedResponse"`
+	}
+	require.NoError(t, json.Unmarshal(vectorJSON, &vector))
+
+	exportedSecret, _ := hex.DecodeString(vector.ExportedSecret)
+	requestEnc, _ := hex.DecodeString(vector.RequestEnc)
+	responseNonce, _ := hex.DecodeString(vector.ResponseNonce)
+	expectedPlaintext, _ := hex.DecodeString(vector.Plaintext)
+	encryptedResponse, _ := hex.DecodeString(vector.EncryptedResponse)
+
+	km, err := DeriveResponseKeys(exportedSecret, requestEnc, responseNonce)
+	require.NoError(t, err)
+
+	aead, err := km.NewResponseAEAD()
+	require.NoError(t, err)
+
+	// Parse chunked framing: LEN (4 bytes) || ciphertext
+	chunkLen := int(encryptedResponse[0])<<24 | int(encryptedResponse[1])<<16 |
+		int(encryptedResponse[2])<<8 | int(encryptedResponse[3])
+	ciphertext := encryptedResponse[4 : 4+chunkLen]
+
+	decrypted, err := aead.Open(ciphertext, nil)
+	require.NoError(t, err)
+	assert.Equal(t, expectedPlaintext, decrypted)
+}
+
+func TestSessionRecoveryTokenInterop(t *testing.T) {
+	vectorJSON, err := os.ReadFile("../test-vectors/session-recovery-token.json")
+	require.NoError(t, err)
+
+	var token SessionRecoveryToken
+	err = json.Unmarshal(vectorJSON, &token)
+	require.NoError(t, err)
+
+	// Verify deserialized byte lengths
+	assert.Len(t, token.ExportedSecret, 32, "exportedSecret must be 32 bytes")
+	assert.Len(t, token.RequestEnc, 32, "requestEnc must be 32 bytes")
+
+	// Verify expected byte values from the hex in the fixture
+	assert.Equal(t, "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+		hex.EncodeToString(token.ExportedSecret))
+	assert.Equal(t, "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		hex.EncodeToString(token.RequestEnc))
+
+	// Re-serialize and verify it produces identical JSON
+	reserializedBytes, err := json.Marshal(&token)
+	require.NoError(t, err)
+
+	var original map[string]any
+	var reserialized map[string]any
+	require.NoError(t, json.Unmarshal(vectorJSON, &original))
+	require.NoError(t, json.Unmarshal(reserializedBytes, &reserialized))
+	assert.Equal(t, original, reserialized)
 }

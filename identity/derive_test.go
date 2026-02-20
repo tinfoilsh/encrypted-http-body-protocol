@@ -2,6 +2,9 @@ package identity
 
 import (
 	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -411,5 +414,41 @@ func TestDifferentKeysCannotDecrypt(t *testing.T) {
 	_, err = attackerAEAD.Open(ciphertext, nil)
 	if err == nil {
 		t.Error("Attacker should not be able to decrypt with different keys")
+	}
+}
+
+func TestDeriveInteropVector(t *testing.T) {
+	vectorJSON, err := os.ReadFile("../test-vectors/derive.json")
+	if err != nil {
+		t.Fatalf("Failed to read vector file: %v", err)
+	}
+
+	var vector struct {
+		ExportedSecret string `json:"exportedSecret"`
+		RequestEnc     string `json:"requestEnc"`
+		ResponseNonce  string `json:"responseNonce"`
+		DerivedKey     string `json:"derivedKey"`
+		DerivedNonce   string `json:"derivedNonceBase"`
+	}
+	if err := json.Unmarshal(vectorJSON, &vector); err != nil {
+		t.Fatalf("Failed to parse vector JSON: %v", err)
+	}
+
+	exportedSecret, _ := hex.DecodeString(vector.ExportedSecret)
+	requestEnc, _ := hex.DecodeString(vector.RequestEnc)
+	responseNonce, _ := hex.DecodeString(vector.ResponseNonce)
+	expectedKey, _ := hex.DecodeString(vector.DerivedKey)
+	expectedNonce, _ := hex.DecodeString(vector.DerivedNonce)
+
+	km, err := DeriveResponseKeys(exportedSecret, requestEnc, responseNonce)
+	if err != nil {
+		t.Fatalf("DeriveResponseKeys failed: %v", err)
+	}
+
+	if !bytes.Equal(km.Key, expectedKey) {
+		t.Errorf("Key mismatch.\nExpected: %s\nGot:      %s", vector.DerivedKey, hex.EncodeToString(km.Key))
+	}
+	if !bytes.Equal(km.NonceBase, expectedNonce) {
+		t.Errorf("NonceBase mismatch.\nExpected: %s\nGot:      %s", vector.DerivedNonce, hex.EncodeToString(km.NonceBase))
 	}
 }
