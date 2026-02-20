@@ -175,6 +175,10 @@ public final class EHBPClient: @unchecked Sendable {
                                 continue
                             }
 
+                            guard chunkLength <= EHBPConstants.maxChunkLength else {
+                                throw EHBPError.invalidResponse("chunk length \(chunkLength) exceeds maximum \(EHBPConstants.maxChunkLength)")
+                            }
+
                             guard buffer.count >= 4 + chunkLength else {
                                 break
                             }
@@ -220,6 +224,10 @@ public final class EHBPClient: @unchecked Sendable {
 
             if chunkLength == 0 {
                 continue
+            }
+
+            guard chunkLength <= EHBPConstants.maxChunkLength else {
+                throw EHBPError.invalidResponse("chunk length \(chunkLength) exceeds maximum \(EHBPConstants.maxChunkLength)")
             }
 
             guard offset + chunkLength <= data.count else {
