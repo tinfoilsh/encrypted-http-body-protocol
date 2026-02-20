@@ -8,6 +8,9 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   Identity,
   extractSessionRecoveryToken,
@@ -26,6 +29,7 @@ import {
 } from 'hpke';
 import {
   bytesToHex,
+  decryptChunk,
   deriveResponseKeys,
   encryptChunk,
   hexToBytes,
@@ -490,6 +494,59 @@ describe('Session Recovery Token', () => {
       const text = await decrypted.text();
 
       assert.strictEqual(text, 'recovered after tab close');
+    });
+  });
+
+  describe('interoperability test vector', () => {
+    it('should deserialize the shared fixture and re-serialize to identical JSON', () => {
+      const thisDir = dirname(fileURLToPath(import.meta.url));
+      const vectorPath = resolve(thisDir, '../../../../test-vectors/session-recovery-token.json');
+      const vectorJSON = readFileSync(vectorPath, 'utf-8');
+
+      const token = deserializeSessionRecoveryToken(vectorJSON);
+
+      assert.strictEqual(token.exportedSecret.length, 32, 'exportedSecret must be 32 bytes');
+      assert.strictEqual(token.requestEnc.length, 32, 'requestEnc must be 32 bytes');
+
+      assert.strictEqual(
+        bytesToHex(token.exportedSecret),
+        'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2',
+      );
+      assert.strictEqual(
+        bytesToHex(token.requestEnc),
+        '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+      );
+
+      // Re-serialize and verify identical JSON content
+      const reserialized = serializeSessionRecoveryToken(token);
+      assert.deepStrictEqual(JSON.parse(reserialized), JSON.parse(vectorJSON));
+    });
+  });
+
+  describe('response decryption interop vector', () => {
+    it('should decrypt the shared response-decryption fixture', async () => {
+      const thisDir = dirname(fileURLToPath(import.meta.url));
+      const vectorPath = resolve(thisDir, '../../../../test-vectors/response-decryption.json');
+      const vector = JSON.parse(readFileSync(vectorPath, 'utf-8'));
+
+      const token: SessionRecoveryToken = {
+        exportedSecret: hexToBytes(vector.exportedSecret),
+        requestEnc: hexToBytes(vector.requestEnc),
+      };
+
+      const responseNonce = hexToBytes(vector.responseNonce);
+      const expectedPlaintext = hexToBytes(vector.plaintext);
+      const encryptedResponse = hexToBytes(vector.encryptedResponse);
+
+      const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
+
+      // Parse chunked framing: LEN (4 bytes) || ciphertext
+      const chunkLen = (encryptedResponse[0] << 24) | (encryptedResponse[1] << 16) |
+                       (encryptedResponse[2] << 8) | encryptedResponse[3];
+      const ciphertext = encryptedResponse.slice(4, 4 + chunkLen);
+
+      const decrypted = await decryptChunk(km, 0, ciphertext);
+      assert.deepStrictEqual(decrypted, expectedPlaintext);
     });
   });
 

@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   deriveResponseKeys,
   computeNonce,
@@ -206,33 +209,52 @@ describe('constants', () => {
   });
 });
 
-describe('Go interoperability', () => {
-  it('should derive same keys as Go implementation', async () => {
-    // Test vectors from Go tests: exportedSecret[i] = i, requestEnc[i] = i+32, responseNonce[i] = i+64
-    const exportedSecret = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) exportedSecret[i] = i;
+describe('cross-language interop', () => {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
 
-    const requestEnc = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) requestEnc[i] = i + 32;
+  it('should derive same keys as shared test vector', async () => {
+    const vectorPath = resolve(thisDir, '../../../../test-vectors/derive.json');
+    const vector = JSON.parse(readFileSync(vectorPath, 'utf-8'));
 
-    const responseNonce = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) responseNonce[i] = i + 64;
+    const exportedSecret = hexToBytes(vector.exportedSecret);
+    const requestEnc = hexToBytes(vector.requestEnc);
+    const responseNonce = hexToBytes(vector.responseNonce);
 
     const km = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
 
-    // Expected values from Go implementation
-    const expectedKey = hexToBytes('40ec528847cd4e928449f2ed1a70a7d1e8ee317d5e900424fc1dd5b0475b97f7');
-    const expectedNonceBase = hexToBytes('f8b0ce9466f27aa6243c65f9');
+    const expectedKey = hexToBytes(vector.derivedKey);
+    const expectedNonceBase = hexToBytes(vector.derivedNonceBase);
 
     assert.deepStrictEqual(
       km.keyBytes,
       expectedKey,
-      `Key mismatch.\nExpected: ${bytesToHex(expectedKey)}\nGot: ${bytesToHex(km.keyBytes)}`
+      `Key mismatch.\nExpected: ${vector.derivedKey}\nGot: ${bytesToHex(km.keyBytes)}`
     );
     assert.deepStrictEqual(
       km.nonceBase,
       expectedNonceBase,
-      `NonceBase mismatch.\nExpected: ${bytesToHex(expectedNonceBase)}\nGot: ${bytesToHex(km.nonceBase)}`
+      `NonceBase mismatch.\nExpected: ${vector.derivedNonceBase}\nGot: ${bytesToHex(km.nonceBase)}`
     );
+  });
+
+  it('should decrypt response from shared test vector', async () => {
+    const vectorPath = resolve(thisDir, '../../../../test-vectors/response-decryption.json');
+    const vector = JSON.parse(readFileSync(vectorPath, 'utf-8'));
+
+    const exportedSecret = hexToBytes(vector.exportedSecret);
+    const requestEnc = hexToBytes(vector.requestEnc);
+    const responseNonce = hexToBytes(vector.responseNonce);
+    const expectedPlaintext = hexToBytes(vector.plaintext);
+    const encryptedResponse = hexToBytes(vector.encryptedResponse);
+
+    const km = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
+
+    // Parse chunked framing: LEN (4 bytes) || ciphertext
+    const chunkLen = (encryptedResponse[0] << 24) | (encryptedResponse[1] << 16) |
+                     (encryptedResponse[2] << 8) | encryptedResponse[3];
+    const ciphertext = encryptedResponse.slice(4, 4 + chunkLen);
+
+    const decrypted = await decryptChunk(km, 0, ciphertext);
+    assert.deepStrictEqual(decrypted, expectedPlaintext);
   });
 });

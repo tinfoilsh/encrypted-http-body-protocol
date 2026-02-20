@@ -305,6 +305,40 @@ final class SessionRecoveryTests: XCTestCase {
         XCTAssertEqual(original as NSDictionary, reserialized as NSDictionary)
     }
 
+    func testResponseDecryptionInteropVector() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let vectorPath = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("test-vectors")
+            .appendingPathComponent("response-decryption.json")
+        let vectorJSON = try Data(contentsOf: vectorPath)
+
+        struct DecryptionVector: Decodable {
+            let exportedSecret: String
+            let requestEnc: String
+            let responseNonce: String
+            let plaintext: String
+            let encryptedResponse: String
+        }
+        let vector = try JSONDecoder().decode(DecryptionVector.self, from: vectorJSON)
+
+        let token = SessionRecoveryToken(
+            exportedSecret: Data(hexString: vector.exportedSecret)!,
+            requestEnc: Data(hexString: vector.requestEnc)!
+        )
+
+        let decrypted = try decryptResponseBody(
+            token: token,
+            responseNonce: Data(hexString: vector.responseNonce)!,
+            encryptedData: Data(hexString: vector.encryptedResponse)!
+        )
+
+        XCTAssertEqual(decrypted, Data(hexString: vector.plaintext)!)
+    }
+
     // MARK: - Error Cases
 
     func testDecryptWithWrongTokenFails() throws {

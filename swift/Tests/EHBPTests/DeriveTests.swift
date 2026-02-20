@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import Crypto
 @testable import EHBP
 
@@ -313,46 +314,38 @@ final class DeriveTests: XCTestCase {
         )
     }
 
-    // MARK: - Go Interoperability Test
+    // MARK: - Cross-Language Interop Tests
 
-    func testGoInteroperability() throws {
-        // Test vectors from Go tests: exportedSecret[i] = i, requestEnc[i] = i+32, responseNonce[i] = i+64
-        var exportedSecret = Data(count: 32)
-        for i in 0..<32 { exportedSecret[i] = UInt8(i) }
+    private func vectorsDir() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // EHBPTests/
+            .deletingLastPathComponent()  // Tests/
+            .deletingLastPathComponent()  // swift/
+            .deletingLastPathComponent()  // repo root
+            .appendingPathComponent("test-vectors")
+    }
 
-        var requestEnc = Data(count: 32)
-        for i in 0..<32 { requestEnc[i] = UInt8(i + 32) }
+    func testDeriveInteropVector() throws {
+        let vectorPath = vectorsDir().appendingPathComponent("derive.json")
+        let vectorJSON = try Data(contentsOf: vectorPath)
 
-        var responseNonce = Data(count: 32)
-        for i in 0..<32 { responseNonce[i] = UInt8(i + 64) }
+        struct DeriveVector: Decodable {
+            let exportedSecret: String
+            let requestEnc: String
+            let responseNonce: String
+            let derivedKey: String
+            let derivedNonceBase: String
+        }
+        let vector = try JSONDecoder().decode(DeriveVector.self, from: vectorJSON)
 
         let km = try deriveResponseKeys(
-            exportedSecret: exportedSecret,
-            requestEnc: requestEnc,
-            responseNonce: responseNonce
+            exportedSecret: Data(hexString: vector.exportedSecret)!,
+            requestEnc: Data(hexString: vector.requestEnc)!,
+            responseNonce: Data(hexString: vector.responseNonce)!
         )
-
-        // Expected values from Go implementation
-        let expectedKeyHex = "40ec528847cd4e928449f2ed1a70a7d1e8ee317d5e900424fc1dd5b0475b97f7"
-        let expectedNonceBaseHex = "f8b0ce9466f27aa6243c65f9"
-
-        guard let expectedKey = Data(hexString: expectedKeyHex),
-              let expectedNonceBase = Data(hexString: expectedNonceBaseHex) else {
-            XCTFail("Failed to parse expected hex values")
-            return
-        }
 
         let derivedKeyData = km.key.withUnsafeBytes { Data($0) }
-        XCTAssertEqual(
-            derivedKeyData,
-            expectedKey,
-            "Key mismatch with Go implementation.\nExpected: \(expectedKeyHex)\nGot: \(derivedKeyData.hexString)"
-        )
-
-        XCTAssertEqual(
-            km.nonceBase,
-            expectedNonceBase,
-            "NonceBase mismatch with Go implementation.\nExpected: \(expectedNonceBaseHex)\nGot: \(km.nonceBase.hexString)"
-        )
+        XCTAssertEqual(derivedKeyData, Data(hexString: vector.derivedKey)!)
+        XCTAssertEqual(km.nonceBase, Data(hexString: vector.derivedNonceBase)!)
     }
 }
