@@ -3,10 +3,11 @@
 EHBP (Encrypted HTTP Body Protocol) encrypts the HTTP message body while leaving the rest of the message unmodified.
 Proxies can inspect and route upon request metadata without seeing the body.
 
-The protocol uses HPKE, with a Go reference implementation (server middleware and client transport) and a JavaScript/TypeScript client.
+The protocol uses HPKE, with a Go reference implementation (server middleware and client transport), a JavaScript/TypeScript client, and a Swift client.
 
 - Protocol specification: [SPEC.md](SPEC.md)
 - JavaScript client: [js/README.md](js/README.md)
+- Swift client: [swift/](swift/)
 
 ## Motivation
 EHBP makes it practical to add body encryption without needing to rethink existing HTTP stacks.
@@ -15,7 +16,7 @@ This ensures that EHBP keeps streaming semantics intact and can be used as a dro
 
 ## Requirements
 
-- Go 1.24.0+
+- Go 1.26+
 
 ## Quickstart (Go)
 
