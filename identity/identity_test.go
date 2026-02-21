@@ -13,6 +13,20 @@ import (
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
+// requireIdentitiesEqual asserts that two identities have the same keys and HPKE parameters.
+func requireIdentitiesEqual(t *testing.T, expected, actual *Identity) {
+	t.Helper()
+	assert.Equal(t, expected.pk.Bytes(), actual.pk.Bytes())
+	expectedSK, err := expected.sk.Bytes()
+	require.NoError(t, err)
+	actualSK, err := actual.sk.Bytes()
+	require.NoError(t, err)
+	assert.Equal(t, expectedSK, actualSK)
+	assert.Equal(t, expected.kem.ID(), actual.kem.ID())
+	assert.Equal(t, expected.kdf.ID(), actual.kdf.ID())
+	assert.Equal(t, expected.aead.ID(), actual.aead.ID())
+}
+
 func TestIdentityExportImport(t *testing.T) {
 	// Create a new identity
 	original, err := NewIdentity()
@@ -27,15 +41,7 @@ func TestIdentityExportImport(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Compare
-	assert.Equal(t, original.pk.Bytes(), imported.pk.Bytes())
-	origSK, err := original.sk.Bytes()
-	require.NoError(t, err)
-	importedSK, err := imported.sk.Bytes()
-	require.NoError(t, err)
-	assert.Equal(t, origSK, importedSK)
-	assert.Equal(t, original.kem.ID(), imported.kem.ID())
-	assert.Equal(t, original.kdf.ID(), imported.kdf.ID())
-	assert.Equal(t, original.aead.ID(), imported.aead.ID())
+	requireIdentitiesEqual(t, original, imported)
 }
 
 func TestNewIdentity(t *testing.T) {
@@ -192,15 +198,7 @@ func TestFromFile(t *testing.T) {
 	assert.NotNil(t, identity2)
 
 	// Verify identities are the same
-	assert.Equal(t, identity1.pk.Bytes(), identity2.pk.Bytes())
-	sk1Bytes, err := identity1.sk.Bytes()
-	require.NoError(t, err)
-	sk2Bytes, err := identity2.sk.Bytes()
-	require.NoError(t, err)
-	assert.Equal(t, sk1Bytes, sk2Bytes)
-	assert.Equal(t, identity1.kem.ID(), identity2.kem.ID())
-	assert.Equal(t, identity1.kdf.ID(), identity2.kdf.ID())
-	assert.Equal(t, identity1.aead.ID(), identity2.aead.ID())
+	requireIdentitiesEqual(t, identity1, identity2)
 }
 
 func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
