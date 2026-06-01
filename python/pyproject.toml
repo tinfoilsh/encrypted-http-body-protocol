@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tinfoil-ehbp"
+version = "0.1.0"
+description = "Python client for the encrypted HTTP body protocol"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=42",
+    "httpx>=0.27",
+    "pyhpke>=0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ehbp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# PEP 604 unions (X | Y) are evaluated at runtime by typing.get_type_hints on
+# 3.9, so keep typing.Optional/Union for compatibility with the supported range.
+ignore = ["UP007", "UP045"]
+
+[tool.mypy]
+python_version = "3.9"
+packages = ["ehbp"]
+ignore_missing_imports = true
