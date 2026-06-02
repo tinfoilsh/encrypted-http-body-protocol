@@ -50,11 +50,7 @@ impl Client {
                 "server returned status {status} while fetching key configuration"
             )));
         }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
+        let content_type = media_type(response.headers());
         if content_type != KEYS_MEDIA_TYPE {
             return Err(Error::Protocol(format!(
                 "server returned invalid key content type: {content_type}"
@@ -752,6 +748,57 @@ mod tests {
             reqwest::Client::new(),
         )
         .unwrap()
+    }
+
+    async fn serve_key_config(content_type: &'static str) -> String {
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        let config = identity.marshal_public_config();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                config.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&config).await.unwrap();
+        });
+
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn key_config_content_type_allows_parameters_and_case() {
+        for content_type in [
+            KEYS_MEDIA_TYPE,
+            "Application/OHTTP-Keys",
+            "application/ohttp-keys; charset=utf-8",
+        ] {
+            let base_url = serve_key_config(content_type).await;
+            let client = Client::new_with_http_client(base_url, reqwest::Client::new())
+                .await
+                .unwrap();
+
+            assert_eq!(client.server_identity().public_key_bytes(), vec![7u8; 32]);
+        }
+    }
+
+    #[tokio::test]
+    async fn key_config_content_type_rejects_other_media_types() {
+        let base_url = serve_key_config("application/json").await;
+        let err = Client::new_with_http_client(base_url, reqwest::Client::new())
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains("invalid key content type")
+        ));
     }
 
     #[test]
