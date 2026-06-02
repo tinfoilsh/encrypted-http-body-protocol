@@ -104,6 +104,10 @@ public func decryptResponseBody(
             continue
         }
 
+        guard chunkLength <= EHBPConstants.maxChunkLength else {
+            throw EHBPError.invalidResponse("chunk length \(chunkLength) exceeds maximum \(EHBPConstants.maxChunkLength)")
+        }
+
         guard offset + chunkLength <= encryptedData.count else {
             throw EHBPError.invalidResponse("incomplete chunk at offset \(offset)")
         }

@@ -6,8 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 	"golang.org/x/crypto/cryptobyte"
@@ -231,6 +236,51 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 		pk:   pk,
 		sk:   nil, // public key only
 	}, nil
+}
+
+const (
+	// maxKeyConfigSize bounds the key configuration response body read from the
+	// server, preventing a malicious endpoint from forcing a large allocation.
+	maxKeyConfigSize = 1 << 16
+
+	// keyFetchTimeout bounds how long FetchFromServer waits on the key endpoint.
+	keyFetchTimeout = 30 * time.Second
+)
+
+// FetchFromServer fetches and parses the server's public identity from its HPKE key endpoint.
+func FetchFromServer(serverURL string) (*Identity, error) {
+	keysURL, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse server URL: %v", err)
+	}
+	keysURL.Path = protocol.KeysPath
+
+	httpClient := &http.Client{Timeout: keyFetchTimeout}
+	resp, err := httpClient.Get(keysURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch server public key: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	mediaType, _, parseErr := mime.ParseMediaType(contentType)
+	if parseErr != nil {
+		mediaType = strings.ToLower(contentType)
+	}
+	if !strings.EqualFold(mediaType, protocol.KeysMediaType) {
+		return nil, fmt.Errorf("invalid content type: %s", contentType)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyConfigSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	return UnmarshalPublicConfig(body)
 }
 
 // Export returns a JSON representation of the identity

@@ -126,7 +126,7 @@
     </div>
 
     <script type="module">
-        import { createTransport } from '../dist/browser.js';
+        import { Identity, Transport } from '../dist/browser.js';
 
         const serverUrl = 'http://localhost:8443';
 
@@ -135,7 +135,8 @@
 
         async function initializeClient() {
             try {
-                transport = await createTransport(serverUrl);
+                const identity = await Identity.fetchFromServer(serverUrl);
+                transport = new Transport(identity);
                 return true;
             } catch (error) {
                 console.error('Failed to connect:', error.message);

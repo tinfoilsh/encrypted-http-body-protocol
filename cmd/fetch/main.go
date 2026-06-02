@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 )
 
 var (
@@ -32,20 +33,19 @@ func main() {
 		log.Fatalf("URL is required")
 	}
 
-	secureTransport, err := client.NewTransport(url)
+	serverIdent, err := identity.FetchFromServer(url)
 	if err != nil {
-		log.Fatalf("failed to create secure client: %v", err)
+		log.Fatalf("failed to fetch server identity: %v", err)
 	}
 	httpClient := &http.Client{
-		Transport: secureTransport,
+		Transport: client.NewTransport(serverIdent),
 	}
 
-	serverID := secureTransport.ServerIdentity()
 	log.WithFields(log.Fields{
-		"public_key_hex": serverID.MarshalPublicKeyHex(),
-		"hpke_kem":       serverID.KEM().ID(),
-		"hpke_kdf":       serverID.KDF().ID(),
-		"hpke_aead":      serverID.AEAD().ID(),
+		"public_key_hex": serverIdent.MarshalPublicKeyHex(),
+		"hpke_kem":       serverIdent.KEM().ID(),
+		"hpke_kdf":       serverIdent.KDF().ID(),
+		"hpke_aead":      serverIdent.AEAD().ID(),
 	}).Debug("Server Identity")
 
 	var body io.Reader
