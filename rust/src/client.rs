@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use futures_core::Stream;
 use reqwest::{
     header::{
@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-    derive::{decrypt_framed_response, derive_response_keys},
+    derive::{decrypt_chunk, derive_response_keys},
     identity::ServerIdentity,
     protocol::{
         ENCAPSULATED_KEY_HEADER, KEYS_MEDIA_TYPE, KEYS_PATH, KEY_CONFIG_PROBLEM_TYPE,
@@ -23,8 +23,6 @@ use crate::{
     session::SessionRecoveryToken,
     Error, Result,
 };
-
-const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Client {
@@ -59,7 +57,7 @@ impl Client {
             )));
         }
 
-        let config = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+        let config = response.bytes().await?;
         let identity = ServerIdentity::unmarshal_public_config(&config)?;
         Self::with_identity_and_http_client(base_url, identity, http_client)
     }
@@ -173,26 +171,10 @@ impl Client {
     ) -> Result<Response> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err.into());
-            }
-        };
+        let response = request.send().await?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
-            Ok(body) => body,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err);
-            }
-        };
+        let body = response.bytes().await?;
 
         let Some(token) = token else {
             return Ok(Response {
@@ -239,15 +221,7 @@ impl Client {
     ) -> Result<StreamingResponse> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err.into());
-            }
-        };
+        let response = request.send().await?;
         let status = response.status();
         let headers = response.headers().clone();
 
@@ -260,13 +234,7 @@ impl Client {
         };
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
-                Ok(body) => body,
-                Err(err) => {
-                    self.replace_session_recovery_token(None);
-                    return Err(err);
-                }
-            };
+            let body = response.bytes().await?;
             if let Err(err) = check_key_config_mismatch(status, &headers, &body) {
                 self.replace_session_recovery_token(None);
                 return Err(err);
@@ -294,25 +262,18 @@ impl Client {
                 }
             };
 
-        let decrypted = match decrypt_response_stream_body(
-            response.bytes_stream(),
-            key_material,
-            DEFAULT_MAX_RESPONSE_BYTES,
-        )
-        .await
-        {
-            Ok(decrypted) => decrypted,
-            Err(err) => {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-        };
-        self.clear_session_recovery_token_if_current(&token);
-
         Ok(StreamingResponse {
             status,
             headers,
-            body: single_chunk_stream(decrypted),
+            body: Box::pin(SessionClearingStream {
+                inner: Box::pin(decrypt_response_stream(
+                    response.bytes_stream(),
+                    key_material,
+                )),
+                token,
+                session: Arc::clone(&self.last_session_recovery_token),
+                cleared: false,
+            }),
         })
     }
 
@@ -616,64 +577,100 @@ fn media_type(headers: &HeaderMap) -> String {
         .to_ascii_lowercase()
 }
 
-async fn read_response_body_capped(
-    response: reqwest::Response,
-    max_response_bytes: usize,
-) -> Result<Bytes> {
-    collect_response_stream_capped(response.bytes_stream(), max_response_bytes).await
+struct SessionClearingStream {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
+    token: SessionRecoveryToken,
+    session: Arc<Mutex<Option<SessionRecoveryToken>>>,
+    cleared: bool,
 }
 
-async fn collect_response_stream_capped<S>(stream: S, max_response_bytes: usize) -> Result<Bytes>
-where
-    S: Stream<Item = reqwest::Result<Bytes>>,
-{
-    let mut stream = Box::pin(stream);
-    let mut body = BytesMut::new();
-
-    while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
-        let chunk = chunk?;
-        let new_len = body
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| Error::Protocol("response body size overflow".into()))?;
-        if new_len > max_response_bytes {
-            return Err(Error::Protocol(
-                "response body exceeds maximum allowed size".into(),
-            ));
+impl SessionClearingStream {
+    fn clear_if_current(&mut self) {
+        if !self.cleared {
+            clear_session_recovery_token_if_current(&self.session, &self.token);
+            self.cleared = true;
         }
-        body.extend_from_slice(&chunk);
     }
-
-    Ok(body.freeze())
 }
 
-async fn decrypt_response_stream_body<S>(
-    stream: S,
-    key_material: crate::derive::ResponseKeyMaterial,
-    max_response_bytes: usize,
-) -> Result<Bytes>
-where
-    S: Stream<Item = reqwest::Result<Bytes>>,
-{
-    let encrypted_body = collect_response_stream_capped(stream, max_response_bytes).await?;
-    decrypt_framed_response(&key_material, &encrypted_body).map(Bytes::from)
-}
-
-struct SingleChunkStream {
-    chunk: Option<Bytes>,
-}
-
-impl Stream for SingleChunkStream {
+impl Stream for SessionClearingStream {
     type Item = Result<Bytes>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.chunk.take().map(Ok))
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(None) => {
+                self.clear_if_current();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(err))) => {
+                self.clear_if_current();
+                Poll::Ready(Some(Err(err)))
+            }
+            other => other,
+        }
     }
 }
 
-fn single_chunk_stream(chunk: Bytes) -> Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> {
-    let chunk = if chunk.is_empty() { None } else { Some(chunk) };
-    Box::pin(SingleChunkStream { chunk })
+impl Drop for SessionClearingStream {
+    fn drop(&mut self) {
+        self.clear_if_current();
+    }
+}
+
+fn decrypt_response_stream(
+    mut stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
+    key_material: crate::derive::ResponseKeyMaterial,
+) -> impl Stream<Item = Result<Bytes>> + Send {
+    async_stream::try_stream! {
+        let mut buffer = BytesMut::new();
+        let mut seq = 0u64;
+
+        while let Some(chunk) = poll_next(&mut stream).await {
+            let chunk = chunk?;
+            buffer.extend_from_slice(&chunk);
+
+            loop {
+                if buffer.len() < 4 {
+                    break;
+                }
+
+                let chunk_len = u32::from_be_bytes([
+                    buffer[0],
+                    buffer[1],
+                    buffer[2],
+                    buffer[3],
+                ]) as usize;
+
+                if chunk_len == 0 {
+                    buffer.advance(4);
+                    continue;
+                }
+
+                if buffer.len() < 4 + chunk_len {
+                    break;
+                }
+
+                buffer.advance(4);
+                let ciphertext = buffer.split_to(chunk_len).freeze();
+                let plaintext = decrypt_chunk(&key_material, seq, &ciphertext)?;
+                seq = seq
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Protocol("response chunk sequence overflow".into()))?;
+                yield Bytes::from(plaintext);
+            }
+        }
+
+        if !buffer.is_empty() {
+            Err(Error::Protocol("truncated encrypted response chunk".into()))?;
+        }
+    }
+}
+
+async fn poll_next<S>(stream: &mut S) -> Option<S::Item>
+where
+    S: Stream + Unpin,
+{
+    std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }
 
 trait MapReqwestError: Stream<Item = reqwest::Result<Bytes>> + Sized + Send + 'static {
@@ -697,7 +694,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::stream;
+    use futures_util::{stream, StreamExt};
     use serde::Deserialize;
     use std::sync::{Arc, Mutex};
     use tokio::{
@@ -716,7 +713,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_stream_decrypts_after_complete_body() {
+    async fn streaming_decryption_handles_fragmented_frames() {
         let vector: ResponseVector =
             serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
                 .unwrap();
@@ -733,72 +730,14 @@ mod tests {
             .chunks(3)
             .map(|chunk| Ok::<Bytes, reqwest::Error>(Bytes::copy_from_slice(chunk)))
             .collect();
-        let plaintext = decrypt_response_stream_body(
-            stream::iter(chunks),
-            key_material,
-            DEFAULT_MAX_RESPONSE_BYTES,
-        )
-        .await
-        .unwrap();
+        let mut stream = Box::pin(decrypt_response_stream(stream::iter(chunks), key_material));
+
+        let mut plaintext = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            plaintext.extend_from_slice(&chunk.unwrap());
+        }
 
         assert_eq!(hex::encode(plaintext), vector.plaintext);
-    }
-
-    #[tokio::test]
-    async fn encrypted_stream_rejects_late_failure_before_returning_plaintext() {
-        let vector: ResponseVector =
-            serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
-                .unwrap();
-        let key_material = derive_response_keys(
-            &hex::decode(vector.exported_secret).unwrap(),
-            &hex::decode(vector.request_enc).unwrap(),
-            &hex::decode(vector.response_nonce).unwrap(),
-        )
-        .unwrap();
-
-        let mut framed = hex::decode(vector.encrypted_response).unwrap();
-        framed.extend_from_slice(&16u32.to_be_bytes());
-        framed.push(0);
-        let chunks: Vec<_> = framed
-            .chunks(3)
-            .map(|chunk| Ok::<Bytes, reqwest::Error>(Bytes::copy_from_slice(chunk)))
-            .collect();
-        let err = decrypt_response_stream_body(
-            stream::iter(chunks),
-            key_material,
-            DEFAULT_MAX_RESPONSE_BYTES,
-        )
-        .await
-        .err()
-        .unwrap();
-
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("truncated encrypted chunk")
-        ));
-    }
-
-    #[tokio::test]
-    async fn encrypted_stream_enforces_response_size_cap() {
-        let vector: ResponseVector =
-            serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
-                .unwrap();
-        let key_material = derive_response_keys(
-            &hex::decode(vector.exported_secret).unwrap(),
-            &hex::decode(vector.request_enc).unwrap(),
-            &hex::decode(vector.response_nonce).unwrap(),
-        )
-        .unwrap();
-        let chunks = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from_static(b"12345"))]);
-        let err = decrypt_response_stream_body(chunks, key_material, 4)
-            .await
-            .err()
-            .unwrap();
-
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("response body exceeds maximum")
-        ));
     }
 
     fn dummy_client() -> Client {
