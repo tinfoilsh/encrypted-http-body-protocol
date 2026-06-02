@@ -24,6 +24,8 @@ use crate::{
     Error, Result,
 };
 
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct Client {
     base_url: Url,
@@ -57,7 +59,7 @@ impl Client {
             )));
         }
 
-        let config = response.bytes().await?;
+        let config = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
         let identity = ServerIdentity::unmarshal_public_config(&config)?;
         Self::with_identity_and_http_client(base_url, identity, http_client)
     }
@@ -174,7 +176,15 @@ impl Client {
         let response = request.send().await?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = response.bytes().await?;
+        let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
+            Ok(body) => body,
+            Err(err) => {
+                if token.is_some() {
+                    self.replace_session_recovery_token(None);
+                }
+                return Err(err);
+            }
+        };
 
         let Some(token) = token else {
             return Ok(Response {
@@ -234,7 +244,13 @@ impl Client {
         };
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            let body = response.bytes().await?;
+            let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
+                Ok(body) => body,
+                Err(err) => {
+                    self.replace_session_recovery_token(None);
+                    return Err(err);
+                }
+            };
             if let Err(err) = check_key_config_mismatch(status, &headers, &body) {
                 self.replace_session_recovery_token(None);
                 return Err(err);
@@ -577,6 +593,37 @@ fn media_type(headers: &HeaderMap) -> String {
         .to_ascii_lowercase()
 }
 
+async fn read_response_body_capped(
+    response: reqwest::Response,
+    max_response_bytes: usize,
+) -> Result<Bytes> {
+    collect_response_stream_capped(response.bytes_stream(), max_response_bytes).await
+}
+
+async fn collect_response_stream_capped<S>(stream: S, max_response_bytes: usize) -> Result<Bytes>
+where
+    S: Stream<Item = reqwest::Result<Bytes>>,
+{
+    let mut stream = Box::pin(stream);
+    let mut body = BytesMut::new();
+
+    while let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        let chunk = chunk?;
+        let new_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| Error::Protocol("response body size overflow".into()))?;
+        if new_len > max_response_bytes {
+            return Err(Error::Protocol(
+                "response body exceeds maximum allowed size".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body.freeze())
+}
+
 struct SessionClearingStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
     token: SessionRecoveryToken,
@@ -644,6 +691,12 @@ fn decrypt_response_stream(
                 if chunk_len == 0 {
                     buffer.advance(4);
                     continue;
+                }
+
+                if chunk_len > DEFAULT_MAX_RESPONSE_BYTES {
+                    Err(Error::Protocol(
+                        "response chunk exceeds maximum allowed size".into(),
+                    ))?;
                 }
 
                 if buffer.len() < 4 + chunk_len {
@@ -738,6 +791,43 @@ mod tests {
         }
 
         assert_eq!(hex::encode(plaintext), vector.plaintext);
+    }
+
+    #[tokio::test]
+    async fn capped_body_read_rejects_oversized_response() {
+        let chunks = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from_static(b"12345"))]);
+        let err = collect_response_stream_capped(chunks, 4)
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_rejects_oversized_chunk_length() {
+        let key_material = crate::derive::ResponseKeyMaterial {
+            key: [0u8; crate::protocol::AES256_KEY_LENGTH],
+            nonce_base: [0u8; crate::protocol::AES_GCM_NONCE_LENGTH],
+        };
+        // A length prefix declaring a ~4 GiB chunk must be rejected before buffering.
+        let framed = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        let chunks = stream::iter([Ok::<Bytes, reqwest::Error>(framed)]);
+        let mut stream = Box::pin(decrypt_response_stream(chunks, key_material));
+
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
+        ));
     }
 
     fn dummy_client() -> Client {
