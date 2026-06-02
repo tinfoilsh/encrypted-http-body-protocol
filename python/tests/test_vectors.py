@@ -3,11 +3,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ehbp import (
     ServerIdentity,
     SessionRecoveryToken,
     derive_response_keys,
 )
+from ehbp.errors import InvalidInputError
 from ehbp.protocol import (
     AEAD_AES_256_GCM,
     KDF_HKDF_SHA256,
@@ -50,6 +53,11 @@ def test_session_recovery_token_json_shape():
     vector = _load("session-recovery-token.json")
     token = SessionRecoveryToken.from_dict(vector)
     assert json.loads(token.to_json()) == vector
+
+
+def test_session_recovery_token_rejects_malformed_json():
+    with pytest.raises(InvalidInputError):
+        SessionRecoveryToken.from_json("{")
 
 
 def _build_config(public_key: bytes) -> bytes:

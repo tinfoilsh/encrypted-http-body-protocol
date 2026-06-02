@@ -76,7 +76,13 @@ class SessionRecoveryToken:
 
     @classmethod
     def from_json(cls, data: Union[str, bytes]) -> SessionRecoveryToken:
-        return cls.from_dict(json.loads(data))
+        try:
+            decoded = json.loads(data)
+        except (TypeError, ValueError) as err:
+            raise InvalidInputError(f"invalid session recovery token JSON: {err}") from err
+        if not isinstance(decoded, Mapping):
+            raise InvalidInputError("invalid session recovery token: expected JSON object")
+        return cls.from_dict(decoded)
 
     def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
