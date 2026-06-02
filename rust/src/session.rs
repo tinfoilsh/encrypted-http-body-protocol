@@ -14,6 +14,17 @@ pub struct SessionRecoveryToken {
     pub request_enc: Vec<u8>,
 }
 
+struct SensitiveString(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SensitiveString {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
+    }
+}
+
 impl fmt::Debug for SessionRecoveryToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionRecoveryToken")
@@ -94,16 +105,34 @@ impl<'de> Deserialize<'de> for SessionRecoveryToken {
         #[derive(Deserialize)]
         struct Token {
             #[serde(rename = "exportedSecret")]
-            exported_secret: String,
+            exported_secret: SensitiveString,
             #[serde(rename = "requestEnc")]
-            request_enc: String,
+            request_enc: SensitiveString,
         }
 
         let token = Token::deserialize(deserializer)?;
-        let exported_secret =
-            hex::decode(token.exported_secret).map_err(serde::de::Error::custom)?;
-        let request_enc = hex::decode(token.request_enc).map_err(serde::de::Error::custom)?;
-        SessionRecoveryToken::new(exported_secret, request_enc).map_err(serde::de::Error::custom)
+        let exported_secret = Zeroizing::new(
+            hex::decode(token.exported_secret.0.as_bytes()).map_err(serde::de::Error::custom)?,
+        );
+        let request_enc = Zeroizing::new(
+            hex::decode(token.request_enc.0.as_bytes()).map_err(serde::de::Error::custom)?,
+        );
+        if exported_secret.len() != EXPORT_LENGTH {
+            return Err(serde::de::Error::custom(format!(
+                "exported secret must be {EXPORT_LENGTH} bytes, got {}",
+                exported_secret.len()
+            )));
+        }
+        if request_enc.len() != REQUEST_ENC_LENGTH {
+            return Err(serde::de::Error::custom(format!(
+                "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
+                request_enc.len()
+            )));
+        }
+        Ok(Self {
+            exported_secret: exported_secret.to_vec(),
+            request_enc: request_enc.to_vec(),
+        })
     }
 }
 
