@@ -98,7 +98,6 @@ class Client:
         base_url: str,
         *,
         http_client: Optional[httpx.Client] = None,
-        allow_insecure: bool = False,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> Client:
         """Fetch the server key configuration and build a client."""

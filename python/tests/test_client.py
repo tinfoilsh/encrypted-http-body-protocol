@@ -125,13 +125,6 @@ def test_discover_accepts_http_transport_by_default(server: MockServer):
     assert client.server_identity.public_key_bytes() == server.public_key_bytes
 
 
-def test_discover_allows_insecure_when_opted_in(server: MockServer):
-    client = Client.discover(
-        "http://server.example", http_client=server.http_client(), allow_insecure=True
-    )
-    assert client.server_identity.public_key_bytes() == server.public_key_bytes
-
-
 def test_server_identity_rejects_out_of_range_key_id(server: MockServer):
     with pytest.raises(InvalidConfigError):
         ServerIdentity(server.public_key_bytes, key_id=256)
