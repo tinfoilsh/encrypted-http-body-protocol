@@ -173,7 +173,15 @@ impl Client {
     ) -> Result<Response> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = request.send().await?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                if token.is_some() {
+                    self.replace_session_recovery_token(None);
+                }
+                return Err(err.into());
+            }
+        };
         let status = response.status();
         let headers = response.headers().clone();
         let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
@@ -231,7 +239,15 @@ impl Client {
     ) -> Result<StreamingResponse> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = request.send().await?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                if token.is_some() {
+                    self.replace_session_recovery_token(None);
+                }
+                return Err(err.into());
+            }
+        };
         let status = response.status();
         let headers = response.headers().clone();
 
@@ -828,6 +844,26 @@ mod tests {
             err,
             Error::Protocol(message) if message.contains("exceeds maximum allowed size")
         ));
+    }
+
+    #[tokio::test]
+    async fn send_failure_clears_session_recovery_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        let result = client.post("/secure").unwrap().body("secret").send().await;
+
+        assert!(result.is_err());
+        assert!(client.get_session_recovery_token().is_none());
     }
 
     fn dummy_client() -> Client {
