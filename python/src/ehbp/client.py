@@ -4,7 +4,7 @@ The client encrypts request bodies to the server's HPKE public key and decrypts
 the bound response body. It fails closed on any missing/invalid response nonce
 and enforces several defensive constraints (single configured origin, no
 credentials in URLs, reserved protocol headers cannot be overridden, redirects
-disabled, response size capped, key discovery over TLS).
+disabled, response size capped).
 """
 
 from __future__ import annotations
@@ -101,18 +101,8 @@ class Client:
         allow_insecure: bool = False,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> Client:
-        """Fetch the server key configuration and build a client.
-
-        The discovery fetch authenticates the server public key, so it requires
-        TLS by default. Pass ``allow_insecure=True`` only when the transport is
-        already a trusted channel (SPEC Section 7.3).
-        """
+        """Fetch the server key configuration and build a client."""
         base = _normalize_base_url(base_url)
-        if base.scheme != "https" and not allow_insecure:
-            raise InvalidInputError(
-                "refusing to fetch key configuration over an insecure transport; "
-                "use https or pass allow_insecure=True with a trusted channel"
-            )
         http = http_client or _default_http_client()
         response = http.get(base.join(KEYS_PATH))
         if response.status_code // 100 != 2:

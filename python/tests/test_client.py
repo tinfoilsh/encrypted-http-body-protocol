@@ -114,9 +114,9 @@ def test_discover_fetches_config_over_mock_transport(server: MockServer):
     assert response.content == b"echo:discovered"
 
 
-def test_discover_refuses_insecure_transport_by_default(server: MockServer):
-    with pytest.raises(InvalidInputError):
-        Client.discover("http://server.example", http_client=server.http_client())
+def test_discover_accepts_http_transport_by_default(server: MockServer):
+    client = Client.discover("http://server.example", http_client=server.http_client())
+    assert client.server_identity.public_key_bytes() == server.public_key_bytes
 
 
 def test_discover_allows_insecure_when_opted_in(server: MockServer):
