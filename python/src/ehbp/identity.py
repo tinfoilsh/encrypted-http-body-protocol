@@ -22,6 +22,7 @@ from .protocol import (
 from .session import SessionRecoveryToken
 
 _CIPHER_SUITE_ENTRY_SIZE = 4
+_MAX_KEY_ID = 0xFF
 
 
 def _new_suite() -> CipherSuite:
@@ -60,7 +61,9 @@ class ServerIdentity:
         except Exception as err:  # noqa: BLE001 - pyhpke raises library-specific errors
             raise InvalidConfigError(f"invalid X25519 public key: {err}") from err
         self._public_key_bytes = bytes(public_key)
-        self._key_id = key_id & 0xFF
+        if not 0 <= key_id <= _MAX_KEY_ID:
+            raise InvalidConfigError(f"key id must be between 0 and {_MAX_KEY_ID}, got {key_id}")
+        self._key_id = key_id
 
     @classmethod
     def from_public_key_bytes(cls, public_key: bytes) -> ServerIdentity:

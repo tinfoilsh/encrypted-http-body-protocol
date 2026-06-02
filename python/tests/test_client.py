@@ -4,7 +4,12 @@ import pytest
 
 from conftest import DEFAULT_BASE_URL, MockServer
 from ehbp import Client, ServerIdentity
-from ehbp.errors import InvalidInputError, KeyConfigMismatchError, ProtocolError
+from ehbp.errors import (
+    InvalidConfigError,
+    InvalidInputError,
+    KeyConfigMismatchError,
+    ProtocolError,
+)
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
 
 
@@ -124,3 +129,8 @@ def test_discover_allows_insecure_when_opted_in(server: MockServer):
         "http://server.example", http_client=server.http_client(), allow_insecure=True
     )
     assert client.server_identity.public_key_bytes() == server.public_key_bytes
+
+
+def test_server_identity_rejects_out_of_range_key_id(server: MockServer):
+    with pytest.raises(InvalidConfigError):
+        ServerIdentity(server.public_key_bytes, key_id=256)
