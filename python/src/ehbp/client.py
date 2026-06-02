@@ -104,7 +104,7 @@ class Client:
         """Fetch the server key configuration and build a client."""
         base = _normalize_base_url(base_url)
         http = http_client or _default_http_client()
-        response = http.get(base.join(KEYS_PATH))
+        response = http.get(base.join(KEYS_PATH), follow_redirects=False)
         if response.status_code // 100 != 2:
             raise ProtocolError(
                 f"server returned status {response.status_code} while fetching key configuration"
@@ -192,7 +192,9 @@ class Client:
         encrypted = self._identity.encrypt_request_body(plaintext)
 
         if encrypted is None:
-            with self._http.stream(method, url, headers=request_headers, content=None) as resp:
+            with self._http.stream(
+                method, url, headers=request_headers, content=None, follow_redirects=False
+            ) as resp:
                 raw = self._read_body_capped(resp)
                 return Response(resp.status_code, resp.headers, raw)
 
@@ -201,7 +203,11 @@ class Client:
         self._set_token(token)
         try:
             with self._http.stream(
-                method, url, headers=request_headers, content=_single_chunk_body(encrypted.body)
+                method,
+                url,
+                headers=request_headers,
+                content=_single_chunk_body(encrypted.body),
+                follow_redirects=False,
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers
@@ -256,7 +262,9 @@ class Client:
         encrypted = self._identity.encrypt_request_body(plaintext)
 
         if encrypted is None:
-            with self._http.stream(method, url, headers=request_headers, content=None) as resp:
+            with self._http.stream(
+                method, url, headers=request_headers, content=None, follow_redirects=False
+            ) as resp:
                 yield StreamingResponse(resp.status_code, resp.headers, resp.iter_bytes())
             return
 
@@ -265,7 +273,11 @@ class Client:
         self._set_token(token)
         try:
             with self._http.stream(
-                method, url, headers=request_headers, content=_single_chunk_body(encrypted.body)
+                method,
+                url,
+                headers=request_headers,
+                content=_single_chunk_body(encrypted.body),
+                follow_redirects=False,
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers

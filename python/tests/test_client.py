@@ -1,5 +1,6 @@
 """Client behavior tests against the in-process EHBP mock server."""
 
+import httpx
 import pytest
 
 from conftest import DEFAULT_BASE_URL, MockServer
@@ -134,3 +135,19 @@ def test_discover_allows_insecure_when_opted_in(server: MockServer):
 def test_server_identity_rejects_out_of_range_key_id(server: MockServer):
     with pytest.raises(InvalidConfigError):
         ServerIdentity(server.public_key_bytes, key_id=256)
+
+
+def test_custom_client_cannot_reenable_redirects(server: MockServer):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/redirect":
+            return httpx.Response(302, headers={"location": "https://server.example/target"})
+        return httpx.Response(200, content=b"followed")
+
+    permissive = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    client = Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=permissive,
+    )
+    response = client.get("/redirect")
+    assert response.status_code == 302
