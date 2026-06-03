@@ -21,6 +21,7 @@ from .errors import (
 )
 from .identity import EncryptedRequest, ServerIdentity
 from .session import SessionRecoveryToken
+from .transport import AsyncEHBPTransport, EHBPTransport
 
 __version__ = "0.2.1"
 
@@ -28,6 +29,8 @@ __all__ = [
     "Client",
     "Response",
     "StreamingResponse",
+    "EHBPTransport",
+    "AsyncEHBPTransport",
     "ServerIdentity",
     "EncryptedRequest",
     "SessionRecoveryToken",
