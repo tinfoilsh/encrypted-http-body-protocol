@@ -23,7 +23,7 @@ from .identity import EncryptedRequest, ServerIdentity
 from .session import SessionRecoveryToken
 from .transport import AsyncEHBPTransport, EHBPTransport
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "Client",
