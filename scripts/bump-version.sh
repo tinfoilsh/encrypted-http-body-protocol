@@ -20,7 +20,7 @@ fi
 VERSION="$1"
 
 # Reject anything that is not valid SemVer 2.0.0 (https://semver.org) so a
-# malformed version is never written. grep uses POSIX ERE, which lacks the
+# malformed version is never written. Bash's =~ uses POSIX ERE, which lacks the
 # non-capturing groups of the canonical regex, so the grammar is spelled out:
 # numeric identifiers forbid leading zeros, and the optional pre-release and
 # build-metadata sections may appear together (e.g. 1.2.3-rc.1+build.5).
@@ -28,7 +28,11 @@ num='(0|[1-9][0-9]*)'
 pre='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
 build='[0-9A-Za-z-]+'
 semver="^${num}\.${num}\.${num}(-${pre}(\.${pre})*)?(\+${build}(\.${build})*)?\$"
-if ! printf '%s' "$VERSION" | grep -Eq "$semver"; then
+# Match the whole value with =~; a line-oriented matcher like grep accepts a
+# multiline value as long as any one line matches, smuggling garbage past
+# validation. Reject embedded newlines outright too, since POSIX $ can also
+# match just before a trailing newline.
+if [[ "$VERSION" == *$'\n'* ]] || ! [[ "$VERSION" =~ $semver ]]; then
   echo "error: '$VERSION' is not a valid semantic version (expected e.g. 0.2.1)" >&2
   exit 1
 fi
