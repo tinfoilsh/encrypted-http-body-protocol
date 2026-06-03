@@ -415,6 +415,38 @@ describe('Session Recovery Token', () => {
       await assert.rejects(() => decrypted.text(), /maximum allowed size/);
     });
 
+    it('should cancel the upstream body when a chunk exceeds the maximum size', async () => {
+      const token: SessionRecoveryToken = {
+        exportedSecret: new Uint8Array(32),
+        requestEnc: new Uint8Array(32),
+      };
+
+      let upstreamCancelled = false;
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Oversized length prefix (~4 GiB); a real attacker keeps streaming.
+          controller.enqueue(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x00]));
+        },
+        cancel() {
+          upstreamCancelled = true;
+        },
+      });
+
+      const nonce = bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH));
+      const response = new Response(upstream, {
+        status: 200,
+        headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+      });
+
+      const decrypted = await decryptResponseWithToken(response, token);
+      await assert.rejects(() => decrypted.text(), /maximum allowed size/);
+      assert.strictEqual(
+        upstreamCancelled,
+        true,
+        'upstream body should be cancelled on oversized chunk',
+      );
+    });
+
     it('should fail decryption with a wrong token', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const request = new Request('https://server.test/api', {
