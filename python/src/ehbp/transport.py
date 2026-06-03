@@ -38,6 +38,28 @@ async def _single_chunk_body_async(body: bytes) -> AsyncIterator[bytes]:
     yield body
 
 
+def _read_capped(stream: httpx.SyncByteStream, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in stream:
+        total += len(chunk)
+        if total > max_bytes:
+            raise ProtocolError("response body exceeds maximum allowed size")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _aread_capped(stream: httpx.AsyncByteStream, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in stream:
+        total += len(chunk)
+        if total > max_bytes:
+            raise ProtocolError("response body exceeds maximum allowed size")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _encrypted_headers(request: httpx.Request, encapsulated_key: bytes) -> httpx.Headers:
     headers = httpx.Headers(request.headers)
     for name in _FRAMING_HEADERS:
@@ -137,6 +159,7 @@ class EHBPTransport(httpx.BaseTransport):
             url=request.url,
             headers=_encrypted_headers(request, encrypted.encapsulated_key),
             content=single_chunk_body(encrypted.body),
+            extensions=request.extensions,
         )
         response = self._inner.handle_request(enc_request)
         return self._decrypt_response(response, encrypted.token)
@@ -145,8 +168,12 @@ class EHBPTransport(httpx.BaseTransport):
         self, response: httpx.Response, token: SessionRecoveryToken
     ) -> httpx.Response:
         if RESPONSE_NONCE_HEADER not in response.headers:
-            body = b"".join(cast(httpx.SyncByteStream, response.stream))
-            response.close()
+            try:
+                body = _read_capped(
+                    cast(httpx.SyncByteStream, response.stream), self._max_response_bytes
+                )
+            finally:
+                response.close()
             raise_for_key_config_mismatch(response.status_code, response.headers, body)
             raise ProtocolError(f"missing {RESPONSE_NONCE_HEADER} header")
 
@@ -202,6 +229,7 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
             url=request.url,
             headers=_encrypted_headers(request, encrypted.encapsulated_key),
             content=_single_chunk_body_async(encrypted.body),
+            extensions=request.extensions,
         )
         response = await self._inner.handle_async_request(enc_request)
         return await self._decrypt_response(response, encrypted.token)
@@ -210,11 +238,13 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
         self, response: httpx.Response, token: SessionRecoveryToken
     ) -> httpx.Response:
         if RESPONSE_NONCE_HEADER not in response.headers:
-            chunks = [chunk async for chunk in cast(httpx.AsyncByteStream, response.stream)]
-            await response.aclose()
-            raise_for_key_config_mismatch(
-                response.status_code, response.headers, b"".join(chunks)
-            )
+            try:
+                body = await _aread_capped(
+                    cast(httpx.AsyncByteStream, response.stream), self._max_response_bytes
+                )
+            finally:
+                await response.aclose()
+            raise_for_key_config_mismatch(response.status_code, response.headers, body)
             raise ProtocolError(f"missing {RESPONSE_NONCE_HEADER} header")
 
         nonce = response_nonce(response.headers)

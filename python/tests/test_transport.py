@@ -90,6 +90,20 @@ def test_oversized_response_chunk_is_rejected(server: MockServer):
         client.post(URL, content=b"this response will exceed the tiny cap")
 
 
+def test_missing_nonce_response_body_is_capped(make_server):
+    server = make_server(mode="strip_nonce")
+    client = _sync_client(server, max_response_bytes=4)
+    with client, pytest.raises(ProtocolError) as excinfo:
+        client.post(URL, content=b"payload")
+    assert "exceeds maximum allowed size" in str(excinfo.value)
+
+
+def test_encrypted_request_preserves_extensions(server: MockServer):
+    with _sync_client(server) as client:
+        client.post(URL, content=b"payload")
+    assert "timeout" in server.last_request.extensions
+
+
 def test_async_encrypted_round_trip(server: MockServer):
     async def run() -> httpx.Response:
         async with _async_client(server) as client:
@@ -135,3 +149,24 @@ def test_async_key_config_mismatch_raises_dedicated_error(make_server):
 
     with pytest.raises(KeyConfigMismatchError):
         asyncio.run(run())
+
+
+def test_async_missing_nonce_response_body_is_capped(make_server):
+    server = make_server(mode="strip_nonce")
+
+    async def run() -> None:
+        async with _async_client(server, max_response_bytes=4) as client:
+            await client.post(URL, content=b"payload")
+
+    with pytest.raises(ProtocolError) as excinfo:
+        asyncio.run(run())
+    assert "exceeds maximum allowed size" in str(excinfo.value)
+
+
+def test_async_encrypted_request_preserves_extensions(server: MockServer):
+    async def run() -> None:
+        async with _async_client(server) as client:
+            await client.post(URL, content=b"payload")
+
+    asyncio.run(run())
+    assert "timeout" in server.last_request.extensions
