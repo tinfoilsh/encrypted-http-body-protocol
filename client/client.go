@@ -36,10 +36,12 @@ type Option func(*Transport)
 // WithHTTPClient sets the underlying HTTP client used to send encrypted
 // requests (and, for NewTransport, to fetch the server key configuration). It
 // lets callers compose EHBP with a TLS-pinned or otherwise customized
-// http.Client.
+// http.Client. A nil client is ignored so the default remains in place.
 func WithHTTPClient(c *http.Client) Option {
 	return func(t *Transport) {
-		t.httpClient = c
+		if c != nil {
+			t.httpClient = c
+		}
 	}
 }
 

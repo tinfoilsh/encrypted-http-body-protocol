@@ -200,6 +200,19 @@ func TestWithHTTPClient(t *testing.T) {
 	assert.GreaterOrEqual(t, rec.count, 1, "injected http client must be used to send encrypted requests")
 }
 
+func TestWithHTTPClientIgnoresNil(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	// A nil client must not null out the default, which would panic on use.
+	transport, err := NewTransportWithIdentity(pubIdentity, WithHTTPClient(nil))
+	assert.NoError(t, err)
+	assert.NotNil(t, transport.httpClient)
+}
+
 func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	identityA, err := identity.NewIdentity()
 	assert.NoError(t, err)
