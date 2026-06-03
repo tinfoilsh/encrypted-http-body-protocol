@@ -441,6 +441,10 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 	return DecryptResponseWithToken(resp, token)
 }
 
+// maxResponseChunkBytes bounds a single framed response chunk so a malicious or
+// tampered length prefix cannot force an unbounded allocation on the client.
+const maxResponseChunkBytes = 64 << 20
+
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
 type DerivedStreamingDecryptReader struct {
 	reader io.Reader
@@ -476,6 +480,9 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
 	if chunkLen == 0 {
 		return r.Read(p) // Skip empty chunks
+	}
+	if chunkLen > maxResponseChunkBytes {
+		return 0, fmt.Errorf("encrypted response chunk exceeds maximum allowed size")
 	}
 
 	// Read encrypted chunk

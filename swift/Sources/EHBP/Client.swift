@@ -234,6 +234,10 @@ public final class EHBPClient: @unchecked Sendable {
                                 continue
                             }
 
+                            if chunkLength > EHBPConstants.maxResponseChunkBytes {
+                                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+                            }
+
                             guard buffer.count >= 4 + chunkLength else {
                                 break
                             }

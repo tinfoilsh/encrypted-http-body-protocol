@@ -151,10 +151,13 @@ class FrameDecryptor:
     number, matching the framing rules in SPEC Section 4.3.
     """
 
-    def __init__(self, km: ResponseKeyMaterial) -> None:
+    def __init__(
+        self, km: ResponseKeyMaterial, max_chunk_length: int = MAX_CHUNK_LENGTH
+    ) -> None:
         self._km = km
         self._buffer = bytearray()
         self._seq = 0
+        self._max_chunk_length = max_chunk_length
 
     def push(self, data: bytes) -> list[bytes]:
         self._buffer += data
@@ -167,6 +170,8 @@ class FrameDecryptor:
             if chunk_len == 0:
                 del self._buffer[:LENGTH_PREFIX_SIZE]
                 continue
+            if chunk_len > self._max_chunk_length:
+                raise ProtocolError("response chunk exceeds maximum allowed size")
             if len(self._buffer) < LENGTH_PREFIX_SIZE + chunk_len:
                 break
 
