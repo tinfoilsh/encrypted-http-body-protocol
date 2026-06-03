@@ -30,10 +30,32 @@ type problemDetails struct {
 
 var _ http.RoundTripper = (*Transport)(nil)
 
-func NewTransport(server string) (*Transport, error) {
+// Option configures a Transport.
+type Option func(*Transport)
+
+// WithHTTPClient sets the underlying HTTP client used to send encrypted
+// requests (and, for NewTransport, to fetch the server key configuration). It
+// lets callers compose EHBP with a TLS-pinned or otherwise customized
+// http.Client.
+func WithHTTPClient(c *http.Client) Option {
+	return func(t *Transport) {
+		t.httpClient = c
+	}
+}
+
+func applyOptions(t *Transport, opts []Option) {
+	for _, opt := range opts {
+		if opt != nil {
+			opt(t)
+		}
+	}
+}
+
+func NewTransport(server string, opts ...Option) (*Transport, error) {
 	t := &Transport{
 		httpClient: &http.Client{},
 	}
+	applyOptions(t, opts)
 
 	if err := t.syncServerPublicKey(server); err != nil {
 		return nil, fmt.Errorf("failed to sync server public key: %v", err)
@@ -44,16 +66,34 @@ func NewTransport(server string) (*Transport, error) {
 
 // NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
 // The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
-func NewTransportWithConfig(server string, hpkeConfig []byte) (*Transport, error) {
+func NewTransportWithConfig(server string, hpkeConfig []byte, opts ...Option) (*Transport, error) {
 	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
 	}
 
-	return &Transport{
+	t := &Transport{
 		serverIdentity: serverIdentity,
 		httpClient:     &http.Client{},
-	}, nil
+	}
+	applyOptions(t, opts)
+	return t, nil
+}
+
+// NewTransportWithIdentity creates a Transport from an already-trusted server
+// identity, for example one built from an attestation-verified HPKE public key
+// via identity.FromPublicKeyHex. No network request is made to fetch keys.
+func NewTransportWithIdentity(serverIdentity *identity.Identity, opts ...Option) (*Transport, error) {
+	if serverIdentity == nil {
+		return nil, fmt.Errorf("server identity is required")
+	}
+
+	t := &Transport{
+		serverIdentity: serverIdentity,
+		httpClient:     &http.Client{},
+	}
+	applyOptions(t, opts)
+	return t, nil
 }
 
 func (t *Transport) syncServerPublicKey(server string) error {

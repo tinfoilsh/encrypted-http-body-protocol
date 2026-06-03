@@ -219,6 +219,39 @@ func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
 	}
 }
 
+func TestFromPublicKeyHex(t *testing.T) {
+	original, err := NewIdentity()
+	require.NoError(t, err)
+
+	pub, err := FromPublicKeyHex(original.MarshalPublicKeyHex())
+	require.NoError(t, err)
+
+	assert.Equal(t, original.pk.Bytes(), pub.pk.Bytes())
+	assert.Equal(t, uint16(0x0020), pub.kem.ID())
+	assert.Equal(t, uint16(0x0001), pub.kdf.ID())
+	assert.Equal(t, uint16(0x0002), pub.aead.ID())
+	assert.Nil(t, pub.sk) // public key only
+}
+
+func TestFromPublicKeyBytes(t *testing.T) {
+	original, err := NewIdentity()
+	require.NoError(t, err)
+
+	pub, err := FromPublicKeyBytes(original.MarshalPublicKey())
+	require.NoError(t, err)
+
+	assert.Equal(t, original.pk.Bytes(), pub.pk.Bytes())
+	assert.Nil(t, pub.sk)
+}
+
+func TestFromPublicKeyErrorCases(t *testing.T) {
+	_, err := FromPublicKeyHex("not-hex")
+	assert.Error(t, err)
+
+	_, err = FromPublicKeyBytes([]byte{0x01, 0x02, 0x03}) // wrong length for X25519
+	assert.Error(t, err)
+}
+
 func TestIdentityStoreStruct(t *testing.T) {
 	// Test that IdentityStore can be marshaled/unmarshaled
 	identity, err := NewIdentity()

@@ -111,6 +111,95 @@ func TestSecureClient(t *testing.T) {
 	})
 }
 
+func TestNewTransportWithIdentity(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	middleware := serverIdentity.Middleware()
+	mux := http.NewServeMux()
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("Hello, " + string(body)))
+	})))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Build a public-only identity from the server's attested public key, with
+	// no network fetch of the key configuration.
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	httpClient := &http.Client{Transport: transport}
+	req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
+	assert.NoError(t, err)
+
+	resp, err := httpClient.Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, test", string(body))
+}
+
+func TestNewTransportWithIdentityRequiresIdentity(t *testing.T) {
+	_, err := NewTransportWithIdentity(nil)
+	assert.Error(t, err)
+}
+
+type recordingRoundTripper struct {
+	inner http.RoundTripper
+	count int
+}
+
+func (r *recordingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.count++
+	return r.inner.RoundTrip(req)
+}
+
+func TestWithHTTPClient(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	middleware := serverIdentity.Middleware()
+	mux := http.NewServeMux()
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write([]byte("Hello, " + string(body)))
+	})))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	rec := &recordingRoundTripper{inner: http.DefaultTransport}
+	transport, err := NewTransportWithIdentity(pubIdentity, WithHTTPClient(&http.Client{Transport: rec}))
+	assert.NoError(t, err)
+
+	httpClient := &http.Client{Transport: transport}
+	req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
+	assert.NoError(t, err)
+
+	resp, err := httpClient.Do(req)
+	assert.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, test", string(body))
+	assert.GreaterOrEqual(t, rec.count, 1, "injected http client must be used to send encrypted requests")
+}
+
 func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	identityA, err := identity.NewIdentity()
 	assert.NoError(t, err)
