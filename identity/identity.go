@@ -64,6 +64,36 @@ func NewIdentity() (*Identity, error) {
 	}, nil
 }
 
+// FromPublicKeyBytes builds a public-key-only identity from a raw HPKE public
+// key using the default suite (DHKEM-X25519-HKDF-SHA256 / HKDF-SHA256 /
+// AES-256-GCM). The resulting identity can encrypt requests but never decrypt.
+func FromPublicKeyBytes(publicKey []byte) (*Identity, error) {
+	kem := hpke.DHKEM(ecdh.X25519())
+
+	pk, err := kem.NewPublicKey(publicKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key: %w", err)
+	}
+
+	return &Identity{
+		pk:   pk,
+		sk:   nil,
+		kem:  kem,
+		kdf:  hpke.HKDFSHA256(),
+		aead: hpke.AES256GCM(),
+	}, nil
+}
+
+// FromPublicKeyHex builds a public-key-only identity from a hex-encoded HPKE
+// public key. See FromPublicKeyBytes.
+func FromPublicKeyHex(publicKeyHex string) (*Identity, error) {
+	raw, err := hex.DecodeString(publicKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public key hex: %w", err)
+	}
+	return FromPublicKeyBytes(raw)
+}
+
 // FromFile loads an identity from a file or creates a new one if it doesn't exist
 func FromFile(filename string) (*Identity, error) {
 	var i *Identity
