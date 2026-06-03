@@ -1018,3 +1018,16 @@ func TestDerivedStreamingDecryptReaderClose(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+
+func TestDerivedStreamingDecryptReaderRejectsOversizedChunk(t *testing.T) {
+	// A 4-byte length prefix declaring a ~4 GiB chunk must be rejected before the
+	// reader allocates a buffer for the unauthenticated, attacker-controlled length.
+	framed := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	reader := &DerivedStreamingDecryptReader{
+		reader: bytes.NewReader(framed),
+	}
+
+	_, err := reader.Read(make([]byte, 16))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maximum allowed size")
+}

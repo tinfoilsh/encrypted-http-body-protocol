@@ -71,3 +71,13 @@ def test_streaming_decryptor_handles_fragmented_frames():
             out += chunk
     decryptor.finish()
     assert bytes(out) == b"abcdefgh"
+
+
+def test_streaming_decryptor_rejects_oversized_chunk_length():
+    km = _key_material()
+    decryptor = FrameDecryptor(km, max_chunk_length=16)
+    # A length prefix declaring a 1 MiB chunk must be rejected before buffering
+    # the (unauthenticated) chunk body, even if no body bytes have arrived yet.
+    oversized_prefix = (1 << 20).to_bytes(4, "big")
+    with pytest.raises(ProtocolError):
+        decryptor.push(oversized_prefix)

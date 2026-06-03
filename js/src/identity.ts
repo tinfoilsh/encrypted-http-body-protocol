@@ -389,6 +389,8 @@ export async function decryptResponseWithToken(
   });
 }
 
+const MAX_RESPONSE_CHUNK_BYTES = 64 * 1024 * 1024;
+
 function createDecryptStream(
   body: ReadableStream<Uint8Array>,
   km: ResponseKeyMaterial,
@@ -399,14 +401,27 @@ function createDecryptStream(
 
   return new ReadableStream({
     async pull(controller) {
+      // Erroring the output stream does not invoke the cancel() handler below,
+      // so the upstream body must be cancelled explicitly; otherwise a rejected
+      // (e.g. oversized) chunk leaves the underlying response downloading.
+      const fail = (error: Error) => {
+        controller.error(error);
+        reader.cancel(error).catch(() => {});
+      };
+
       while (true) {
         if (buffer.length >= 4) {
           const chunkLength =
-            (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+            ((buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3]) >>> 0;
 
           if (chunkLength === 0) {
             buffer = buffer.slice(4);
             continue;
+          }
+
+          if (chunkLength > MAX_RESPONSE_CHUNK_BYTES) {
+            fail(new ProtocolError('response chunk exceeds maximum allowed size'));
+            return;
           }
 
           if (buffer.length >= 4 + chunkLength) {
@@ -418,7 +433,7 @@ function createDecryptStream(
               controller.enqueue(plaintext);
               return;
             } catch (error) {
-              controller.error(new DecryptionError(
+              fail(new DecryptionError(
                 `Decryption failed at chunk ${seq - 1}`,
                 { cause: error }
               ));

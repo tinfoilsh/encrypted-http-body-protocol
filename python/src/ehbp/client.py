@@ -301,7 +301,7 @@ class Client:
     def _decrypt_stream(
         self, resp: httpx.Response, token: SessionRecoveryToken, key_material: Any
     ) -> Iterator[bytes]:
-        decryptor = FrameDecryptor(key_material)
+        decryptor = FrameDecryptor(key_material, self._max_response_bytes)
         try:
             for chunk in resp.iter_bytes():
                 yield from decryptor.push(chunk)

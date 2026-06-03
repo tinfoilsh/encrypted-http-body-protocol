@@ -55,4 +55,8 @@ public enum EHBPConstants {
 
     /// Label for deriving response nonce
     public static let responseNonceLabel = "nonce"
+
+    /// Maximum size of a single framed response chunk the client will buffer
+    /// (64 MiB). Bounds memory from an attacker-controlled length prefix.
+    public static let maxResponseChunkBytes = 64 * 1024 * 1024
 }

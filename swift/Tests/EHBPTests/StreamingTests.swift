@@ -348,4 +348,40 @@ final class StreamingTests: XCTestCase {
         let decrypted = try decryptChunk(keyMaterial: keyMaterial, seq: 0, ciphertext: ciphertext)
         XCTAssertEqual(decrypted, plaintext)
     }
+
+    /// Mirrors the requestStream cap in Client.swift: a length prefix larger than
+    /// the maximum chunk size must be rejected before buffering the chunk body.
+    func testStreamingRejectsOversizedChunkLength() throws {
+        // Length prefix declaring a ~4 GiB chunk (0xFFFFFFFF).
+        var buffer: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF]
+
+        func parseFramedChunks() throws {
+            while buffer.count >= 4 {
+                let chunkLength = Int(buffer[0]) << 24 |
+                                  Int(buffer[1]) << 16 |
+                                  Int(buffer[2]) << 8 |
+                                  Int(buffer[3])
+
+                if chunkLength == 0 {
+                    buffer.removeFirst(4)
+                    continue
+                }
+
+                if chunkLength > EHBPConstants.maxResponseChunkBytes {
+                    throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+                }
+
+                guard buffer.count >= 4 + chunkLength else {
+                    break
+                }
+                buffer.removeFirst(4 + chunkLength)
+            }
+        }
+
+        XCTAssertThrowsError(try parseFramedChunks()) { error in
+            guard case EHBPError.invalidResponse = error else {
+                return XCTFail("expected invalidResponse, got \(error)")
+            }
+        }
+    }
 }
