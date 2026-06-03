@@ -18,24 +18,30 @@ from typing import Any, Optional, Union
 
 import httpx
 
+from ._http import (
+    DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_TIMEOUT,
+)
+from ._http import (
+    raise_for_key_config_mismatch as _raise_for_key_config_mismatch,
+)
+from ._http import (
+    response_nonce as _response_nonce,
+)
+from ._http import (
+    single_chunk_body as _single_chunk_body,
+)
 from .derive import FrameDecryptor, derive_response_keys
-from .errors import InvalidInputError, KeyConfigMismatchError, ProtocolError
+from .errors import InvalidInputError, ProtocolError
 from .identity import ServerIdentity
 from .protocol import (
     ENCAPSULATED_KEY_HEADER,
-    KEY_CONFIG_PROBLEM_TYPE,
     KEYS_MEDIA_TYPE,
     KEYS_PATH,
-    PROBLEM_JSON_MEDIA_TYPE,
     RESPONSE_NONCE_HEADER,
-    RESPONSE_NONCE_LENGTH,
 )
 from .session import SessionRecoveryToken
 
-DEFAULT_TIMEOUT = 30.0
-DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
-
-_KEY_CONFIG_MISMATCH_STATUS = 422
 _RESERVED_REQUEST_HEADERS = frozenset(
     {
         "content-length",
@@ -375,12 +381,6 @@ def _as_bytes(body: Body) -> bytes:
     raise InvalidInputError("body must be bytes, str, or None")
 
 
-def _single_chunk_body(body: bytes) -> Iterator[bytes]:
-    # Yielding from an iterator makes httpx use chunked transfer-encoding and
-    # omit Content-Length, as required for encrypted bodies (SPEC Section 4.1).
-    yield body
-
-
 def _normalize_base_url(raw: Union[str, httpx.URL]) -> httpx.URL:
     url = httpx.URL(raw)
     if not url.host:
@@ -402,43 +402,3 @@ def _origin(url: httpx.URL) -> tuple[str, Optional[str], int]:
 
 def _same_origin(left: httpx.URL, right: httpx.URL) -> bool:
     return _origin(left) == _origin(right)
-
-
-def _media_type(headers: httpx.Headers) -> str:
-    raw = headers.get("content-type", "")
-    return raw.split(";", 1)[0].strip().lower()
-
-
-def _raise_for_key_config_mismatch(
-    status: int, headers: httpx.Headers, body: bytes
-) -> None:
-    if status != _KEY_CONFIG_MISMATCH_STATUS:
-        return
-    if _media_type(headers) != PROBLEM_JSON_MEDIA_TYPE:
-        return
-    try:
-        problem = json.loads(body)
-    except (ValueError, TypeError):
-        return
-    if isinstance(problem, dict) and problem.get("type") == KEY_CONFIG_PROBLEM_TYPE:
-        title = problem.get("title")
-        if not isinstance(title, str):
-            title = "key configuration mismatch"
-        raise KeyConfigMismatchError(title)
-
-
-def _response_nonce(headers: httpx.Headers) -> bytes:
-    values = headers.get_list(RESPONSE_NONCE_HEADER)
-    if not values:
-        raise ProtocolError(f"missing {RESPONSE_NONCE_HEADER} header")
-    if len(values) > 1:
-        raise ProtocolError(f"multiple {RESPONSE_NONCE_HEADER} headers")
-    try:
-        nonce = bytes.fromhex(values[0].strip())
-    except ValueError as err:
-        raise ProtocolError(f"invalid response nonce header: {err}") from err
-    if len(nonce) != RESPONSE_NONCE_LENGTH:
-        raise ProtocolError(
-            f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}"
-        )
-    return nonce
