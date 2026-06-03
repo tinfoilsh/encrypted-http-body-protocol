@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tinfoil-ehbp"
-version = "0.2.2"
+version = "0.2.3"
 description = "Python client for the encrypted HTTP body protocol"
 license = "MIT"
 requires-python = ">=3.9"
