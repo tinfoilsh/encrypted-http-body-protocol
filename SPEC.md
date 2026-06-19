@@ -79,7 +79,13 @@ Response encryption uses keys derived from the request's HPKE context, providing
 
 Both client and server derive response keys as follows:
 
-The derivation follows OHTTP (RFC 9458) exactly:
+The request HPKE context is established with:
+
+```
+enc, context = SetupBaseS(server_public_key, "ehbp request")
+```
+
+The derivation then follows OHTTP (RFC 9458) exactly:
 
 1. **Export secret from HPKE context:**
    ```
@@ -87,7 +93,7 @@ The derivation follows OHTTP (RFC 9458) exactly:
    ```
 
    Where:
-   - `context` is the HPKE context (opener on server, sealer on client)
+   - `context` is the HPKE context established above (opener on server, sealer on client)
    - `Nk` = 32 (AES-256 key size)
 
 2. **Generate response nonce:**
@@ -132,7 +138,7 @@ This derivation ensures:
 - Key acquisition: GET `/.well-known/hpke-keys` and parse the first `key_config` with Content-Type `application/ohttp-keys`.
 - Outbound request:
 
-  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key and stream‑encrypt using the chunk framing in Section 4.3 of this document. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length. Retain the HPKE sender context for response decryption.
+  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length. Retain the HPKE sender context for response decryption.
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
 - Inbound response:
 
@@ -145,7 +151,7 @@ This derivation ensures:
 - Request handling:
 
   - The middleware checks for `Ehbp-Encapsulated-Key`. The server accepts both encrypted and plaintext requests.
-  - If `Ehbp-Encapsulated-Key` is present, the body is decrypted as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption.
+  - If `Ehbp-Encapsulated-Key` is present, establish an HPKE opener using the server's private key (Section 4.4.1) and decrypt the body as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption.
   - If the encrypted request is malformed, decapsulation fails, decryption/authentication fails, or framing is invalid, the server MUST fail closed and reject the request before application processing completes.
   - Error status mapping:
     - malformed encapsulated request or cryptographic verification failure: HTTP 400
