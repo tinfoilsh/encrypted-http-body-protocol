@@ -187,6 +187,15 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
 
+	// A RoundTripper may be handed a request derived from an inbound server
+	// request (for example when used behind httputil.ReverseProxy), which
+	// carries RequestURI. http.Client.Do rejects any client request with
+	// RequestURI set, and the outbound request-target is taken from URL, so
+	// clear it. RequestURI is outside EHBP's protection (bodies only, empty
+	// AAD) and is not read during encryption, so clearing it changes no
+	// authenticated data.
+	newReq.RequestURI = ""
+
 	// Encrypt request to server's public key and get context for response decryption
 	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
 	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)

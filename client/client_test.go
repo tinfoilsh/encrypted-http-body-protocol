@@ -155,6 +155,49 @@ func TestNewTransportWithIdentityRequiresIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestTransportClearsRequestURI ensures the transport can carry a request that
+// originated as an inbound server request, which is how httputil.ReverseProxy
+// drives a RoundTripper. Such requests have RequestURI populated, and
+// http.Client.Do rejects that; the transport must clear it before sending.
+func TestTransportClearsRequestURI(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	middleware := serverIdentity.Middleware()
+	mux := http.NewServeMux()
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write([]byte("Hello, " + string(body)))
+	})))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
+	assert.NoError(t, err)
+	// Populated by the http server on inbound requests and preserved by
+	// req.Clone; forwarding it unchanged would make http.Client.Do fail.
+	req.RequestURI = "/secure"
+
+	// Call RoundTrip directly, mirroring how a reverse proxy invokes the
+	// transport (http.Client.Do would reject RequestURI before the transport).
+	resp, err := transport.RoundTrip(req)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, "Hello, test", string(body))
+}
+
 type recordingRoundTripper struct {
 	inner http.RoundTripper
 	count int
