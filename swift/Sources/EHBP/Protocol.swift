@@ -60,3 +60,38 @@ public enum EHBPConstants {
     /// (64 MiB). Bounds memory from an attacker-controlled length prefix.
     public static let maxResponseChunkBytes = 64 * 1024 * 1024
 }
+
+/// Constants for encrypted WebSocket channels (EHBP-WS, SPEC Section 8)
+public enum NoiseWebSocketProtocol {
+    /// WebSocket subprotocol identifying EHBP-WS
+    public static let subprotocol = "ehbp.noise.v1"
+
+    /// Noise protocol name for the handshake
+    public static let protocolName = "Noise_NK_25519_AESGCM_SHA256"
+
+    /// Prologue domain-separates the Noise handshake from other uses of the
+    /// server's X25519 key, since the HPKE identity key is reused as the
+    /// Noise static key. Both peers must use the identical value.
+    public static let prologue = "ehbp noise websocket v1"
+
+    /// Record type byte for application data
+    public static let recordData: UInt8 = 0x01
+
+    /// Record type byte for authenticated termination
+    public static let recordClose: UInt8 = 0x02
+
+    /// Default cap on a single record payload (1 MiB)
+    public static let defaultMaxMessageSize = 1 << 20
+
+    /// Framing added to a record payload: 1 record type byte, a 16-byte
+    /// AEAD tag, and margin for WebSocket read limit accounting.
+    public static let recordOverhead = 64
+
+    /// Bounds WebSocket messages during the handshake. Noise NK handshake
+    /// messages are 48 bytes each.
+    public static let handshakeReadLimit = 4096
+
+    /// Number of records after which each direction's cipher state is
+    /// rekeyed. The schedule is deterministic so both peers stay in sync.
+    public static let rekeyInterval: UInt64 = 1 << 16
+}
