@@ -122,7 +122,9 @@ public final class EHBPClient: @unchecked Sendable {
         _lastSessionRecoveryToken = token
         tokenLock.unlock()
 
-        return (decryptedData, httpResponse)
+        let decryptedResponse = Self.stripContentLength(from: httpResponse)
+
+        return (decryptedData, decryptedResponse)
     }
 
     /// Makes an encrypted streaming request and returns chunks as an AsyncStream
@@ -214,6 +216,8 @@ public final class EHBPClient: @unchecked Sendable {
         _lastSessionRecoveryToken = token
         tokenLock.unlock()
 
+        let decryptedResponse = Self.stripContentLength(from: httpResponse)
+
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             Task {
                 do {
@@ -263,9 +267,23 @@ public final class EHBPClient: @unchecked Sendable {
             }
         }
 
-        return (stream, httpResponse)
+        return (stream, decryptedResponse)
     }
 
+    private static func stripContentLength(from response: HTTPURLResponse) -> HTTPURLResponse {
+        var headers = [String: String]()
+        for (key, value) in response.allHeaderFields {
+            if let keyStr = key as? String, let valStr = value as? String, keyStr.lowercased() != "content-length" {
+                headers[keyStr] = valStr
+            }
+        }
+        return HTTPURLResponse(
+            url: response.url ?? URL(string: "about:blank")!,
+            statusCode: response.statusCode,
+            httpVersion: nil,
+            headerFields: headers
+        ) ?? response
+    }
 }
 
 // MARK: - Data Extensions

@@ -223,6 +223,9 @@ impl Client {
         };
         self.clear_session_recovery_token_if_current(&token);
 
+        let mut headers = headers;
+        headers.remove(CONTENT_LENGTH);
+
         Ok(Response {
             status,
             headers,
@@ -293,6 +296,9 @@ impl Client {
                     return Err(err);
                 }
             };
+
+        let mut headers = headers;
+        headers.remove(CONTENT_LENGTH);
 
         Ok(StreamingResponse {
             status,

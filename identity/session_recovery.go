@@ -106,6 +106,7 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		eof:    false,
 	}
 	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
 
 	return nil
 }

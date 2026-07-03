@@ -382,10 +382,13 @@ export async function decryptResponseWithToken(
   const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
   const decryptedStream = createDecryptStream(response.body, km);
 
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+
   return new Response(decryptedStream, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers,
   });
 }
 
