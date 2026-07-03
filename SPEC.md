@@ -300,7 +300,111 @@ Applications requiring confidential responses to bodyless requests should either
 - Include a minimal body (even if semantically empty) to enable EHBP protection
 - Use an alternative mechanism such as TLS with mutual authentication
 
-## 8. References
+## 8. Encrypted WebSocket Channels (EHBP-WS)
+
+### 8.1 Overview
+
+EHBP-WS extends EHBP's protection model to WebSocket connections: the HTTP upgrade request and WebSocket control frames remain in cleartext so intermediaries can route the connection, while every application message is encrypted end-to-end between the client and the origin server.
+
+Because a WebSocket handshake is a bodyless GET, the header-based mechanism of Section 4 cannot be authenticated (see Section 7.4). EHBP-WS therefore does not use EHBP headers at all. Instead, it runs a Noise NK handshake inside the established WebSocket connection, keyed by the server's X25519 static key, followed by an encrypted record layer.
+
+The Noise protocol name is:
+
+```
+Noise_NK_25519_AESGCM_SHA256
+```
+
+The client is the Noise initiator and is not authenticated; the server is the responder, authenticated by its static key. This mirrors the HTTP mode's trust model.
+
+### 8.2 Server Key
+
+The Noise responder static key is the server's HPKE identity key (Section 3): the same X25519 key pair serves both DHKEM(X25519, HKDF-SHA256) in the HTTP mode and Noise DH in the WebSocket mode. Clients obtain it via the discovery mechanism of Section 3.1 or a trusted out-of-band channel (Section 7.3).
+
+This cross-protocol reuse is deliberate and is domain-separated by the mandatory Noise prologue:
+
+```
+prologue = "ehbp noise websocket v1"
+```
+
+Both peers MUST use this exact prologue; a mismatch fails the handshake. In both protocols the key is used only for X25519 Diffie-Hellman; it is never used for signing.
+
+### 8.3 Negotiation
+
+Clients MUST offer and servers MUST select the WebSocket subprotocol:
+
+```
+Sec-WebSocket-Protocol: ehbp.noise.v1
+```
+
+Either peer MUST fail the connection if the subprotocol is not negotiated. Protocol and cipher agility is expressed only through new subprotocol names; there is no in-band negotiation to downgrade.
+
+WebSocket per-message compression (RFC 7692) MUST NOT be negotiated. Servers MUST decline `permessage-deflate` offers on this subprotocol: compression of attacker-influenced plaintext before encryption enables CRIME-style oracles, and compression of ciphertext is useless.
+
+### 8.4 Handshake
+
+After the upgrade completes, the two Noise NK handshake messages are exchanged, each carried in exactly one WebSocket binary message:
+
+1. Client → Server: `e, es`
+2. Server → Client: `e, ee`
+
+Handshake message payloads MUST be empty when sending; receivers MUST ignore any payload present. Neither peer sends application data before the handshake completes: the client MUST NOT send records before processing message 2, and the server MUST NOT send records before successfully processing message 1.
+
+Implementations MUST bound handshake messages (the reference implementation limits them to 4096 bytes; valid NK messages are 48 bytes) and SHOULD apply a handshake timeout (reference default: 10 seconds).
+
+If the handshake fails, the server SHOULD close the WebSocket with status code 1008 (policy violation) and reason `noise handshake failed`. A client holding a stale server key after key rotation fails at this point; on receiving this close code during the handshake, clients SHOULD refresh the server key configuration (Section 5.4.3) before reconnecting.
+
+### 8.5 Record Layer
+
+After the handshake, every WebSocket binary message carries exactly one record. A record plaintext is:
+
+```
+record = type (1 byte) || payload
+```
+
+encrypted as a Noise transport message under the sending direction's cipher state. Defined types:
+
+- `0x01` data: `payload` is an application message (MAY be empty)
+- `0x02` close: authenticated end-of-stream; senders MUST send an empty `payload` and receivers MUST ignore any payload present
+
+Noise transport messages use implicit sequence-number nonces, so records are implicitly ordered per direction; reordering, deletion, or replay causes an authentication failure. AAD is empty.
+
+Text messages MUST NOT be used and receiving one is a protocol violation. WebSocket control frames (ping, pong, close) belong to the transport layer, are not end-to-end protected, and MUST NOT carry application data.
+
+Implementations MUST enforce a maximum record payload size (reference default: 1 MiB) in both directions; an oversized record is a protocol violation. Both peers should agree on the cap out of band. Messages larger than the cap must be split into multiple data records by the application.
+
+### 8.6 Rekeying
+
+After every 65536 (2^16) records sent or received in a direction, that direction's cipher state MUST be advanced with the Noise `Rekey()` function. The schedule is deterministic and counts every record, including close records; peers that disagree on the schedule fail authentication at the next record. Rekeying bounds the amount of traffic protected under a single AEAD key on long-lived connections and provides forward secrecy within the connection for records older than one rekey interval.
+
+### 8.7 Connection Termination
+
+A peer initiating shutdown MUST send a close record (type `0x02`) before starting the WebSocket close handshake. A peer receiving a close record treats the stream as cleanly ended, SHOULD respond with its own close record if it has not already sent one, and completes the WebSocket close handshake.
+
+A connection that ends without a received close record (WebSocket close frame, TCP reset, or any transport error) MUST be surfaced as truncation, not as a clean end of stream. WebSocket close frames are unauthenticated and MUST NOT be trusted to signal a clean shutdown. This gives EHBP-WS authenticated termination, which the HTTP mode's body framing (Section 4.3) does not provide.
+
+### 8.8 Failure Handling
+
+Implementations MUST treat the following as protocol failures and fail closed, terminating the connection immediately without a close handshake:
+
+- non-binary message on the channel
+- AEAD authentication or decryption failure
+- empty record (missing type byte)
+- unknown record type
+- record exceeding the size limit
+
+After a failure, no plaintext from the failed record may be exposed, and subsequent reads MUST consistently report the failure rather than a clean end of stream.
+
+### 8.9 Security Considerations
+
+- **Server authentication and key confirmation.** The `es` DH in message 1 means only the holder of the server static key can complete the handshake; the handshake occurring in-band closes the header-substitution attack of Section 7.4 that prevents header-based key exchange on bodyless requests.
+- **Forward secrecy.** Transport keys mix `ee`, so recorded EHBP-WS traffic is not decryptable by a later compromise of the server static key. This is stronger than the HTTP mode. An attacker holding the static key at connection time can actively impersonate the server.
+- **Client anonymity and replay.** Clients are not authenticated at the channel layer; anyone can open a channel, so a replayed handshake message 1 gains an attacker nothing beyond opening a connection. Applications requiring client identity SHOULD send credentials inside the encrypted channel rather than in upgrade headers, which are visible to intermediaries.
+- **Cleartext metadata.** The upgrade request (URL, headers, subprotocol), WebSocket control frames, record sizes, and timing are visible to intermediaries. The upgrade request is not cryptographically bound to the channel; intermediaries can rewrite routing metadata, consistent with Section 7.2.
+- **Denial of service.** The handshake is unauthenticated and costs one DH per message; implementations SHOULD apply handshake timeouts and SHOULD bound idle connections at the application layer.
+
+## 9. References
 
 - RFC 9180: Hybrid Public Key Encryption (HPKE)
 - RFC 9458: Oblivious HTTP (for `application/ohttp-keys` `key_config` format)
+- RFC 6455: The WebSocket Protocol
+- The Noise Protocol Framework, revision 34 (https://noiseprotocol.org/noise.html)
