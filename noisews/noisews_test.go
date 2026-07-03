@@ -118,6 +118,36 @@ func TestWrongServerKeyFailsHandshake(t *testing.T) {
 	}
 }
 
+func TestDialHandshakeFailureClosesImmediately(t *testing.T) {
+	ctx := testContext(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols: []string{protocol.WSSubprotocol},
+		})
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		_, _, _ = ws.Read(r.Context())
+		_ = ws.Write(r.Context(), websocket.MessageBinary, []byte{0})
+		<-r.Context().Done()
+	}))
+	t.Cleanup(ts.Close)
+
+	id, err := identity.NewIdentity()
+	if err != nil {
+		t.Fatalf("failed to create identity: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := Dial(ctx, ts.URL, publicOnly(t, id)); err == nil {
+		t.Fatal("dial should fail on invalid handshake message")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("dial took too long after handshake failure: %v", elapsed)
+	}
+}
+
 func TestTamperedRecordFailsClosed(t *testing.T) {
 	ctx := testContext(t)
 	errCh := make(chan error, 1)
@@ -170,12 +200,14 @@ func TestLocalCloseUnblocksReader(t *testing.T) {
 	}
 
 	readErrCh := make(chan error, 1)
+	readStarted := make(chan struct{})
 	go func() {
+		close(readStarted)
 		_, err := conn.Read(ctx)
 		readErrCh <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let the reader block in Read
+	<-readStarted
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close failed: %v", err)
 	}
@@ -399,6 +431,23 @@ func TestServerRequiresPrivateKey(t *testing.T) {
 	}
 	if _, err := NewServer(nil); err == nil {
 		t.Fatal("NewServer should reject a nil identity")
+	}
+}
+
+func TestOriginPatternsCopied(t *testing.T) {
+	id, err := identity.NewIdentity()
+	if err != nil {
+		t.Fatalf("failed to create identity: %v", err)
+	}
+	patterns := []string{"https://allowed.example"}
+	srv, err := NewServer(id, WithOriginPatterns(patterns...))
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	patterns[0] = "*"
+	if got := srv.originPatterns[0]; got != "https://allowed.example" {
+		t.Fatalf("origin patterns should be copied, got %q", got)
 	}
 }
 

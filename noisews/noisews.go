@@ -107,7 +107,7 @@ func WithHTTPClient(c *http.Client) Option {
 // same-origin browser connections are accepted.
 func WithOriginPatterns(patterns ...string) Option {
 	return func(o *options) {
-		o.originPatterns = patterns
+		o.originPatterns = append([]string(nil), patterns...)
 	}
 }
 

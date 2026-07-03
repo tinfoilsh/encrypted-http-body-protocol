@@ -94,6 +94,7 @@ func (s *Server) Upgrade(w http.ResponseWriter, r *http.Request) (*Conn, error) 
 		return nil, fmt.Errorf("noisews: handshake failed: %w", err)
 	}
 	if err := ws.Write(ctx, websocket.MessageBinary, msg2); err != nil {
+		_ = ws.CloseNow()
 		return nil, fmt.Errorf("noisews: write handshake message: %w", err)
 	}
 

@@ -39,7 +39,7 @@ func Dial(ctx context.Context, urlStr string, serverIdentity *identity.Identity,
 
 	conn, err := clientHandshake(ctx, ws, serverPub, o.maxMessageSize)
 	if err != nil {
-		_ = ws.Close(websocket.StatusPolicyViolation, "handshake failed")
+		_ = ws.CloseNow()
 		return nil, err
 	}
 	return conn, nil
