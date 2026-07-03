@@ -38,6 +38,18 @@ pub enum Error {
 
     #[error("UTF-8 error: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+
+    #[error("noise handshake failed: {0}")]
+    Handshake(String),
+
+    #[error("websocket error: {0}")]
+    WebSocket(String),
+
+    #[error("encrypted channel closed")]
+    ChannelClosed,
+
+    #[error("connection closed without encrypted close record: {0}")]
+    ChannelTruncated(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
