@@ -3,6 +3,8 @@ module github.com/tinfoilsh/encrypted-http-body-protocol
 go 1.26
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/flynn/noise v1.1.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
