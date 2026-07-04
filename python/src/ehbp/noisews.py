@@ -65,6 +65,8 @@ class _CipherState:
     """
 
     def __init__(self, key: bytes, rekey_interval: int) -> None:
+        if rekey_interval <= 0:
+            raise InvalidInputError("rekey interval must be positive")
         self._cipher = AESGCM(key)
         self._count = 0
         self._rekey_interval = rekey_interval

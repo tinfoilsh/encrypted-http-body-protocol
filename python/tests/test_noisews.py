@@ -358,6 +358,13 @@ def test_cipher_state_rejects_the_reserved_maximum_nonce_before_use():
         receiver.decrypt(ciphertext)
 
 
+def test_cipher_state_rejects_a_non_positive_rekey_interval():
+    key = b"\x11" * AES256_KEY_LENGTH
+    for interval in (0, -1):
+        with pytest.raises(InvalidInputError):
+            _CipherState(key, interval)
+
+
 def test_noisews_interop_vector():
     vector = json.loads((VECTORS / "noisews.json").read_text())
     assert vector["protocolName"] == NOISE_PROTOCOL_NAME
