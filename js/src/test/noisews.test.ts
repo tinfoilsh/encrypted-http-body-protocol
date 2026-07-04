@@ -379,6 +379,22 @@ describe('NoiseWebSocket', () => {
     }
   });
 
+  it('drains a pending recv to null when closed locally', TEST_TIMEOUT, async () => {
+    const server = await startServer(async (conn) => {
+      // Reads the client's close record without replying, so the pending
+      // recv is woken by the socket teardown rather than a message.
+      await conn.readRecord().catch(() => undefined);
+    });
+    try {
+      const channel = await NoiseWebSocket.connect(server.url, server.identity);
+      const pending = channel.recv();
+      await channel.close();
+      assert.strictEqual(await pending, null);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('falls back to the default cap for a non-integer size limit', TEST_TIMEOUT, async () => {
     const server = await startServer(echoBehavior);
     try {

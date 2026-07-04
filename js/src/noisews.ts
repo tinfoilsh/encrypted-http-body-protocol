@@ -276,6 +276,9 @@ export class NoiseWebSocket {
 
     const event = await this.queue.next();
     if (event.kind !== 'message') {
+      // A local close can race a pending recv: the wake-up close event
+      // must drain to null exactly like a recv started after close().
+      if (this.localClosed) return null;
       throw this.transportEnded(event.detail);
     }
     if (!(event.data instanceof ArrayBuffer)) {
