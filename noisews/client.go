@@ -35,7 +35,7 @@ func Dial(ctx context.Context, urlStr string, serverIdentity *identity.Identity,
 		return nil, fmt.Errorf("noisews: dial: %w", err)
 	}
 	if ws.Subprotocol() != protocol.WSSubprotocol {
-		_ = ws.Close(websocket.StatusPolicyViolation, "ehbp noise subprotocol required")
+		_ = ws.CloseNow()
 		return nil, errors.New("noisews: server did not accept required subprotocol")
 	}
 	ws.SetReadLimit(handshakeReadLimit)
