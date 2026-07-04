@@ -258,6 +258,10 @@ class NoiseWebSocket(_ChannelState):
         bounds the WebSocket dial and the Noise handshake, each independently,
         so a stalled or hostile peer cannot hang the caller.
         """
+        # Validated before dialing so channel construction after the
+        # handshake cannot fail and leak the open WebSocket.
+        if rekey_interval_for_testing <= 0:
+            raise InvalidInputError("rekey interval must be positive")
         try:
             ws = websockets.sync.client.connect(
                 _websocket_url(url),
@@ -415,6 +419,10 @@ class AsyncNoiseWebSocket(_ChannelState):
         bounds the WebSocket dial and the Noise handshake, each independently,
         so a stalled or hostile peer cannot hang the caller.
         """
+        # Validated before dialing so channel construction after the
+        # handshake cannot fail and leak the open WebSocket.
+        if rekey_interval_for_testing <= 0:
+            raise InvalidInputError("rekey interval must be positive")
         try:
             ws = await websockets.asyncio.client.connect(
                 _websocket_url(url),

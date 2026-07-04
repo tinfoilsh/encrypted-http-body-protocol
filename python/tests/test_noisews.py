@@ -365,6 +365,23 @@ def test_cipher_state_rejects_a_non_positive_rekey_interval():
             _CipherState(key, interval)
 
 
+def test_connect_rejects_a_non_positive_rekey_interval_before_dialing():
+    identity = ServerIdentity.from_public_key_bytes(
+        X25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    )
+    # The unroutable URL proves the option is validated before any dial:
+    # reaching the network would raise WebSocketError instead.
+    url = "ws://127.0.0.1:1"
+    with pytest.raises(InvalidInputError):
+        NoiseWebSocket.connect(url, identity, rekey_interval_for_testing=0)
+
+    async def run() -> None:
+        with pytest.raises(InvalidInputError):
+            await AsyncNoiseWebSocket.connect(url, identity, rekey_interval_for_testing=0)
+
+    asyncio.run(run())
+
+
 def test_close_completes_websocket_shutdown_when_close_record_fails():
     with NoiseTestServer(echo_behavior) as server:
         conn = NoiseWebSocket.connect(server.url, server.identity)
