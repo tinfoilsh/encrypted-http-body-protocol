@@ -382,10 +382,18 @@ export async function decryptResponseWithToken(
   const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
   const decryptedStream = createDecryptStream(response.body, km);
 
+  // Framing headers describe the encrypted body, not the decrypted stream.
+  // Consumers that forward the response headers verbatim (for example a
+  // proxy) would otherwise announce a body length that no longer matches
+  // what is written, truncating the reply.
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  headers.delete('transfer-encoding');
+
   return new Response(decryptedStream, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers,
   });
 }
 

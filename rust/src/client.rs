@@ -223,6 +223,8 @@ impl Client {
         };
         self.clear_session_recovery_token_if_current(&token);
 
+        let mut headers = headers;
+        strip_encrypted_framing_headers(&mut headers);
         Ok(Response {
             status,
             headers,
@@ -294,6 +296,8 @@ impl Client {
                 }
             };
 
+        let mut headers = headers;
+        strip_encrypted_framing_headers(&mut headers);
         Ok(StreamingResponse {
             status,
             headers,
@@ -540,6 +544,15 @@ fn clear_session_recovery_token_if_current(
             *guard = None;
         }
     }
+}
+
+/// Removes framing headers that describe the encrypted body. The decrypted
+/// body has a different length, so consumers that forward the response
+/// headers verbatim (for example a proxy) would otherwise announce a body
+/// length that no longer matches what is written, truncating the reply.
+fn strip_encrypted_framing_headers(headers: &mut HeaderMap) {
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(TRANSFER_ENCODING);
 }
 
 fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
@@ -1037,5 +1050,142 @@ mod tests {
         assert!(request.contains("transfer-encoding: chunked"));
         assert!(!request.contains("content-length:"));
         assert!(request.contains("ehbp-encapsulated-key:"));
+    }
+
+    // Emulates a server whose encrypted reply reaches the client with an
+    // explicit Content-Length, as buffering middleboxes produce when they
+    // re-frame the server's chunked response. The decrypted responses must
+    // not retain framing headers that describe the ciphertext, or consumers
+    // forwarding the headers verbatim (proxies) would truncate the reply.
+    #[tokio::test]
+    async fn decrypted_responses_drop_encrypted_framing_headers() {
+        use aes_gcm::{
+            aead::{Aead as _, KeyInit as _, Payload},
+            Aes256Gcm, Nonce,
+        };
+        use hpke::{
+            aead::AesGcm256,
+            kdf::HkdfSha256,
+            kem::{Kem as _, X25519HkdfSha256},
+            setup_receiver, Deserializable as _, OpModeR, Serializable as _,
+        };
+        use rand::{rngs::StdRng, SeedableRng as _};
+
+        use crate::derive::{compute_nonce, frame_chunk};
+        use crate::protocol::{EXPORT_LABEL, EXPORT_LENGTH, HPKE_REQUEST_INFO};
+
+        const REPLY: &[u8] = b"full reply from the enclave";
+
+        let mut csprng = StdRng::from_os_rng();
+        let (private_key, public_key) = X25519HkdfSha256::gen_keypair(&mut csprng);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if bytes.windows(5).any(|window| window == b"0\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&bytes).to_string();
+                let enc_hex = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.trim()
+                            .eq_ignore_ascii_case("ehbp-encapsulated-key")
+                            .then(|| value.trim().to_string())
+                    })
+                    .expect("request must carry the encapsulated key header");
+                let request_enc = hex::decode(&enc_hex).unwrap();
+
+                let encapped_key =
+                    <X25519HkdfSha256 as hpke::kem::Kem>::EncappedKey::from_bytes(&request_enc)
+                        .unwrap();
+                let receiver = setup_receiver::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
+                    &OpModeR::Base,
+                    &private_key,
+                    &encapped_key,
+                    HPKE_REQUEST_INFO,
+                )
+                .unwrap();
+                let mut exported_secret = vec![0u8; EXPORT_LENGTH];
+                receiver.export(EXPORT_LABEL, &mut exported_secret).unwrap();
+
+                let response_nonce = [3u8; RESPONSE_NONCE_LENGTH];
+                let key_material =
+                    derive_response_keys(&exported_secret, &request_enc, &response_nonce).unwrap();
+                let cipher = Aes256Gcm::new_from_slice(&key_material.key).unwrap();
+                let nonce = compute_nonce(&key_material.nonce_base, 0);
+                let ciphertext = cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce),
+                        Payload {
+                            msg: REPLY,
+                            aad: &[],
+                        },
+                    )
+                    .unwrap();
+                let body = frame_chunk(&ciphertext).unwrap();
+
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n{RESPONSE_NONCE_HEADER}: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    hex::encode(response_nonce),
+                    body.len(),
+                );
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+            }
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&public_key.to_bytes()).unwrap();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        let response = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.body.as_ref(), REPLY);
+        assert!(response.headers.get(CONTENT_LENGTH).is_none());
+        assert!(response.headers.get(TRANSFER_ENCODING).is_none());
+        assert!(response.headers.get(RESPONSE_NONCE_HEADER).is_some());
+        assert_eq!(response.headers.get(CONTENT_TYPE).unwrap(), "text/plain");
+
+        let streaming = client
+            .post("/stream")
+            .unwrap()
+            .body("secret")
+            .send_stream()
+            .await
+            .unwrap();
+
+        assert!(streaming.headers.get(CONTENT_LENGTH).is_none());
+        assert!(streaming.headers.get(TRANSFER_ENCODING).is_none());
+
+        let mut body = streaming.body;
+        let mut collected = Vec::new();
+        while let Some(chunk) = body.next().await {
+            collected.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(collected, REPLY);
     }
 }

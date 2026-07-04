@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -196,6 +199,100 @@ func TestTransportClearsRequestURI(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello, test", string(body))
+}
+
+// TestTransportBehindReverseProxyNonStreaming forwards a non-streaming reply
+// through httputil.ReverseProxy when the encrypted upstream response carries a
+// Content-Length header, as buffering middleboxes add when they re-frame the
+// server's chunked reply. That header describes the encrypted body; if the
+// transport leaves it on the decrypted response, the reverse proxy announces
+// more bytes than it writes and the downstream client sees a truncated reply.
+func TestTransportBehindReverseProxyNonStreaming(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	const reply = "Hello from the enclave, this reply must arrive intact"
+
+	middleware := serverIdentity.Middleware()
+	mux := http.NewServeMux()
+	mux.HandleFunc(protocol.KeysPath, serverIdentity.ConfigHandler)
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(reply))
+	})))
+	backend := httptest.NewServer(mux)
+	defer backend.Close()
+
+	// Buffers each upstream response and re-frames it with an explicit
+	// Content-Length matching the encrypted body.
+	buffering := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := http.NewRequest(r.Method, backend.URL+r.URL.Path, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		encryptedBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(encryptedBody)))
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(encryptedBody)
+	}))
+	defer buffering.Close()
+
+	transport, err := NewTransport(buffering.URL)
+	assert.NoError(t, err)
+
+	t.Run("decrypted response drops encrypted framing", func(t *testing.T) {
+		req, err := http.NewRequest("POST", buffering.URL+"/secure", bytes.NewBufferString("test"))
+		assert.NoError(t, err)
+
+		resp, err := transport.RoundTrip(req)
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+		defer resp.Body.Close()
+
+		assert.Empty(t, resp.Header.Get("Content-Length"))
+		assert.Equal(t, int64(-1), resp.ContentLength)
+
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, reply, string(body))
+	})
+
+	t.Run("full reply reaches the reverse proxy client", func(t *testing.T) {
+		target, err := url.Parse(buffering.URL)
+		assert.NoError(t, err)
+		reverseProxy := httputil.NewSingleHostReverseProxy(target)
+		reverseProxy.Transport = transport
+		proxyServer := httptest.NewServer(reverseProxy)
+		defer proxyServer.Close()
+
+		resp, err := http.Post(proxyServer.URL+"/secure", "text/plain", bytes.NewBufferString("test"))
+		if !assert.NoError(t, err) {
+			t.FailNow()
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, reply, string(body))
+	})
 }
 
 type recordingRoundTripper struct {
