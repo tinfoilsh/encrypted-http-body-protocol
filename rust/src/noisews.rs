@@ -437,6 +437,9 @@ impl NoiseWebSocket {
                 self.max_message_size
             )));
         }
+        if let Some(sticky) = &self.sticky {
+            return Err(sticky.to_error());
+        }
         if self.close_sent || self.local_closed {
             return Err(Error::ChannelClosed);
         }
