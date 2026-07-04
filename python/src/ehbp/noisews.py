@@ -342,10 +342,17 @@ class NoiseWebSocket(_ChannelState):
         self._close_sent = True
         self._local_closed = True
         error: Optional[EHBPError] = None
+        # The close record is best-effort: the WebSocket close handshake
+        # below must run even if encrypting or sending the record fails.
         try:
-            self._ws.send(self._encode_close_record())
-        except websockets.exceptions.WebSocketException as err:
-            error = WebSocketError(f"send close record: {err}")
+            record = self._encode_close_record()
+        except EHBPError as err:
+            error = err
+        else:
+            try:
+                self._ws.send(record)
+            except websockets.exceptions.WebSocketException as err:
+                error = WebSocketError(f"send close record: {err}")
         try:
             self._ws.close()
         except websockets.exceptions.WebSocketException as err:
@@ -492,10 +499,17 @@ class AsyncNoiseWebSocket(_ChannelState):
         self._close_sent = True
         self._local_closed = True
         error: Optional[EHBPError] = None
+        # The close record is best-effort: the WebSocket close handshake
+        # below must run even if encrypting or sending the record fails.
         try:
-            await self._ws.send(self._encode_close_record())
-        except websockets.exceptions.WebSocketException as err:
-            error = WebSocketError(f"send close record: {err}")
+            record = self._encode_close_record()
+        except EHBPError as err:
+            error = err
+        else:
+            try:
+                await self._ws.send(record)
+            except websockets.exceptions.WebSocketException as err:
+                error = WebSocketError(f"send close record: {err}")
         try:
             await self._ws.close()
         except websockets.exceptions.WebSocketException as err:

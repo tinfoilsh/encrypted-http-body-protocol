@@ -365,6 +365,18 @@ def test_cipher_state_rejects_a_non_positive_rekey_interval():
             _CipherState(key, interval)
 
 
+def test_close_completes_websocket_shutdown_when_close_record_fails():
+    with NoiseTestServer(echo_behavior) as server:
+        conn = NoiseWebSocket.connect(server.url, server.identity)
+        # Exhaust the send counter so encrypting the close record fails.
+        conn._send._count = MAX_SEQUENCE
+        with pytest.raises(CryptoError):
+            conn.close()
+        # The WebSocket close handshake must still run; the server observes
+        # the connection ending without an encrypted close record.
+        assert server.events.get(timeout=5) == ("truncated",)
+
+
 def test_noisews_interop_vector():
     vector = json.loads((VECTORS / "noisews.json").read_text())
     assert vector["protocolName"] == NOISE_PROTOCOL_NAME
