@@ -752,6 +752,52 @@ final class NoiseWebSocketTests: XCTestCase {
         }
     }
 
+    func testFailedHandshakeMessageLeavesResponderUnusable() throws {
+        let serverKey = Curve25519.KeyAgreement.PrivateKey()
+        let prologue = Data(NoiseWebSocketProtocol.prologue.utf8)
+        var initiator = try NoiseHandshakeState(
+            role: .initiator,
+            prologue: prologue,
+            remoteStaticKey: serverKey.publicKey.rawRepresentation
+        )
+        var responder = try NoiseHandshakeState(
+            role: .responder, prologue: prologue, localStaticKey: serverKey
+        )
+
+        var tampered = try initiator.writeMessage1()
+        tampered[tampered.count - 1] ^= 0xff
+        XCTAssertThrowsError(try responder.readMessage1(tampered))
+        // The rejected message must not leave progress behind that lets
+        // the responder continue the handshake.
+        XCTAssertThrowsError(try responder.writeMessage2())
+    }
+
+    func testFailedHandshakeMessageDoesNotPolluteInitiatorState() throws {
+        let serverKey = Curve25519.KeyAgreement.PrivateKey()
+        let prologue = Data(NoiseWebSocketProtocol.prologue.utf8)
+        var initiator = try NoiseHandshakeState(
+            role: .initiator,
+            prologue: prologue,
+            remoteStaticKey: serverKey.publicKey.rawRepresentation
+        )
+        var responder = try NoiseHandshakeState(
+            role: .responder, prologue: prologue, localStaticKey: serverKey
+        )
+        _ = try responder.readMessage1(try initiator.writeMessage1())
+        let message2 = try responder.writeMessage2()
+
+        var tampered = message2
+        tampered[tampered.count - 1] ^= 0xff
+        XCTAssertThrowsError(try initiator.readMessage2(tampered))
+        // A rejected message must not corrupt the transcript: the genuine
+        // message still authenticates and both sides derive the same keys.
+        _ = try initiator.readMessage2(message2)
+        let (clientSendKey, clientRecvKey) = initiator.split()
+        let (serverRecvKey, serverSendKey) = responder.split()
+        XCTAssertEqual(clientSendKey, serverRecvKey)
+        XCTAssertEqual(clientRecvKey, serverSendKey)
+    }
+
     // MARK: - Cross-Language Interop Tests
 
     private func vectorsDir() -> URL {

@@ -249,11 +249,16 @@ struct NoiseHandshakeState {
             throw EHBPError.handshakeFailed("handshake message too short")
         }
         let ephemeral = Data(message.prefix(noiseDHLength))
-        remoteEphemeral = ephemeral
-        symmetric.mixHash(ephemeral)
-        try mixDH(localStatic, ephemeral)
+        // State is committed only once the ciphertext authenticates, so a
+        // failed handshake message leaves no reusable progress behind.
+        var next = self
+        next.remoteEphemeral = ephemeral
+        next.symmetric.mixHash(ephemeral)
+        try next.mixDH(localStatic, ephemeral)
         do {
-            return try symmetric.decryptAndHash(Data(message.dropFirst(noiseDHLength)))
+            let payload = try next.symmetric.decryptAndHash(Data(message.dropFirst(noiseDHLength)))
+            self = next
+            return payload
         } catch {
             throw EHBPError.handshakeFailed("handshake message failed authentication")
         }
@@ -279,11 +284,16 @@ struct NoiseHandshakeState {
             throw EHBPError.handshakeFailed("handshake message too short")
         }
         let ephemeral = Data(message.prefix(noiseDHLength))
-        remoteEphemeral = ephemeral
-        symmetric.mixHash(ephemeral)
-        try mixDH(localEphemeral, ephemeral)
+        // State is committed only once the ciphertext authenticates, so a
+        // failed handshake message leaves no reusable progress behind.
+        var next = self
+        next.remoteEphemeral = ephemeral
+        next.symmetric.mixHash(ephemeral)
+        try next.mixDH(localEphemeral, ephemeral)
         do {
-            return try symmetric.decryptAndHash(Data(message.dropFirst(noiseDHLength)))
+            let payload = try next.symmetric.decryptAndHash(Data(message.dropFirst(noiseDHLength)))
+            self = next
+            return payload
         } catch {
             throw EHBPError.handshakeFailed("handshake message failed authentication")
         }
