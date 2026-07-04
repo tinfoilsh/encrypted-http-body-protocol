@@ -15,7 +15,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{
     accept_async, accept_hdr_async,
     tungstenite::{
-        handshake::server::{Request, Response},
+        handshake::server::{ErrorResponse, Request, Response},
         http::HeaderValue,
         protocol::{frame::coding::CloseCode, CloseFrame},
         Message,
@@ -187,6 +187,31 @@ struct TestServer {
     identity: ServerIdentity,
 }
 
+/// WebSocket upgrade callback that selects the EHBP subprotocol when the
+/// client offers it, like a real server.
+#[allow(clippy::result_large_err)] // signature fixed by tungstenite's Callback trait
+fn negotiate_subprotocol(
+    request: &Request,
+    mut response: Response,
+) -> Result<Response, ErrorResponse> {
+    let offered = request
+        .headers()
+        .get("Sec-WebSocket-Protocol")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if offered
+        .split(',')
+        .map(str::trim)
+        .any(|p| p == WS_SUBPROTOCOL)
+    {
+        response.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_static(WS_SUBPROTOCOL),
+        );
+    }
+    Ok(response)
+}
+
 async fn spawn_server<F, Fut>(rekey_interval: u64, handler: F) -> TestServer
 where
     F: FnOnce(ServerConn) -> Fut + Send + 'static,
@@ -200,25 +225,9 @@ where
 
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let callback = |request: &Request, mut response: Response| {
-            let offered = request
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if offered
-                .split(',')
-                .map(str::trim)
-                .any(|p| p == WS_SUBPROTOCOL)
-            {
-                response.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    HeaderValue::from_static(WS_SUBPROTOCOL),
-                );
-            }
-            Ok(response)
-        };
-        let mut ws = accept_hdr_async(stream, callback).await.unwrap();
+        let mut ws = accept_hdr_async(stream, negotiate_subprotocol)
+            .await
+            .unwrap();
 
         let params = NOISE_PROTOCOL_NAME.parse().unwrap();
         let mut handshake = snow::Builder::new(params)
@@ -438,6 +447,13 @@ async fn truncation_detected() {
         Err(Error::ChannelTruncated(_)) => {}
         other => panic!("truncation errors should be sticky, got {other:?}"),
     }
+    match timeout(TEST_TIMEOUT, conn.send(b"after failure"))
+        .await
+        .unwrap()
+    {
+        Err(Error::ChannelTruncated(_)) => {}
+        other => panic!("sends after a terminal error should surface it, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -561,25 +577,9 @@ async fn dial_handshake_times_out() {
     // or hostile peer.
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let callback = |request: &Request, mut response: Response| {
-            let offered = request
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("");
-            if offered
-                .split(',')
-                .map(str::trim)
-                .any(|p| p == WS_SUBPROTOCOL)
-            {
-                response.headers_mut().insert(
-                    "Sec-WebSocket-Protocol",
-                    HeaderValue::from_static(WS_SUBPROTOCOL),
-                );
-            }
-            Ok(response)
-        };
-        let mut ws = accept_hdr_async(stream, callback).await.unwrap();
+        let mut ws = accept_hdr_async(stream, negotiate_subprotocol)
+            .await
+            .unwrap();
         let _ = ws.next().await;
         std::future::pending::<()>().await;
     });
@@ -724,5 +724,5 @@ fn noisews_interop_vector() {
     // Not part of the vector, but keep the default schedule aligned with the
     // reference implementation.
     assert_eq!(WS_REKEY_INTERVAL, 1 << 16);
-    let _ = DEFAULT_WS_MAX_MESSAGE_SIZE;
+    assert_eq!(DEFAULT_WS_MAX_MESSAGE_SIZE, 1 << 20);
 }
