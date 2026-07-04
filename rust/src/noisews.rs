@@ -74,6 +74,7 @@ impl CipherState {
     }
 
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.check_counter()?;
         let nonce = Self::nonce(self.count);
         let ciphertext = self
             .cipher
@@ -90,6 +91,7 @@ impl CipherState {
     }
 
     fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        self.check_counter()?;
         let nonce = Self::nonce(self.count);
         let plaintext = self
             .cipher
@@ -103,6 +105,15 @@ impl CipherState {
             .map_err(|_| Error::Crypto("failed to decrypt record".into()))?;
         self.advance()?;
         Ok(plaintext)
+    }
+
+    /// The maximum nonce is reserved for rekeying, so an exhausted counter
+    /// must fail before any cryptographic use of the nonce.
+    fn check_counter(&self) -> Result<()> {
+        if self.count == u64::MAX {
+            return Err(Error::Crypto("record counter exhausted".into()));
+        }
+        Ok(())
     }
 
     fn advance(&mut self) -> Result<()> {
@@ -572,5 +583,42 @@ impl NoiseWebSocket {
         self.local_closed = true;
         let _ = self.ws.get_mut().shutdown().await;
         err
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cipher_state_rejects_the_reserved_maximum_nonce_before_use() {
+        let mut cipher = CipherState::new([0x42; AES256_KEY_LENGTH], WS_REKEY_INTERVAL);
+        cipher.count = u64::MAX - 1;
+        // The last usable nonce still works.
+        cipher
+            .check_counter()
+            .expect("the last usable nonce must still be allowed");
+        cipher.count = u64::MAX;
+        // The maximum nonce is reserved for rekeying and must be rejected
+        // before it reaches the AEAD cipher, not just on the following call.
+        cipher
+            .check_counter()
+            .expect_err("the reserved maximum nonce must never be used for a record");
+    }
+
+    #[test]
+    fn cipher_state_still_encrypts_and_decrypts_up_to_the_last_usable_nonce() {
+        let mut cipher = CipherState::new([0x42; AES256_KEY_LENGTH], WS_REKEY_INTERVAL);
+        cipher.count = u64::MAX - 1;
+        let ciphertext = cipher
+            .encrypt(b"last record")
+            .expect("last nonce should still encrypt");
+        cipher
+            .encrypt(b"one too many")
+            .expect_err("reserved nonce must not be used for another record");
+
+        let mut peer = CipherState::new([0x42; AES256_KEY_LENGTH], WS_REKEY_INTERVAL);
+        peer.count = u64::MAX - 1;
+        assert_eq!(peer.decrypt(&ciphertext).unwrap(), b"last record");
     }
 }

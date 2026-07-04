@@ -34,7 +34,9 @@ from ehbp import (
 )
 from ehbp.noisews import _CipherState
 from ehbp.protocol import (
+    AES256_KEY_LENGTH,
     DEFAULT_WS_MAX_MESSAGE_SIZE,
+    MAX_SEQUENCE,
     NOISE_PROLOGUE,
     NOISE_PROTOCOL_NAME,
     WS_RECORD_CLOSE,
@@ -335,6 +337,25 @@ def test_async_dial_handshake_timeout():
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_cipher_state_rejects_the_reserved_maximum_nonce_before_use():
+    key = b"\x11" * AES256_KEY_LENGTH
+    sender = _CipherState(key, WS_REKEY_INTERVAL)
+    sender._count = MAX_SEQUENCE - 1
+    # The last usable nonce still works.
+    ciphertext = sender.encrypt(b"last record")
+    assert sender._count == MAX_SEQUENCE
+    # The maximum nonce is reserved for rekeying and must be rejected before
+    # it reaches the AEAD cipher, not just on the following call.
+    with pytest.raises(CryptoError):
+        sender.encrypt(b"one too many")
+
+    receiver = _CipherState(key, WS_REKEY_INTERVAL)
+    receiver._count = MAX_SEQUENCE - 1
+    assert receiver.decrypt(ciphertext) == b"last record"
+    with pytest.raises(CryptoError):
+        receiver.decrypt(ciphertext)
 
 
 def test_noisews_interop_vector():

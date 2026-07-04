@@ -712,6 +712,28 @@ final class NoiseWebSocketTests: XCTestCase {
         XCTAssertLessThan(clock.now - start, .seconds(2))
     }
 
+    func testRecordCipherFailsBeforeReusingReservedNonce() throws {
+        let key = Data(repeating: 0x42, count: 32)
+
+        var cipher = NoiseRecordCipher(
+            key: key,
+            rekeyInterval: NoiseWebSocketProtocol.rekeyInterval,
+            initialCountForTesting: UInt64.max - 1
+        )
+        // The last usable nonce still works.
+        _ = try cipher.encrypt(Data("last record".utf8))
+        // The maximum nonce is reserved for rekeying and must never
+        // protect a record.
+        XCTAssertThrowsError(try cipher.encrypt(Data("one too many".utf8)))
+
+        var exhausted = NoiseRecordCipher(
+            key: key,
+            rekeyInterval: NoiseWebSocketProtocol.rekeyInterval,
+            initialCountForTesting: UInt64.max
+        )
+        XCTAssertThrowsError(try exhausted.decrypt(Data(repeating: 0, count: 32)))
+    }
+
     // MARK: - Cross-Language Interop Tests
 
     private func vectorsDir() -> URL {

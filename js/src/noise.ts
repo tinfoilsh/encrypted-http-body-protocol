@@ -12,7 +12,7 @@
  */
 
 import { NOISE_WS } from './protocol.js';
-import { DecryptionError, HandshakeError } from './errors.js';
+import { DecryptionError, HandshakeError, ProtocolError } from './errors.js';
 
 const DH_LENGTH = 32;
 const KEY_LENGTH = 32;
@@ -322,35 +322,71 @@ export class NoiseRecordCipher {
   private key: CryptoKey;
   private counter = 0n;
   private rekeyInterval: bigint;
+  // WebCrypto's encrypt/decrypt are genuinely asynchronous, so two
+  // overlapping calls could otherwise both read `counter` before either
+  // one advances it and reuse an AEAD nonce. Chaining every call through
+  // this queue forces each one to wait for the previous to fully settle.
+  private queue: Promise<void> = Promise.resolve();
 
-  private constructor(key: CryptoKey, rekeyInterval: bigint) {
+  private constructor(key: CryptoKey, rekeyInterval: bigint, counterForTesting: bigint = 0n) {
     this.key = key;
     this.rekeyInterval = rekeyInterval;
+    this.counter = counterForTesting;
   }
 
-  static async create(key: Uint8Array, rekeyInterval: number): Promise<NoiseRecordCipher> {
+  static async create(
+    key: Uint8Array,
+    rekeyInterval: number,
+    counterForTesting: bigint = 0n,
+  ): Promise<NoiseRecordCipher> {
     if (key.length !== KEY_LENGTH) {
       throw new HandshakeError(`invalid transport key length: ${key.length}`);
     }
     if (!Number.isInteger(rekeyInterval) || rekeyInterval <= 0) {
       throw new HandshakeError(`invalid rekey interval: ${rekeyInterval}`);
     }
-    return new NoiseRecordCipher(await importAESKey(key), BigInt(rekeyInterval));
+    return new NoiseRecordCipher(await importAESKey(key), BigInt(rekeyInterval), counterForTesting);
   }
 
   async encrypt(plaintext: Uint8Array): Promise<Uint8Array> {
-    const ciphertext = await aeadSeal(this.key, this.counter, new Uint8Array(0), plaintext);
-    await this.advance();
-    return ciphertext;
+    return this.serialized(async () => {
+      this.checkCounter();
+      const ciphertext = await aeadSeal(this.key, this.counter, new Uint8Array(0), plaintext);
+      await this.advance();
+      return ciphertext;
+    });
   }
 
   async decrypt(ciphertext: Uint8Array): Promise<Uint8Array> {
     if (ciphertext.length < TAG_LENGTH) {
       throw new DecryptionError(`record too short: ${ciphertext.length} bytes`);
     }
-    const plaintext = await aeadOpen(this.key, this.counter, new Uint8Array(0), ciphertext);
-    await this.advance();
-    return plaintext;
+    return this.serialized(async () => {
+      this.checkCounter();
+      const plaintext = await aeadOpen(this.key, this.counter, new Uint8Array(0), ciphertext);
+      await this.advance();
+      return plaintext;
+    });
+  }
+
+  /** The maximum nonce is reserved for rekeying, so an exhausted counter
+   * must fail before any cryptographic use of the nonce. */
+  private checkCounter(): void {
+    if (this.counter >= REKEY_NONCE) {
+      throw new ProtocolError('record counter exhausted');
+    }
+  }
+
+  /** Runs `op` only once every previously queued encrypt/decrypt has
+   * settled, so one call's counter read and advance can never interleave
+   * with another's. */
+  private serialized<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(op, op);
+    this.queue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private async advance(): Promise<void> {

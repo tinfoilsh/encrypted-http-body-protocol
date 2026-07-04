@@ -443,6 +443,52 @@ describe('NoiseWebSocket', () => {
   });
 });
 
+describe('NoiseRecordCipher', () => {
+  it('serializes concurrent encrypts so nonces are never reused', async () => {
+    const key = new Uint8Array(32).fill(7);
+    const cipher = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL);
+
+    // Deliberately not awaited between calls: both encrypts start before
+    // either advances the counter, exercising the interleaving window
+    // WebCrypto's async encrypt/decrypt opens up.
+    const first = cipher.encrypt(encoder.encode('first'));
+    const second = cipher.encrypt(encoder.encode('second'));
+    const [ciphertext1, ciphertext2] = await Promise.all([first, second]);
+
+    const verifier = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL);
+    assert.deepStrictEqual(await verifier.decrypt(ciphertext1), encoder.encode('first'));
+    assert.deepStrictEqual(await verifier.decrypt(ciphertext2), encoder.encode('second'));
+  });
+
+  it('serializes concurrent decrypts so nonces are never reused', async () => {
+    const key = new Uint8Array(32).fill(9);
+    const encrypter = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL);
+    const ciphertext1 = await encrypter.encrypt(encoder.encode('first'));
+    const ciphertext2 = await encrypter.encrypt(encoder.encode('second'));
+
+    const decrypter = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL);
+    const first = decrypter.decrypt(ciphertext1);
+    const second = decrypter.decrypt(ciphertext2);
+    assert.deepStrictEqual(await first, encoder.encode('first'));
+    assert.deepStrictEqual(await second, encoder.encode('second'));
+  });
+
+  it('fails before reusing the reserved maximum nonce', async () => {
+    const key = new Uint8Array(32).fill(3);
+    const maxNonce = 0xffffffffffffffffn;
+
+    const cipher = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL, maxNonce - 1n);
+    // The last usable nonce still works.
+    await cipher.encrypt(encoder.encode('last record'));
+    // The maximum nonce is reserved for rekeying and must never protect a
+    // record.
+    await assert.rejects(cipher.encrypt(encoder.encode('one too many')), ProtocolError);
+
+    const exhausted = await NoiseRecordCipher.create(key, NOISE_WS.REKEY_INTERVAL, maxNonce);
+    await assert.rejects(exhausted.decrypt(new Uint8Array(32)), ProtocolError);
+  });
+});
+
 describe('cross-language interop', () => {
   it('matches the noisews test vector', TEST_TIMEOUT, async () => {
     const thisDir = dirname(fileURLToPath(import.meta.url));

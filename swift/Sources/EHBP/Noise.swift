@@ -61,19 +61,21 @@ struct NoiseRecordCipher {
     private var count: UInt64
     private let rekeyInterval: UInt64
 
-    init(key: Data, rekeyInterval: UInt64) {
+    init(key: Data, rekeyInterval: UInt64, initialCountForTesting: UInt64 = 0) {
         self.key = key
-        self.count = 0
+        self.count = initialCountForTesting
         self.rekeyInterval = rekeyInterval
     }
 
     mutating func encrypt(_ plaintext: Data) throws -> Data {
+        try checkCounter()
         let ciphertext = try aeadSeal(key: key, counter: count, authenticating: Data(), plaintext: plaintext)
         try advance()
         return ciphertext
     }
 
     mutating func decrypt(_ ciphertext: Data) throws -> Data {
+        try checkCounter()
         let plaintext: Data
         do {
             plaintext = try aeadOpen(key: key, counter: count, authenticating: Data(), ciphertext: ciphertext)
@@ -84,10 +86,15 @@ struct NoiseRecordCipher {
         return plaintext
     }
 
-    private mutating func advance() throws {
+    /// The maximum nonce is reserved for rekeying, so an exhausted counter
+    /// must fail before any cryptographic use of the nonce.
+    private func checkCounter() throws {
         guard count < noiseMaxNonce else {
             throw EHBPError.encryptionFailed("record counter exhausted")
         }
+    }
+
+    private mutating func advance() throws {
         count += 1
         if count % rekeyInterval == 0 {
             try rekey()

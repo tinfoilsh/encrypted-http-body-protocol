@@ -74,17 +74,25 @@ class _CipherState:
         return b"\x00\x00\x00\x00" + counter.to_bytes(8, "big")
 
     def encrypt(self, plaintext: bytes) -> bytes:
+        self._check_counter()
         ciphertext = self._cipher.encrypt(self._nonce(self._count), bytes(plaintext), None)
         self._advance()
         return ciphertext
 
     def decrypt(self, ciphertext: bytes) -> bytes:
+        self._check_counter()
         try:
             plaintext = self._cipher.decrypt(self._nonce(self._count), bytes(ciphertext), None)
         except Exception as err:
             raise CryptoError("failed to decrypt record") from err
         self._advance()
         return plaintext
+
+    def _check_counter(self) -> None:
+        # The maximum nonce is reserved for rekeying, so an exhausted
+        # counter must fail before any cryptographic use of the nonce.
+        if self._count >= MAX_SEQUENCE:
+            raise CryptoError("record counter exhausted")
 
     def _advance(self) -> None:
         self._count += 1
