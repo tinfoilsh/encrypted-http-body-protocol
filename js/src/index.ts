@@ -10,12 +10,18 @@ export { Identity } from './identity.js';
 export type { RequestContext, SessionRecoveryToken } from './identity.js';
 export { extractSessionRecoveryToken, decryptResponseWithToken, serializeSessionRecoveryToken, deserializeSessionRecoveryToken } from './identity.js';
 export { Transport, createTransport } from './client.js';
-export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+export { PROTOCOL, HPKE_CONFIG, NOISE_WS } from './protocol.js';
+export { NoiseWebSocket } from './noisews.js';
+export type { NoiseWebSocketOptions } from './noisews.js';
 export {
   EhbpError,
   KeyConfigMismatchError,
   ProtocolError,
   DecryptionError,
+  HandshakeError,
+  WebSocketError,
+  ChannelClosedError,
+  ChannelTruncatedError,
 } from './errors.js';
 
 // Export key derivation utilities for advanced usage

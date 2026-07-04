@@ -4,7 +4,11 @@
  *   EhbpError (base)
  *   ├── KeyConfigMismatchError  - 422 key-config mismatch (stale key after rotation)
  *   ├── ProtocolError           - Malformed framing or crypto setup failure
- *   └── DecryptionError         - AEAD authentication / decryption failure
+ *   ├── DecryptionError         - AEAD authentication / decryption failure
+ *   ├── HandshakeError          - Noise handshake or subprotocol negotiation failure
+ *   ├── WebSocketError          - WebSocket dial or transport failure
+ *   ├── ChannelClosedError      - Use of a locally closed encrypted channel
+ *   └── ChannelTruncatedError   - Transport ended without an authenticated close
  */
 
 export class EhbpError extends Error {
@@ -39,5 +43,41 @@ export class DecryptionError extends EhbpError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'DecryptionError';
+  }
+}
+
+export class HandshakeError extends EhbpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'HandshakeError';
+  }
+}
+
+export class WebSocketError extends EhbpError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'WebSocketError';
+  }
+}
+
+/**
+ * The encrypted channel was closed locally; no further sends or
+ * receives are possible.
+ */
+export class ChannelClosedError extends EhbpError {
+  constructor(message?: string) {
+    super(message || 'encrypted channel is closed');
+    this.name = 'ChannelClosedError';
+  }
+}
+
+/**
+ * The WebSocket ended without the peer's authenticated close record, so
+ * an attacker may have truncated the stream.
+ */
+export class ChannelTruncatedError extends EhbpError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChannelTruncatedError';
   }
 }
