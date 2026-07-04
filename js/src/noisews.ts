@@ -130,7 +130,9 @@ export class NoiseWebSocket {
     options: NoiseWebSocketOptions = {},
   ): Promise<NoiseWebSocket> {
     const maxMessageSize =
-      options.maxMessageSize && options.maxMessageSize > 0
+      options.maxMessageSize !== undefined &&
+      Number.isSafeInteger(options.maxMessageSize) &&
+      options.maxMessageSize > 0
         ? options.maxMessageSize
         : NOISE_WS.DEFAULT_MAX_MESSAGE_SIZE;
     const rekeyInterval =

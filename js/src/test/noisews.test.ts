@@ -379,6 +379,23 @@ describe('NoiseWebSocket', () => {
     }
   });
 
+  it('falls back to the default cap for a non-integer size limit', TEST_TIMEOUT, async () => {
+    const server = await startServer(echoBehavior);
+    try {
+      const channel = await NoiseWebSocket.connect(server.url, server.identity, {
+        maxMessageSize: Infinity,
+      });
+      // Infinity would silently disable the size guard, so it must fall
+      // back to the default cap instead.
+      await assert.rejects(
+        channel.send(new Uint8Array(NOISE_WS.DEFAULT_MAX_MESSAGE_SIZE + 1)),
+        ProtocolError);
+      await channel.close();
+    } finally {
+      await server.close();
+    }
+  });
+
   it('fails the connection on an oversized inbound record', TEST_TIMEOUT, async () => {
     const server = await startServer(async (conn) => {
       const event = await conn.readRecord();
