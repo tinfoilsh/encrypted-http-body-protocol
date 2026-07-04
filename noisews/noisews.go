@@ -16,6 +16,7 @@ package noisews
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -83,10 +84,11 @@ type Option func(*options)
 
 // WithMaxMessageSize caps the payload size of a single record in both
 // directions. Both peers should agree on the cap; a received record larger
-// than the local cap fails the connection.
+// than the local cap fails the connection. Values that would overflow the
+// WebSocket read limit accounting (n + recordOverhead) are ignored.
 func WithMaxMessageSize(n int) Option {
 	return func(o *options) {
-		if n > 0 {
+		if n > 0 && n <= math.MaxInt64-recordOverhead {
 			o.maxMessageSize = n
 		}
 	}

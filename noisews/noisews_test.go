@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -378,6 +379,13 @@ func TestOversizedInboundRecordFailsConnection(t *testing.T) {
 
 	if _, err := conn.Read(ctx); err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
 		t.Fatalf("oversized inbound record should fail the connection, got: %v", err)
+	}
+}
+
+func TestMaxMessageSizeOverflowIgnored(t *testing.T) {
+	o := applyOptions([]Option{WithMaxMessageSize(math.MaxInt64)})
+	if o.maxMessageSize != DefaultMaxMessageSize {
+		t.Fatalf("max message size that would overflow the read limit should be ignored, got %d", o.maxMessageSize)
 	}
 }
 

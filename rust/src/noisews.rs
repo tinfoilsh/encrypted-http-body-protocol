@@ -272,9 +272,18 @@ impl NoiseWebSocket {
             .headers_mut()
             .insert(SUBPROTOCOL_HEADER, HeaderValue::from_static(WS_SUBPROTOCOL));
 
+        let read_limit = options
+            .max_message_size
+            .checked_add(WS_RECORD_OVERHEAD)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "max_message_size {} is too large",
+                    options.max_message_size
+                ))
+            })?;
         let config = WebSocketConfig::default()
-            .max_message_size(Some(options.max_message_size + WS_RECORD_OVERHEAD))
-            .max_frame_size(Some(options.max_message_size + WS_RECORD_OVERHEAD));
+            .max_message_size(Some(read_limit))
+            .max_frame_size(Some(read_limit));
 
         let (mut ws, response) = connect_async_with_config(request, Some(config), false)
             .await
