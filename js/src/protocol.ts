@@ -37,7 +37,10 @@ export const NOISE_WS = {
   RECORD_CLOSE: 0x02,
   /** Default cap on a record's plaintext payload (1 MiB). */
   DEFAULT_MAX_MESSAGE_SIZE: 1 << 20,
-  /** Read-limit allowance for the record type byte and AEAD tag. */
+  /**
+   * Framing added to a record payload: 1 record type byte, a 16-byte AEAD
+   * tag, and margin for WebSocket read limit accounting.
+   */
   RECORD_OVERHEAD: 64,
   /** Cap on handshake message size. */
   HANDSHAKE_READ_LIMIT: 4096,

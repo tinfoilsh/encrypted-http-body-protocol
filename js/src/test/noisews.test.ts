@@ -157,7 +157,6 @@ class ServerConn {
 
 type Behavior = (conn: ServerConn) => Promise<void>;
 
-/** Echoes data records; answers a close record and closes the socket. */
 const echoBehavior: Behavior = async (conn) => {
   for (;;) {
     const event = await conn.readRecord();
