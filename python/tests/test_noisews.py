@@ -4,6 +4,7 @@ import asyncio
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -284,6 +285,56 @@ def test_dial_requires_negotiated_subprotocol():
     with NoiseTestServer(echo_behavior, negotiate_subprotocol=False) as server:
         with pytest.raises(HandshakeError, match="subprotocol"):
             NoiseWebSocket.connect(server.url, server.identity)
+
+
+def _serve_stalled_handshake():
+    """Starts a raw WebSocket server that negotiates the subprotocol and
+    reads the client's handshake message but never replies, simulating a
+    stalled or hostile peer."""
+
+    def handler(websocket: ServerConnection) -> None:
+        websocket.recv()
+        time.sleep(5)
+
+    server = serve(handler, "127.0.0.1", 0, subprotocols=[Subprotocol(WS_SUBPROTOCOL)])
+    port = server.socket.getsockname()[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"ws://127.0.0.1:{port}"
+
+
+def test_dial_handshake_timeout():
+    server, thread, url = _serve_stalled_handshake()
+    try:
+        identity = ServerIdentity.from_public_key_bytes(
+            X25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        )
+        start = time.monotonic()
+        with pytest.raises(HandshakeError, match="timed out"):
+            NoiseWebSocket.connect(url, identity, handshake_timeout=0.2)
+        assert time.monotonic() - start < 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_async_dial_handshake_timeout():
+    server, thread, url = _serve_stalled_handshake()
+    try:
+        identity = ServerIdentity.from_public_key_bytes(
+            X25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        )
+
+        async def run() -> None:
+            start = time.monotonic()
+            with pytest.raises(HandshakeError, match="timed out"):
+                await AsyncNoiseWebSocket.connect(url, identity, handshake_timeout=0.2)
+            assert time.monotonic() - start < 2
+
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 def test_noisews_interop_vector():

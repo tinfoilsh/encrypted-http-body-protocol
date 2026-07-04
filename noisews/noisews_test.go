@@ -149,6 +149,37 @@ func TestDialHandshakeFailureClosesImmediately(t *testing.T) {
 	}
 }
 
+func TestDialHandshakeTimeout(t *testing.T) {
+	ctx := testContext(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			Subprotocols: []string{protocol.WSSubprotocol},
+		})
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		// Read the client's handshake message but never reply, simulating
+		// a stalled or hostile peer.
+		_, _, _ = ws.Read(r.Context())
+		<-r.Context().Done()
+	}))
+	t.Cleanup(ts.Close)
+
+	id, err := identity.NewIdentity()
+	if err != nil {
+		t.Fatalf("failed to create identity: %v", err)
+	}
+
+	start := time.Now()
+	if _, err := Dial(ctx, ts.URL, publicOnly(t, id), WithHandshakeTimeout(200*time.Millisecond)); err == nil {
+		t.Fatal("dial should time out waiting for the handshake reply")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("dial took too long to time out: %v", elapsed)
+	}
+}
+
 func TestTamperedRecordFailsClosed(t *testing.T) {
 	ctx := testContext(t)
 	errCh := make(chan error, 1)

@@ -43,3 +43,6 @@ DEFAULT_WS_MAX_MESSAGE_SIZE = 1 << 20
 WS_RECORD_OVERHEAD = 64
 WS_HANDSHAKE_READ_LIMIT = 4096
 WS_REKEY_INTERVAL = 1 << 16
+# Default cap, in seconds, on the WebSocket dial plus Noise handshake
+# (SPEC Section 8.4).
+WS_HANDSHAKE_TIMEOUT = 10.0

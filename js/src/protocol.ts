@@ -41,6 +41,8 @@ export const NOISE_WS = {
   RECORD_OVERHEAD: 64,
   /** Cap on handshake message size. */
   HANDSHAKE_READ_LIMIT: 4096,
+  /** Default cap on the dial-plus-handshake duration (SPEC Section 8). */
+  HANDSHAKE_TIMEOUT_MS: 10_000,
   /** Records per direction before the sending key is ratcheted. */
   REKEY_INTERVAL: 1 << 16,
 } as const;

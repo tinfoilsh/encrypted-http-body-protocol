@@ -53,6 +53,32 @@ private final class WebSocketOpenDelegate: NSObject, URLSessionWebSocketDelegate
     }
 }
 
+/// Races `operation` against a timer, canceling `task` and throwing
+/// `EHBPError.handshakeFailed` if `duration` elapses first. Canceling the
+/// task is what unblocks `operation` promptly: `URLSessionWebSocketTask`
+/// does not observe Swift's cooperative cancellation on its own, so without
+/// this the caller would still wait for the task's own timeout or the
+/// peer's next move.
+private func withTimeout<T: Sendable>(
+    _ duration: Duration,
+    canceling task: URLSessionWebSocketTask,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(for: duration)
+            task.cancel()
+            throw EHBPError.handshakeFailed("handshake timed out after \(duration)")
+        }
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+    }
+}
+
 /// A message-oriented connection whose payloads are encrypted end-to-end
 /// inside WebSocket binary messages.
 public actor NoiseWebSocketChannel {
@@ -84,19 +110,23 @@ public actor NoiseWebSocketChannel {
     /// completes.
     ///
     /// `maxMessageSize` caps the payload size of a single record in both
-    /// directions; both peers should agree on the cap.
+    /// directions; both peers should agree on the cap. `handshakeTimeout`
+    /// bounds the WebSocket dial and the Noise handshake, each
+    /// independently, so a stalled or hostile peer cannot hang the caller.
     public static func connect(
         url: URL,
         identity: Identity,
         maxMessageSize: Int = NoiseWebSocketProtocol.defaultMaxMessageSize,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        handshakeTimeout: Duration = NoiseWebSocketProtocol.handshakeTimeout
     ) async throws -> NoiseWebSocketChannel {
         try await connect(
             url: url,
             identity: identity,
             maxMessageSize: maxMessageSize,
             session: session,
-            rekeyInterval: NoiseWebSocketProtocol.rekeyInterval
+            rekeyInterval: NoiseWebSocketProtocol.rekeyInterval,
+            handshakeTimeout: handshakeTimeout
         )
     }
 
@@ -107,7 +137,8 @@ public actor NoiseWebSocketChannel {
         identity: Identity,
         maxMessageSize: Int,
         session: URLSession,
-        rekeyInterval: UInt64
+        rekeyInterval: UInt64,
+        handshakeTimeout: Duration = NoiseWebSocketProtocol.handshakeTimeout
     ) async throws -> NoiseWebSocketChannel {
         let wsURL = try webSocketURL(from: url)
         let task = session.webSocketTask(
@@ -117,9 +148,11 @@ public actor NoiseWebSocketChannel {
 
         let negotiated: String?
         do {
-            negotiated = try await withCheckedThrowingContinuation { continuation in
-                task.delegate = WebSocketOpenDelegate(continuation)
-                task.resume()
+            negotiated = try await withTimeout(handshakeTimeout, canceling: task) {
+                try await withCheckedThrowingContinuation { continuation in
+                    task.delegate = WebSocketOpenDelegate(continuation)
+                    task.resume()
+                }
             }
         } catch let error as EHBPError {
             throw error
@@ -134,31 +167,33 @@ public actor NoiseWebSocketChannel {
         }
 
         do {
-            var handshake = try NoiseHandshakeState(
-                role: .initiator,
-                prologue: Data(NoiseWebSocketProtocol.prologue.utf8),
-                remoteStaticKey: identity.publicKeyBytes
-            )
-            try await task.send(.data(handshake.writeMessage1()))
-            guard case .data(let message2) = try await task.receive() else {
-                throw EHBPError.handshakeFailed("handshake message must be binary")
-            }
-            guard message2.count <= NoiseWebSocketProtocol.handshakeReadLimit else {
-                throw EHBPError.handshakeFailed(
-                    "handshake message of \(message2.count) bytes exceeds limit "
-                        + "\(NoiseWebSocketProtocol.handshakeReadLimit)"
+            return try await withTimeout(handshakeTimeout, canceling: task) {
+                var handshake = try NoiseHandshakeState(
+                    role: .initiator,
+                    prologue: Data(NoiseWebSocketProtocol.prologue.utf8),
+                    remoteStaticKey: identity.publicKeyBytes
+                )
+                try await task.send(.data(handshake.writeMessage1()))
+                guard case .data(let message2) = try await task.receive() else {
+                    throw EHBPError.handshakeFailed("handshake message must be binary")
+                }
+                guard message2.count <= NoiseWebSocketProtocol.handshakeReadLimit else {
+                    throw EHBPError.handshakeFailed(
+                        "handshake message of \(message2.count) bytes exceeds limit "
+                            + "\(NoiseWebSocketProtocol.handshakeReadLimit)"
+                    )
+                }
+                // Receivers must ignore any handshake payload present.
+                _ = try handshake.readMessage2(message2)
+                let (sendKey, recvKey) = handshake.split()
+                return NoiseWebSocketChannel(
+                    task: task,
+                    sendKey: sendKey,
+                    recvKey: recvKey,
+                    maxMessageSize: maxMessageSize,
+                    rekeyInterval: rekeyInterval
                 )
             }
-            // Receivers must ignore any handshake payload present.
-            _ = try handshake.readMessage2(message2)
-            let (sendKey, recvKey) = handshake.split()
-            return NoiseWebSocketChannel(
-                task: task,
-                sendKey: sendKey,
-                recvKey: recvKey,
-                maxMessageSize: maxMessageSize,
-                rekeyInterval: rekeyInterval
-            )
         } catch {
             task.cancel(with: .policyViolation, reason: Data("handshake failed".utf8))
             if let error = error as? EHBPError {

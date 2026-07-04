@@ -23,6 +23,9 @@ func Dial(ctx context.Context, urlStr string, serverIdentity *identity.Identity,
 	}
 	o := applyOptions(opts)
 
+	ctx, cancel := context.WithTimeout(ctx, o.handshakeTimeout)
+	defer cancel()
+
 	ws, _, err := websocket.Dial(ctx, urlStr, &websocket.DialOptions{
 		HTTPClient:      o.httpClient,
 		Subprotocols:    []string{protocol.WSSubprotocol},

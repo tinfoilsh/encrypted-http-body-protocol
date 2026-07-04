@@ -182,6 +182,8 @@ interface TestServer {
 interface TestServerOptions {
   rekeyInterval?: number;
   negotiateSubprotocol?: boolean;
+  /** Accept the upgrade but never answer the Noise handshake. */
+  silentHandshake?: boolean;
 }
 
 async function runConnection(
@@ -236,6 +238,11 @@ async function startServer(
             protocols.has(NOISE_WS.SUBPROTOCOL) ? NOISE_WS.SUBPROTOCOL : false,
   });
   wss.on('connection', (socket) => {
+    if (options.silentHandshake) {
+      socket.on('message', () => {});
+      socket.on('error', () => {});
+      return;
+    }
     void runConnection(socket, staticPair, rekeyInterval, behavior);
   });
   await new Promise<void>((resolveListening) =>
@@ -403,6 +410,21 @@ describe('NoiseWebSocket', () => {
       await channel.send(encoder.encode('trigger'));
       await assert.rejects(channel.recv(), ProtocolError);
       await assert.rejects(channel.recv(), ProtocolError);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('times out when the server never answers the handshake', TEST_TIMEOUT, async () => {
+    const server = await startServer(echoBehavior, { silentHandshake: true });
+    try {
+      await assert.rejects(
+        NoiseWebSocket.connect(server.url, server.identity, {
+          handshakeTimeoutMs: 250,
+        }),
+        (err: unknown) =>
+          err instanceof HandshakeError && /timed out/.test(err.message),
+      );
     } finally {
       await server.close();
     }

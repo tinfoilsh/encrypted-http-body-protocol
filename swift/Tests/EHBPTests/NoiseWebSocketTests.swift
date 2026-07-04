@@ -267,17 +267,20 @@ final class NoiseWSTestServer: @unchecked Sendable {
     private let listenFD: Int32
     private let staticKey: Curve25519.KeyAgreement.PrivateKey
     private let negotiateSubprotocol: Bool
+    private let stallHandshakeReply: Bool
     private let rekeyInterval: UInt64
     private let behavior: TestBehavior
 
     init(
         negotiateSubprotocol: Bool = true,
+        stallHandshakeReply: Bool = false,
         rekeyInterval: UInt64 = NoiseWebSocketProtocol.rekeyInterval,
         behavior: @escaping TestBehavior
     ) throws {
         self.staticKey = Curve25519.KeyAgreement.PrivateKey()
         self.identity = try Identity(publicKeyBytes: staticKey.publicKey.rawRepresentation)
         self.negotiateSubprotocol = negotiateSubprotocol
+        self.stallHandshakeReply = stallHandshakeReply
         self.rekeyInterval = rekeyInterval
         self.behavior = behavior
 
@@ -339,6 +342,14 @@ final class NoiseWSTestServer: @unchecked Sendable {
         } catch {
             conn.abortTCP()
             events.put("upgrade-error: \(error)")
+            return
+        }
+        if stallHandshakeReply {
+            // Read the client's handshake message but never reply,
+            // simulating a stalled or hostile peer.
+            _ = try? conn.readMessage()
+            Thread.sleep(forTimeInterval: 5)
+            conn.abortTCP()
             return
         }
         do {
@@ -645,6 +656,26 @@ final class NoiseWebSocketTests: XCTestCase {
             }
             XCTAssertTrue(detail.contains("subprotocol"), "unexpected detail: \(detail)")
         }
+    }
+
+    func testConnectHandshakeTimeout() async throws {
+        let server = try NoiseWSTestServer(stallHandshakeReply: true, behavior: echoBehavior)
+        defer { server.stop() }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        do {
+            _ = try await NoiseWebSocketChannel.connect(
+                url: server.url, identity: server.identity, handshakeTimeout: .milliseconds(200))
+            XCTFail("connect should time out waiting for the handshake reply")
+        } catch let error as EHBPError {
+            guard case .handshakeFailed(let detail) = error else {
+                XCTFail("expected handshakeFailed, got \(error)")
+                return
+            }
+            XCTAssertTrue(detail.contains("timed out"), "unexpected detail: \(detail)")
+        }
+        XCTAssertLessThan(clock.now - start, .seconds(2))
     }
 
     // MARK: - Cross-Language Interop Tests

@@ -15,6 +15,7 @@ distinguishable from an intentional shutdown (``ChannelTruncatedError``).
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional, Union
 
 import websockets.asyncio.client
@@ -42,6 +43,7 @@ from .protocol import (
     NOISE_PROLOGUE,
     NOISE_PROTOCOL_NAME,
     WS_HANDSHAKE_READ_LIMIT,
+    WS_HANDSHAKE_TIMEOUT,
     WS_RECORD_CLOSE,
     WS_RECORD_DATA,
     WS_RECORD_OVERHEAD,
@@ -233,6 +235,7 @@ class NoiseWebSocket(_ChannelState):
         server_identity: ServerIdentity,
         *,
         max_message_size: int = DEFAULT_WS_MAX_MESSAGE_SIZE,
+        handshake_timeout: float = WS_HANDSHAKE_TIMEOUT,
         rekey_interval_for_testing: int = WS_REKEY_INTERVAL,
     ) -> NoiseWebSocket:
         """Opens a WebSocket connection to ``url`` (ws, wss, http, or https
@@ -241,13 +244,16 @@ class NoiseWebSocket(_ChannelState):
         completes.
 
         ``max_message_size`` caps the payload size of a single record in
-        both directions; both peers should agree on the cap.
+        both directions; both peers should agree on the cap. ``handshake_timeout``
+        bounds the WebSocket dial and the Noise handshake, each independently,
+        so a stalled or hostile peer cannot hang the caller.
         """
         try:
             ws = websockets.sync.client.connect(
                 _websocket_url(url),
                 subprotocols=[Subprotocol(WS_SUBPROTOCOL)],
                 max_size=max_message_size + WS_RECORD_OVERHEAD,
+                open_timeout=handshake_timeout,
             )
         except (OSError, websockets.exceptions.WebSocketException) as err:
             raise WebSocketError(f"dial: {err}") from err
@@ -257,13 +263,16 @@ class NoiseWebSocket(_ChannelState):
         try:
             handshake = _Handshake(server_identity.public_key_bytes())
             ws.send(handshake.message1())
-            message2 = ws.recv()
+            message2 = ws.recv(timeout=handshake_timeout)
             if isinstance(message2, str):
                 raise HandshakeError("handshake message must be binary")
             send_key, recv_key = handshake.finish(message2)
         except EHBPError:
             ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
             raise
+        except TimeoutError as err:
+            ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
+            raise HandshakeError(f"handshake timed out after {handshake_timeout}s") from err
         except websockets.exceptions.WebSocketException as err:
             ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
             raise HandshakeError(f"handshake failed: {err}") from err
@@ -376,6 +385,7 @@ class AsyncNoiseWebSocket(_ChannelState):
         server_identity: ServerIdentity,
         *,
         max_message_size: int = DEFAULT_WS_MAX_MESSAGE_SIZE,
+        handshake_timeout: float = WS_HANDSHAKE_TIMEOUT,
         rekey_interval_for_testing: int = WS_REKEY_INTERVAL,
     ) -> AsyncNoiseWebSocket:
         """Opens a WebSocket connection to ``url`` (ws, wss, http, or https
@@ -384,13 +394,16 @@ class AsyncNoiseWebSocket(_ChannelState):
         completes.
 
         ``max_message_size`` caps the payload size of a single record in
-        both directions; both peers should agree on the cap.
+        both directions; both peers should agree on the cap. ``handshake_timeout``
+        bounds the WebSocket dial and the Noise handshake, each independently,
+        so a stalled or hostile peer cannot hang the caller.
         """
         try:
             ws = await websockets.asyncio.client.connect(
                 _websocket_url(url),
                 subprotocols=[Subprotocol(WS_SUBPROTOCOL)],
                 max_size=max_message_size + WS_RECORD_OVERHEAD,
+                open_timeout=handshake_timeout,
             )
         except (OSError, websockets.exceptions.WebSocketException) as err:
             raise WebSocketError(f"dial: {err}") from err
@@ -400,13 +413,16 @@ class AsyncNoiseWebSocket(_ChannelState):
         try:
             handshake = _Handshake(server_identity.public_key_bytes())
             await ws.send(handshake.message1())
-            message2 = await ws.recv()
+            message2 = await asyncio.wait_for(ws.recv(), timeout=handshake_timeout)
             if isinstance(message2, str):
                 raise HandshakeError("handshake message must be binary")
             send_key, recv_key = handshake.finish(message2)
         except EHBPError:
             await ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
             raise
+        except asyncio.TimeoutError as err:
+            await ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
+            raise HandshakeError(f"handshake timed out after {handshake_timeout}s") from err
         except websockets.exceptions.WebSocketException as err:
             await ws.close(_CLOSE_POLICY_VIOLATION, "handshake failed")
             raise HandshakeError(f"handshake failed: {err}") from err

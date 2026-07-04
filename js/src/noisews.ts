@@ -27,7 +27,9 @@ import {
 import { NoiseNKInitiator, NoiseRecordCipher } from './noise.js';
 
 const CLOSE_CODE_NORMAL = 1000;
-const CLOSE_CODE_POLICY_VIOLATION = 1008;
+// The browser close() API only accepts 1000 or 3000-4999, so policy
+// violations are signaled with an application code mirroring 1008.
+const CLOSE_CODE_POLICY_VIOLATION = 4008;
 
 type SocketEvent =
   | { kind: 'message'; data: unknown }
@@ -61,6 +63,11 @@ export interface NoiseWebSocketOptions {
    * receiving. Defaults to NOISE_WS.DEFAULT_MAX_MESSAGE_SIZE (1 MiB).
    */
   maxMessageSize?: number;
+  /**
+   * Cap in milliseconds on the WebSocket dial plus Noise handshake.
+   * Defaults to NOISE_WS.HANDSHAKE_TIMEOUT_MS (10 seconds).
+   */
+  handshakeTimeoutMs?: number;
   /**
    * Test-only override of the rekey interval. Peers that disagree on it
    * fail record authentication after the earlier boundary.
@@ -130,6 +137,10 @@ export class NoiseWebSocket {
       options.rekeyIntervalForTesting && options.rekeyIntervalForTesting > 0
         ? options.rekeyIntervalForTesting
         : NOISE_WS.REKEY_INTERVAL;
+    const handshakeTimeoutMs =
+      options.handshakeTimeoutMs && options.handshakeTimeoutMs > 0
+        ? options.handshakeTimeoutMs
+        : NOISE_WS.HANDSHAKE_TIMEOUT_MS;
     const serverStaticKey = hexToBytes(await serverIdentity.getPublicKeyHex());
 
     const target = websocketUrl(url);
@@ -167,9 +178,24 @@ export class NoiseWebSocket {
       };
     });
     ws.onmessage = (event) => queue.push({ kind: 'message', data: event.data });
-    await openPromise;
+
+    // A stalled or malicious peer must not keep the dial pending forever,
+    // so the socket is torn down once the deadline passes; the resulting
+    // close/error event unblocks whichever step is being awaited.
+    let timedOut = false;
+    let handshakeDone = false;
+    const timer = setTimeout(() => {
+      if (handshakeDone) return;
+      timedOut = true;
+      try {
+        ws.close(CLOSE_CODE_POLICY_VIOLATION, 'handshake timeout');
+      } catch {
+        // Best-effort teardown.
+      }
+    }, handshakeTimeoutMs);
 
     try {
+      await openPromise;
       if (ws.protocol !== NOISE_WS.SUBPROTOCOL) {
         throw new HandshakeError(
           `server did not negotiate subprotocol ${NOISE_WS.SUBPROTOCOL}`);
@@ -191,6 +217,7 @@ export class NoiseWebSocket {
       }
       const [sendKey, recvKey] = await handshake.readMessage2(new Uint8Array(event.data));
 
+      handshakeDone = true;
       return new NoiseWebSocket(
         ws,
         queue,
@@ -204,8 +231,14 @@ export class NoiseWebSocket {
       } catch {
         // Best-effort teardown.
       }
+      if (timedOut) {
+        throw new HandshakeError(
+          `handshake timed out after ${handshakeTimeoutMs}ms`, { cause: err });
+      }
       if (err instanceof EhbpError) throw err;
       throw new HandshakeError(`handshake failed: ${errorDetail(err)}`, { cause: err });
+    } finally {
+      clearTimeout(timer);
     }
   }
 

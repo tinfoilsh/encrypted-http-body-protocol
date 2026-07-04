@@ -94,4 +94,7 @@ public enum NoiseWebSocketProtocol {
     /// Number of records after which each direction's cipher state is
     /// rekeyed. The schedule is deterministic so both peers stay in sync.
     public static let rekeyInterval: UInt64 = 1 << 16
+
+    /// Default cap on the WebSocket dial plus Noise handshake.
+    public static let handshakeTimeout: Duration = .seconds(10)
 }

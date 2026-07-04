@@ -113,7 +113,8 @@ func WithOriginPatterns(patterns ...string) Option {
 	}
 }
 
-// WithHandshakeTimeout bounds the Noise handshake on the server side.
+// WithHandshakeTimeout bounds the WebSocket dial plus Noise handshake on
+// Dial, and the Noise handshake on the server side.
 func WithHandshakeTimeout(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {

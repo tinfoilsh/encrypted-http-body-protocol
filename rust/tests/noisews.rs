@@ -1,7 +1,7 @@
 #![cfg(feature = "ws")]
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
@@ -530,6 +530,63 @@ async fn dial_requires_negotiated_subprotocol() {
         }
         other => panic!("dial should fail on missing subprotocol, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn dial_handshake_times_out() {
+    let params = NOISE_PROTOCOL_NAME.parse().unwrap();
+    let keypair = snow::Builder::new(params).generate_keypair().unwrap();
+    let identity = ServerIdentity::from_public_key_bytes(&keypair.public).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+
+    // Negotiates the subprotocol like a real server, then reads the
+    // client's handshake message but never replies, simulating a stalled
+    // or hostile peer.
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let callback = |request: &Request, mut response: Response| {
+            let offered = request
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if offered
+                .split(',')
+                .map(str::trim)
+                .any(|p| p == WS_SUBPROTOCOL)
+            {
+                response.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    HeaderValue::from_static(WS_SUBPROTOCOL),
+                );
+            }
+            Ok(response)
+        };
+        let mut ws = accept_hdr_async(stream, callback).await.unwrap();
+        let _ = ws.next().await;
+        std::future::pending::<()>().await;
+    });
+
+    let options = NoiseWebSocketOptions::new().handshake_timeout(Duration::from_millis(200));
+    let start = Instant::now();
+    match timeout(
+        TEST_TIMEOUT,
+        NoiseWebSocket::connect_with(&url, &identity, options),
+    )
+    .await
+    .unwrap()
+    {
+        Err(Error::Handshake(detail)) => {
+            assert!(detail.contains("timed out"), "unexpected detail: {detail}");
+        }
+        other => panic!("dial should time out waiting for the handshake reply, got {other:?}"),
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "dial took too long to time out: {:?}",
+        start.elapsed()
+    );
 }
 
 #[derive(Deserialize)]

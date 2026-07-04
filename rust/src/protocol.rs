@@ -31,3 +31,5 @@ pub const DEFAULT_WS_MAX_MESSAGE_SIZE: usize = 1 << 20;
 pub const WS_RECORD_OVERHEAD: usize = 64;
 pub const WS_HANDSHAKE_READ_LIMIT: usize = 4096;
 pub const WS_REKEY_INTERVAL: u64 = 1 << 16;
+/// Default cap on the WebSocket dial plus Noise handshake (SPEC Section 8.4).
+pub const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

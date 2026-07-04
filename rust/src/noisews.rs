@@ -18,7 +18,9 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::time::timeout;
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{
@@ -36,8 +38,8 @@ use zeroize::Zeroize;
 use crate::{
     protocol::{
         AES256_KEY_LENGTH, AES_GCM_NONCE_LENGTH, DEFAULT_WS_MAX_MESSAGE_SIZE, NOISE_PROLOGUE,
-        NOISE_PROTOCOL_NAME, WS_HANDSHAKE_READ_LIMIT, WS_RECORD_CLOSE, WS_RECORD_DATA,
-        WS_RECORD_OVERHEAD, WS_REKEY_INTERVAL, WS_SUBPROTOCOL,
+        NOISE_PROTOCOL_NAME, WS_HANDSHAKE_READ_LIMIT, WS_HANDSHAKE_TIMEOUT, WS_RECORD_CLOSE,
+        WS_RECORD_DATA, WS_RECORD_OVERHEAD, WS_REKEY_INTERVAL, WS_SUBPROTOCOL,
     },
     Error, Result, ServerIdentity,
 };
@@ -148,6 +150,7 @@ impl Drop for CipherState {
 pub struct NoiseWebSocketOptions {
     max_message_size: usize,
     rekey_interval: u64,
+    handshake_timeout: Duration,
 }
 
 impl Default for NoiseWebSocketOptions {
@@ -155,6 +158,7 @@ impl Default for NoiseWebSocketOptions {
         Self {
             max_message_size: DEFAULT_WS_MAX_MESSAGE_SIZE,
             rekey_interval: WS_REKEY_INTERVAL,
+            handshake_timeout: WS_HANDSHAKE_TIMEOUT,
         }
     }
 }
@@ -170,6 +174,15 @@ impl NoiseWebSocketOptions {
     pub fn max_message_size(mut self, n: usize) -> Self {
         if n > 0 {
             self.max_message_size = n;
+        }
+        self
+    }
+
+    /// Bounds the WebSocket dial plus Noise handshake. Defaults to
+    /// [`WS_HANDSHAKE_TIMEOUT`].
+    pub fn handshake_timeout(mut self, d: Duration) -> Self {
+        if !d.is_zero() {
+            self.handshake_timeout = d;
         }
         self
     }
@@ -285,51 +298,61 @@ impl NoiseWebSocket {
             .max_message_size(Some(read_limit))
             .max_frame_size(Some(read_limit));
 
-        let (mut ws, response) = connect_async_with_config(request, Some(config), false)
-            .await
-            .map_err(|err| match err {
-                WsError::Protocol(ProtocolError::SecWebSocketSubProtocolError(_)) => {
-                    Error::Handshake("server did not accept required subprotocol".into())
-                }
-                other => Error::WebSocket(format!("dial: {other}")),
-            })?;
+        let handshake_timeout = options.handshake_timeout;
+        let dial_and_handshake = async move {
+            let (mut ws, response) = connect_async_with_config(request, Some(config), false)
+                .await
+                .map_err(|err| match err {
+                    WsError::Protocol(ProtocolError::SecWebSocketSubProtocolError(_)) => {
+                        Error::Handshake("server did not accept required subprotocol".into())
+                    }
+                    other => Error::WebSocket(format!("dial: {other}")),
+                })?;
 
-        let negotiated = response
-            .headers()
-            .get(SUBPROTOCOL_HEADER)
-            .and_then(|value| value.to_str().ok());
-        if negotiated != Some(WS_SUBPROTOCOL) {
-            let _ = ws
-                .close(Some(CloseFrame {
-                    code: CloseCode::Policy,
-                    reason: "ehbp noise subprotocol required".into(),
-                }))
-                .await;
-            return Err(Error::Handshake(
-                "server did not accept required subprotocol".into(),
-            ));
-        }
-
-        match Self::client_handshake(&mut ws, &server_pub).await {
-            Ok((send_key, recv_key)) => Ok(Self {
-                ws,
-                send: CipherState::new(send_key, options.rekey_interval),
-                recv: CipherState::new(recv_key, options.rekey_interval),
-                max_message_size: options.max_message_size,
-                peer_closed: false,
-                close_sent: false,
-                local_closed: false,
-                sticky: None,
-            }),
-            Err(err) => {
+            let negotiated = response
+                .headers()
+                .get(SUBPROTOCOL_HEADER)
+                .and_then(|value| value.to_str().ok());
+            if negotiated != Some(WS_SUBPROTOCOL) {
                 let _ = ws
                     .close(Some(CloseFrame {
                         code: CloseCode::Policy,
-                        reason: "handshake failed".into(),
+                        reason: "ehbp noise subprotocol required".into(),
                     }))
                     .await;
-                Err(err)
+                return Err(Error::Handshake(
+                    "server did not accept required subprotocol".into(),
+                ));
             }
+
+            match Self::client_handshake(&mut ws, &server_pub).await {
+                Ok((send_key, recv_key)) => Ok(Self {
+                    ws,
+                    send: CipherState::new(send_key, options.rekey_interval),
+                    recv: CipherState::new(recv_key, options.rekey_interval),
+                    max_message_size: options.max_message_size,
+                    peer_closed: false,
+                    close_sent: false,
+                    local_closed: false,
+                    sticky: None,
+                }),
+                Err(err) => {
+                    let _ = ws
+                        .close(Some(CloseFrame {
+                            code: CloseCode::Policy,
+                            reason: "handshake failed".into(),
+                        }))
+                        .await;
+                    Err(err)
+                }
+            }
+        };
+
+        match timeout(handshake_timeout, dial_and_handshake).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::Handshake(format!(
+                "handshake timed out after {handshake_timeout:?}"
+            ))),
         }
     }
 
