@@ -62,6 +62,7 @@ struct NoiseRecordCipher {
     private let rekeyInterval: UInt64
 
     init(key: Data, rekeyInterval: UInt64, initialCountForTesting: UInt64 = 0) {
+        precondition(rekeyInterval > 0, "rekeyInterval must be positive")
         self.key = key
         self.count = initialCountForTesting
         self.rekeyInterval = rekeyInterval
