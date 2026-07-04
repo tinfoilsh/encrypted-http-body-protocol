@@ -140,6 +140,15 @@ public actor NoiseWebSocketChannel {
         rekeyInterval: UInt64,
         handshakeTimeout: Duration = NoiseWebSocketProtocol.handshakeTimeout
     ) async throws -> NoiseWebSocketChannel {
+        // The read limit below is maxMessageSize + recordOverhead, whose
+        // unchecked addition traps on overflow, so oversized caps must be
+        // rejected as a recoverable error instead.
+        guard maxMessageSize > 0,
+            maxMessageSize <= Int.max - NoiseWebSocketProtocol.recordOverhead
+        else {
+            throw EHBPError.invalidInput(
+                "maxMessageSize must be positive and leave room for record overhead")
+        }
         let wsURL = try webSocketURL(from: url)
         let task = session.webSocketTask(
             with: wsURL, protocols: [NoiseWebSocketProtocol.subprotocol]

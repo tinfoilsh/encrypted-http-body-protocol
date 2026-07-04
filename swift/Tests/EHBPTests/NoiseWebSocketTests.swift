@@ -734,6 +734,24 @@ final class NoiseWebSocketTests: XCTestCase {
         XCTAssertThrowsError(try exhausted.decrypt(Data(repeating: 0, count: 32)))
     }
 
+    func testConnectRejectsMessageCapsThatOverflowReadLimit() async throws {
+        let identity = try Identity(
+            publicKeyBytes: Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
+        let url = URL(string: "ws://127.0.0.1:1")!
+        for cap in [Int.max, 0, -1] {
+            do {
+                _ = try await NoiseWebSocketChannel.connect(
+                    url: url, identity: identity, maxMessageSize: cap)
+                XCTFail("connect should reject message cap \(cap)")
+            } catch let error as EHBPError {
+                guard case .invalidInput = error else {
+                    XCTFail("expected invalidInput for cap \(cap), got \(error)")
+                    return
+                }
+            }
+        }
+    }
+
     // MARK: - Cross-Language Interop Tests
 
     private func vectorsDir() -> URL {
