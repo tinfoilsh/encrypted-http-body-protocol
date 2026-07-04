@@ -455,6 +455,12 @@ impl NoiseWebSocket {
         if let Some(sticky) = &self.sticky {
             return Err(sticky.to_error());
         }
+        // Reported without touching the transport so the outcome does not
+        // depend on whether the peer's close-record reply has arrived.
+        if self.local_closed {
+            self.sticky = Some(Sticky::Closed);
+            return Err(Error::ChannelClosed);
+        }
         loop {
             let message = match self.ws.next().await {
                 None => return Err(self.transport_ended("connection closed".into())),

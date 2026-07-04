@@ -499,6 +499,40 @@ final class NoiseWebSocketTests: XCTestCase {
         XCTAssertNil(second)
     }
 
+    func testReceiveRacingLocalCloseNeverReturnsData() async throws {
+        let sendThenAwaitClose: TestBehavior = { conn, events in
+            if let ciphertext = try? conn.encryptRecord(
+                Data([NoiseWebSocketProtocol.recordData]) + Data("late".utf8))
+            {
+                try? conn.writeFrame(opcode: .binary, payload: ciphertext)
+            }
+            _ = conn.readRecord()
+            conn.respondCloseAndShutdown()
+            events.put("done")
+        }
+        let server = try NoiseWSTestServer(behavior: sendThenAwaitClose)
+        defer { server.stop() }
+        let channel = try await NoiseWebSocketChannel.connect(
+            url: server.url, identity: server.identity)
+
+        // close() sets its closed flag before it awaits sending its own
+        // close record, so a concurrent receive() can observe the flag
+        // while the transport is still alive. Racing the two here checks
+        // that receive() always honors the flag instead of depending on
+        // whether it wins or loses that race against the transport.
+        async let receiveResult: Data? = channel.receive()
+        try await channel.close()
+        do {
+            _ = try await receiveResult
+            XCTFail("receive racing a local close should never return data")
+        } catch let error as EHBPError {
+            guard case .channelClosed = error else {
+                XCTFail("expected channelClosed, got \(error)")
+                return
+            }
+        }
+    }
+
     func testWrongServerKeyFailsHandshake() async throws {
         let server = try NoiseWSTestServer(behavior: echoBehavior)
         defer { server.stop() }

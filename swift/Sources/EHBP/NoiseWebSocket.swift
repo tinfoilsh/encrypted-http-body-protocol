@@ -259,6 +259,12 @@ public actor NoiseWebSocketChannel {
         if let sticky {
             throw sticky
         }
+        // Reported without touching the transport so the outcome does not
+        // depend on whether the peer's close-record reply has arrived.
+        if localClosed {
+            sticky = EHBPError.channelClosed
+            throw EHBPError.channelClosed
+        }
         let message: URLSessionWebSocketTask.Message
         do {
             message = try await task.receive()

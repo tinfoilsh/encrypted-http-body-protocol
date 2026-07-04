@@ -327,6 +327,22 @@ async fn echo_round_trip_and_clean_close() {
 }
 
 #[tokio::test]
+async fn recv_after_local_close_is_channel_closed() {
+    let (server, _events) = spawn_echo_server(WS_REKEY_INTERVAL).await;
+    let mut conn = NoiseWebSocket::connect(&server.url, &server.identity)
+        .await
+        .unwrap();
+    conn.close().await.unwrap();
+
+    for _ in 0..2 {
+        match timeout(TEST_TIMEOUT, conn.recv()).await.unwrap() {
+            Err(Error::ChannelClosed) => {}
+            other => panic!("recv after close should return ChannelClosed, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn recv_after_peer_close_returns_none() {
     let (events_tx, _events_rx) = mpsc::unbounded_channel();
     let server = spawn_server(WS_REKEY_INTERVAL, move |mut conn| async move {
