@@ -122,7 +122,7 @@ public final class EHBPClient: @unchecked Sendable {
         _lastSessionRecoveryToken = token
         tokenLock.unlock()
 
-        return (decryptedData, httpResponse)
+        return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
     }
 
     /// Makes an encrypted streaming request and returns chunks as an AsyncStream
@@ -263,7 +263,32 @@ public final class EHBPClient: @unchecked Sendable {
             }
         }
 
-        return (stream, httpResponse)
+        return (stream, EHBPClient.sanitizedResponse(httpResponse))
+    }
+
+    /// Removes framing headers that describe the encrypted body. The
+    /// decrypted data has a different length, so consumers that forward the
+    /// response headers verbatim (for example a proxy) would otherwise
+    /// announce a body length that no longer matches what is written,
+    /// truncating the reply.
+    static func sanitizedResponse(_ response: HTTPURLResponse) -> HTTPURLResponse {
+        var headers: [String: String] = [:]
+        for (name, value) in response.allHeaderFields {
+            guard let name = name as? String, let value = value as? String else { continue }
+            let lowered = name.lowercased()
+            if lowered == "content-length" || lowered == "transfer-encoding" { continue }
+            headers[name] = value
+        }
+        guard let url = response.url,
+              let sanitized = HTTPURLResponse(
+                  url: url,
+                  statusCode: response.statusCode,
+                  httpVersion: nil,
+                  headerFields: headers
+              ) else {
+            return response
+        }
+        return sanitized
     }
 
 }

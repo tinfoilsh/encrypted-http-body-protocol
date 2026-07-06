@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +129,53 @@ func TestDecryptResponseWithTokenSingleChunk(t *testing.T) {
 
 	err = DecryptResponseWithToken(resp, token)
 	require.NoError(t, err)
+
+	decrypted, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, responseData, string(decrypted))
+}
+
+func TestDecryptResponseWithTokenClearsStaleContentLength(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+
+	responseData := "response from server"
+
+	req := httptest.NewRequest("POST", "/test", strings.NewReader("request"))
+	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
+
+	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
+	require.NoError(t, err)
+	io.ReadAll(req.Body)
+
+	w := httptest.NewRecorder()
+	writer, err := serverIdentity.SetupDerivedResponseEncryption(w, respCtx)
+	require.NoError(t, err)
+	writer.Write([]byte(responseData))
+	writer.Flush()
+
+	// Buffering infrastructure between server and client can re-frame the
+	// chunked encrypted reply with an explicit Content-Length describing the
+	// encrypted body.
+	encryptedLength := w.Body.Len()
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", encryptedLength))
+
+	resp := &http.Response{
+		Header:        w.Header(),
+		Body:          io.NopCloser(bytes.NewReader(w.Body.Bytes())),
+		ContentLength: int64(encryptedLength),
+	}
+
+	err = DecryptResponseWithToken(resp, token)
+	require.NoError(t, err)
+
+	assert.Empty(t, resp.Header.Get("Content-Length"),
+		"stale encrypted Content-Length must not survive decryption")
+	assert.Equal(t, int64(-1), resp.ContentLength)
 
 	decrypted, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)

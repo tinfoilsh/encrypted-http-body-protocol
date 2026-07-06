@@ -380,4 +380,84 @@ final class SessionRecoveryTests: XCTestCase {
             encryptedData: encryptedBody
         ))
     }
+
+    // The encrypted reply carries framing headers describing the ciphertext,
+    // as buffering middleboxes produce. The decrypted response handed to the
+    // caller must not retain them, or consumers forwarding the headers
+    // verbatim (proxies) would truncate the reply.
+    func testDecryptedResponseDropsEncryptedFramingHeaders() async throws {
+        let serverPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+
+        StubURLProtocol.handler = { [simulateServerResponse] request in
+            guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
+                  let requestEnc = Data(hexString: encHex) else {
+                throw EHBPError.invalidInput("missing encapsulated key header")
+            }
+            let (responseNonce, encryptedBody) = try simulateServerResponse(
+                serverPrivateKey, requestEnc, Data("full reply".utf8), nil
+            )
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    EHBPProtocol.responseNonceHeader: responseNonce.hexString,
+                    "Content-Length": String(encryptedBody.count),
+                    "Transfer-Encoding": "identity",
+                    "Content-Type": "text/plain",
+                ]
+            )!
+            return (response, encryptedBody)
+        }
+        defer { StubURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(serverPrivateKey.publicKey.rawRepresentation),
+            session: session
+        )
+
+        let (data, response) = try await client.request(
+            method: "POST",
+            path: "/secure",
+            body: Data("hello".utf8)
+        )
+
+        XCTAssertEqual(String(data: data, encoding: .utf8), "full reply")
+        XCTAssertNil(response.value(forHTTPHeaderField: "Content-Length"),
+                     "stale encrypted Content-Length must not survive decryption")
+        XCTAssertNil(response.value(forHTTPHeaderField: "Transfer-Encoding"),
+                     "stale Transfer-Encoding must not survive decryption")
+        XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "text/plain")
+        XCTAssertNotNil(response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader))
+    }
+}
+
+final class StubURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = StubURLProtocol.handler else {
+            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no stub handler"))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

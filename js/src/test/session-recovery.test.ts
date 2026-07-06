@@ -348,6 +348,51 @@ describe('Session Recovery Token', () => {
       assert(decrypted.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER));
     });
 
+    it('should drop stale encrypted framing headers', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const request = new Request('https://server.test/api', {
+        method: 'POST',
+        body: 'hello',
+      });
+
+      const { request: encryptedRequest, context } =
+        await identity.encryptRequestWithContext(request);
+      assert(context);
+
+      const token = await extractSessionRecoveryToken(context);
+      const encryptedResponse = await buildEncryptedResponse(
+        encryptedRequest,
+        privateKey,
+        'full reply',
+      );
+
+      // Buffering infrastructure between server and client can re-frame the
+      // encrypted reply with framing headers describing the ciphertext.
+      const encryptedBytes = new Uint8Array(await encryptedResponse.arrayBuffer());
+      const staleResponse = new Response(toArrayBuffer(encryptedBytes), {
+        status: 200,
+        headers: {
+          [PROTOCOL.RESPONSE_NONCE_HEADER]:
+            encryptedResponse.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!,
+          'content-length': String(encryptedBytes.byteLength),
+          'transfer-encoding': 'chunked',
+          'content-type': 'text/plain',
+        },
+      });
+
+      const decrypted = await decryptResponseWithToken(staleResponse, token);
+
+      assert.strictEqual(decrypted.headers.get('content-length'), null,
+        'stale encrypted content-length must not survive decryption');
+      assert.strictEqual(decrypted.headers.get('transfer-encoding'), null,
+        'stale transfer-encoding must not survive decryption');
+      assert.strictEqual(decrypted.headers.get('content-type'), 'text/plain');
+      assert(decrypted.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER));
+
+      const text = await decrypted.text();
+      assert.strictEqual(text, 'full reply');
+    });
+
     it('should return the response as-is when body is null', async () => {
       const token: SessionRecoveryToken = {
         exportedSecret: new Uint8Array(32),

@@ -106,6 +106,11 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		eof:    false,
 	}
 	resp.ContentLength = -1
+	// Any Content-Length header describes the encrypted body, not the
+	// decrypted stream. Consumers that forward the response headers verbatim
+	// (for example httputil.ReverseProxy) would otherwise announce a body
+	// length that no longer matches what is written, truncating the reply.
+	resp.Header.Del("Content-Length")
 
 	return nil
 }
