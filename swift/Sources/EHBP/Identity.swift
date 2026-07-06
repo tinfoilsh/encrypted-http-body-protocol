@@ -228,6 +228,12 @@ public final class Identity: Sendable {
         )
     }
 
+    /// The server's raw X25519 public key bytes. EHBP-WS reuses this HPKE
+    /// identity key as the Noise static key (SPEC Section 8.3).
+    public var publicKeyBytes: Data {
+        publicKey.rawRepresentation
+    }
+
     /// Encrypts request body and returns context for response decryption (SPEC Section 5.1)
     ///
     /// - Parameter body: Request body to encrypt

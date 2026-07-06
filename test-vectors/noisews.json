@@ -1,0 +1,86 @@
+{
+  "protocolName": "Noise_NK_25519_AESGCM_SHA256",
+  "prologue": "ehbp noise websocket v1",
+  "serverStaticPrivate": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "serverStaticPublic": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c",
+  "clientEphemeralPrivate": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "serverEphemeralPrivate": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+  "message1": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a43ae256ae1cc7ccf939c44b627e0ba9a",
+  "message2": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f7bfce83198f4f998ea3cb479d0a00865",
+  "handshakeHash": "27d540503da109e66b4dfd4cfc72ff0a49156428e8e80f6b23d5f0186fc563e2",
+  "rekeyInterval": 4,
+  "records": [
+    {
+      "dir": "c2s",
+      "type": "data",
+      "payload": "68656c6c6f2066726f6d20636c69656e74",
+      "ciphertext": "0f5e2d9bfc7f0adbd434277d211e5f19e74b3637b58e459a62852bbf03543138e287"
+    },
+    {
+      "dir": "s2c",
+      "type": "data",
+      "payload": "68656c6c6f2066726f6d20736572766572",
+      "ciphertext": "2ccd65deeb47948d844765ee3e174fcb570fa3705e415d5a300903bc40d69bf71474"
+    },
+    {
+      "dir": "c2s",
+      "type": "data",
+      "payload": "",
+      "ciphertext": "e7434d7c1352eaa7230ec10445c017d015"
+    },
+    {
+      "dir": "s2c",
+      "type": "data",
+      "payload": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ciphertext": "188071173be7f8a4c966beb1d7ef86e82fbd4b0e7c520df6cc7ac01fe5079d4d1a953698deba6d79c24d5d898b3992702ebb5b4c5c0dca3ab0a2f5755985c37a388a12d08d11f9bb8e987849d950f35e88"
+    },
+    {
+      "dir": "c2s",
+      "type": "data",
+      "payload": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "ciphertext": "41b3503c4f7332e9641b5247478b8f7966fe6cbdc9e08ccfefd0af46ead6630988f93860a07fd0c1d68da4e50ef30b150a130bafa6f7be4da4f654a3d3cb7f3e57bb4773abb16c50f23defdae37c934e55"
+    },
+    {
+      "dir": "s2c",
+      "type": "data",
+      "payload": "",
+      "ciphertext": "fa45ea14e94c7ebf4da69f583ebc8258d8"
+    },
+    {
+      "dir": "c2s",
+      "type": "data",
+      "payload": "636c69656e742063726f73736573207468652072656b657920626f756e64617279",
+      "ciphertext": "2fca6440ae0ba16611896f34d42a541ce43fd0f7e3e38edf14061cbffa1ba9f3bf68715dc9463fb4eabec077a973f127ea44"
+    },
+    {
+      "dir": "s2c",
+      "type": "data",
+      "payload": "7365727665722063726f73736573207468652072656b657920626f756e64617279",
+      "ciphertext": "427b3a4569d380e4aaa145fd9c6b48a299bb17e902a65ff65df5d4fbdedd6b281e0d4b0632031c94db029bb4869338a811da"
+    },
+    {
+      "dir": "c2s",
+      "type": "data",
+      "payload": "636c69656e742073656e647320756e646572206672657368206b657973",
+      "ciphertext": "9b57cb765e11bbe8b7bb44530e4db956180a4cefd372110bbf3f185a16bdf9544cba59ae9fb12405b7288934716d"
+    },
+    {
+      "dir": "s2c",
+      "type": "data",
+      "payload": "7365727665722073656e647320756e646572206672657368206b657973",
+      "ciphertext": "5bd68d783a20d40c0d31982d334bb82372af8f6d0b6d60971c2381c7ade8c9154123ea3b9e2ec236458ac201b9fb"
+    },
+    {
+      "dir": "c2s",
+      "type": "close",
+      "payload": "",
+      "ciphertext": "ca77b16f4c450ef888a16e0d6cf58c0337"
+    },
+    {
+      "dir": "s2c",
+      "type": "close",
+      "payload": "",
+      "ciphertext": "19d18a8f66a3a3838299fae8a9735a63e6"
+    }
+  ]
+}

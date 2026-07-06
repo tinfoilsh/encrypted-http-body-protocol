@@ -31,3 +31,18 @@ RESPONSE_NONCE_LABEL = b"nonce"
 LENGTH_PREFIX_SIZE = 4
 MAX_CHUNK_LENGTH = 0xFFFFFFFF
 MAX_SEQUENCE = (1 << 64) - 1
+
+WS_SUBPROTOCOL = "ehbp.noise.v1"
+NOISE_PROTOCOL_NAME = "Noise_NK_25519_AESGCM_SHA256"
+NOISE_PROLOGUE = b"ehbp noise websocket v1"
+WS_RECORD_DATA = 0x01
+WS_RECORD_CLOSE = 0x02
+DEFAULT_WS_MAX_MESSAGE_SIZE = 1 << 20
+# Framing added to a record payload: 1 record type byte, a 16-byte AEAD tag,
+# and margin for WebSocket read limit accounting.
+WS_RECORD_OVERHEAD = 64
+WS_HANDSHAKE_READ_LIMIT = 4096
+WS_REKEY_INTERVAL = 1 << 16
+# Default cap, in seconds, on the WebSocket dial plus Noise handshake
+# (SPEC Section 8.4).
+WS_HANDSHAKE_TIMEOUT = 10.0

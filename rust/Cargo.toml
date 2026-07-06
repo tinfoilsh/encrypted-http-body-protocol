@@ -6,11 +6,16 @@ rust-version = "1.87"
 description = "Rust client for the encrypted HTTP body protocol"
 license = "MIT"
 
+[features]
+default = ["ws"]
+ws = ["dep:futures-util", "dep:snow", "dep:tokio", "dep:tokio-tungstenite"]
+
 [dependencies]
 aes-gcm = "0.10"
 async-stream = "0.3"
 bytes = "1"
 futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 hex = "0.4"
 hkdf = "0.12"
 hpke = "0.13"
@@ -19,11 +24,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+snow = { version = "0.10", features = ["risky-raw-split"], optional = true }
 thiserror = "1"
+tokio = { version = "1", default-features = false, features = ["io-util", "net"], optional = true }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"], optional = true }
 url = "2"
 zeroize = "1"
 
 [dev-dependencies]
 futures-util = "0.3"
 http = "1"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

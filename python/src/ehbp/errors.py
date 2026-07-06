@@ -36,3 +36,22 @@ class HPKEError(EHBPError):
 
 class CryptoError(EHBPError):
     """An AEAD or key-derivation operation failed."""
+
+
+class HandshakeError(EHBPError):
+    """The Noise handshake for an encrypted WebSocket channel failed."""
+
+
+class WebSocketError(EHBPError):
+    """The underlying WebSocket transport failed."""
+
+
+class ChannelClosedError(EHBPError):
+    """The encrypted channel was closed locally."""
+
+
+class ChannelTruncatedError(EHBPError):
+    """The connection ended without the peer's encrypted close record.
+
+    An intermediary may have truncated the conversation (SPEC Section 8.7).
+    """

@@ -11,7 +11,9 @@ requires-python = ">=3.9"
 dependencies = [
     "cryptography>=42",
     "httpx>=0.27",
+    "noiseprotocol>=0.3.1",
     "pyhpke>=0.6",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]

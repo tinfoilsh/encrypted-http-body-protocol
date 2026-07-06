@@ -21,6 +21,7 @@
     "dev": "tsc --watch",
     "test": "node --test dist/esm/test/*.test.js",
     "test:integration": "node dist/esm/test/streaming.integration.js",
+    "test:integration:ws": "node dist/esm/test/noisews.integration.js",
     "example": "node --experimental-strip-types examples/example.ts",
     "serve": "node serve.js"
   },
@@ -42,12 +43,14 @@
     "hpke": "^1.0.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.0",
     "esbuild": "^0.25.9",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "ws": "^8.18.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist",

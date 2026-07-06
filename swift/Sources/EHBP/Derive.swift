@@ -126,6 +126,11 @@ public enum EHBPError: Error, LocalizedError {
     case networkError(String)
     case invalidResponse(String)
     case missingHeader(String)
+    case handshakeFailed(String)
+    case webSocketError(String)
+    case protocolViolation(String)
+    case channelClosed
+    case channelTruncated(String)
 
     public var errorDescription: String? {
         switch self {
@@ -135,6 +140,12 @@ public enum EHBPError: Error, LocalizedError {
         case .networkError(let msg): return "Network error: \(msg)"
         case .invalidResponse(let msg): return "Invalid response: \(msg)"
         case .missingHeader(let msg): return "Missing header: \(msg)"
+        case .handshakeFailed(let msg): return "Noise handshake failed: \(msg)"
+        case .webSocketError(let msg): return "WebSocket error: \(msg)"
+        case .protocolViolation(let msg): return "Protocol violation: \(msg)"
+        case .channelClosed: return "Encrypted channel closed"
+        case .channelTruncated(let msg):
+            return "Connection closed without encrypted close record: \(msg)"
         }
     }
 }

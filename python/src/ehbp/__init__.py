@@ -11,15 +11,20 @@ from .derive import (
     frame_chunk,
 )
 from .errors import (
+    ChannelClosedError,
+    ChannelTruncatedError,
     CryptoError,
     EHBPError,
+    HandshakeError,
     HPKEError,
     InvalidConfigError,
     InvalidInputError,
     KeyConfigMismatchError,
     ProtocolError,
+    WebSocketError,
 )
 from .identity import EncryptedRequest, ServerIdentity
+from .noisews import AsyncNoiseWebSocket, NoiseWebSocket
 from .session import SessionRecoveryToken
 from .transport import AsyncEHBPTransport, EHBPTransport
 
@@ -31,6 +36,8 @@ __all__ = [
     "StreamingResponse",
     "EHBPTransport",
     "AsyncEHBPTransport",
+    "NoiseWebSocket",
+    "AsyncNoiseWebSocket",
     "ServerIdentity",
     "EncryptedRequest",
     "SessionRecoveryToken",
@@ -47,6 +54,10 @@ __all__ = [
     "KeyConfigMismatchError",
     "HPKEError",
     "CryptoError",
+    "HandshakeError",
+    "WebSocketError",
+    "ChannelClosedError",
+    "ChannelTruncatedError",
     "protocol",
     "__version__",
 ]

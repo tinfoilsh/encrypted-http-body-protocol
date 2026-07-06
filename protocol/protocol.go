@@ -22,4 +22,7 @@ const (
 	// KeyConfigProblemType identifies EHBP key configuration mismatch errors.
 	// Clients can use this signal to refresh key config and retry safely.
 	KeyConfigProblemType = "urn:ietf:params:ehbp:error:key-config"
+
+	// WSSubprotocol is the WebSocket subprotocol for Noise-encrypted channels.
+	WSSubprotocol = "ehbp.noise.v1"
 )

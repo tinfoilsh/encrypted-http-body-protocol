@@ -15,6 +15,7 @@ import (
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/noisews"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
@@ -107,6 +108,26 @@ func main() {
 			time.Sleep(100 * time.Millisecond)
 		}
 	})))
+
+	wsServer, err := noisews.NewServer(serverIdentity)
+	if err != nil {
+		logrus.Fatalf("Failed to create WebSocket server: %v", err)
+	}
+	mux.Handle("/ws", wsServer.Handler(func(conn *noisews.Conn, r *http.Request) {
+		logrus.Debug("WebSocket connection established")
+		for {
+			msg, err := conn.Read(r.Context())
+			if err != nil {
+				logrus.Debugf("WebSocket connection ended: %v", err)
+				return
+			}
+			logrus.Debugf("Received WebSocket message: %s", string(msg))
+			if err := conn.Write(r.Context(), append([]byte("Hello, "), msg...)); err != nil {
+				logrus.Errorf("Failed to write WebSocket message: %v", err)
+				return
+			}
+		}
+	}))
 
 	proxyUpstream, err := url.Parse("http://localhost:11434")
 	if err != nil {
