@@ -13,6 +13,7 @@ bytes = "1"
 futures-core = "0.3"
 hex = "0.4"
 hkdf = "0.12"
+http = "1"
 http-body-util = "0.1"
 hpke = "0.13"
 rand = { version = "0.9", default-features = false, features = ["os_rng", "std_rng"] }
@@ -26,6 +27,5 @@ zeroize = "1"
 
 [dev-dependencies]
 futures-util = "0.3"
-http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["multipart", "rustls", "stream"] }
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }

@@ -1,5 +1,9 @@
 use bytes::{Buf, Bytes, BytesMut};
 use futures_core::Stream;
+#[cfg(not(target_arch = "wasm32"))]
+use http_body_util::BodyExt;
+#[cfg(not(target_arch = "wasm32"))]
+use reqwest::ResponseBuilderExt;
 use reqwest::{
     header::{
         HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING,
@@ -162,6 +166,180 @@ impl Client {
 
     pub fn delete(&self, path_or_url: impl AsRef<str>) -> Result<RequestBuilder> {
         self.request(Method::DELETE, path_or_url)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn execute(&self, request: reqwest::Request) -> Result<reqwest::Response> {
+        let PreparedRawRequest { request, token } = self.prepare_raw_request(request).await?;
+        let mut guard = token.as_ref().map(|token| SessionGuard {
+            token: token.clone(),
+            session: Arc::clone(&self.last_session_recovery_token),
+            active: true,
+        });
+        let response = match self.http_client.execute(request).await {
+            Ok(response) => response,
+            Err(err) => return Err(err.into()),
+        };
+        let response = self.open_raw_response(response, token).await?;
+        if let Some(guard) = guard.as_mut() {
+            guard.disarm();
+        }
+        Ok(response)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn prepare_raw_request(
+        &self,
+        mut request: reqwest::Request,
+    ) -> Result<PreparedRawRequest> {
+        self.validate_raw_request(&request)?;
+        self.replace_session_recovery_token(None);
+
+        let Some(body) = request.body_mut().take() else {
+            return Ok(PreparedRawRequest {
+                request,
+                token: None,
+            });
+        };
+
+        let mut plaintext = Box::pin(body.into_data_stream());
+        let first_chunk = loop {
+            match std::future::poll_fn(|cx| plaintext.as_mut().poll_next(cx)).await {
+                Some(Ok(chunk)) if chunk.is_empty() => continue,
+                Some(chunk) => break chunk?,
+                None => {
+                    return Ok(PreparedRawRequest {
+                        request,
+                        token: None,
+                    });
+                }
+            }
+        };
+        let mut encryptor = self.identity.request_encryptor()?;
+        let encapsulated_key = hex::encode(&encryptor.encapsulated_key);
+        let token = encryptor.token.clone();
+        let encrypted: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> =
+            Box::pin(async_stream::try_stream! {
+                yield Bytes::from(encryptor.encrypt_chunk(&first_chunk)?);
+                while let Some(chunk) =
+                    std::future::poll_fn(|cx| plaintext.as_mut().poll_next(cx)).await
+                {
+                    let chunk = chunk?;
+                    if !chunk.is_empty() {
+                        yield Bytes::from(encryptor.encrypt_chunk(&chunk)?);
+                    }
+                }
+            });
+
+        request.headers_mut().insert(
+            header_name(ENCAPSULATED_KEY_HEADER)?,
+            HeaderValue::from_str(&encapsulated_key)?,
+        );
+        request.headers_mut().remove(CONTENT_LENGTH);
+        request.headers_mut().remove(TRANSFER_ENCODING);
+        *request.body_mut() = Some(reqwest::Body::wrap_stream(encrypted));
+        self.replace_session_recovery_token(Some(token.clone()));
+
+        Ok(PreparedRawRequest {
+            request,
+            token: Some(token),
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn open_raw_response(
+        &self,
+        mut response: reqwest::Response,
+        token: Option<SessionRecoveryToken>,
+    ) -> Result<reqwest::Response> {
+        let Some(token) = token else {
+            return Ok(response);
+        };
+
+        if !response.headers().contains_key(RESPONSE_NONCE_HEADER) {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
+                Ok(body) => body,
+                Err(err) => {
+                    self.replace_session_recovery_token(None);
+                    return Err(err);
+                }
+            };
+            self.replace_session_recovery_token(None);
+            check_key_config_mismatch(status, &headers, &body)?;
+            return Err(Error::Protocol(format!(
+                "missing {RESPONSE_NONCE_HEADER} header"
+            )));
+        }
+
+        let response_nonce = match response_nonce(response.headers()) {
+            Ok(nonce) => nonce,
+            Err(err) => {
+                self.replace_session_recovery_token(None);
+                return Err(err);
+            }
+        };
+        let key_material =
+            match derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)
+            {
+                Ok(key_material) => key_material,
+                Err(err) => {
+                    self.replace_session_recovery_token(None);
+                    return Err(err);
+                }
+            };
+        let status = response.status();
+        let version = response.version();
+        let url = response.url().clone();
+        let extensions = std::mem::take(response.extensions_mut());
+        let mut headers = response.headers().clone();
+        strip_encrypted_framing_headers(&mut headers);
+
+        let body = SessionClearingStream {
+            inner: Box::pin(decrypt_response_stream(
+                response.bytes_stream(),
+                key_material,
+            )),
+            token,
+            session: Arc::clone(&self.last_session_recovery_token),
+            cleared: false,
+        };
+        let mut builder = http::Response::builder().status(status).version(version);
+        if let Some(target) = builder.headers_mut() {
+            *target = headers;
+        }
+        if let Some(target) = builder.extensions_mut() {
+            *target = extensions;
+        }
+        let rebuilt = builder
+            .url(url)
+            .body(reqwest::Body::wrap_stream(body))
+            .map_err(|err| Error::Protocol(format!("failed to rebuild response: {err}")))?;
+        Ok(reqwest::Response::from(rebuilt))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_raw_request(&self, request: &reqwest::Request) -> Result<()> {
+        if !same_origin(&self.base_url, request.url()) {
+            return Err(Error::InvalidInput(format!(
+                "request URL must use the configured origin: {}",
+                self.base_url.origin().ascii_serialization()
+            )));
+        }
+        if !request.url().username().is_empty() || request.url().password().is_some() {
+            return Err(Error::InvalidInput(
+                "request URL must not include credentials".into(),
+            ));
+        }
+        for name in request.headers().keys() {
+            if is_reserved_raw_request_header(name) {
+                return Err(Error::InvalidInput(format!(
+                    "reserved request header cannot be set by callers: {name}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     async fn send_parts(
@@ -374,6 +552,12 @@ struct PreparedRequest {
     token: Option<SessionRecoveryToken>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct PreparedRawRequest {
+    request: reqwest::Request,
+    token: Option<SessionRecoveryToken>,
+}
+
 impl RequestBuilder {
     pub fn header<K, V>(mut self, name: K, value: V) -> Result<Self>
     where
@@ -529,6 +713,13 @@ fn is_reserved_request_header(name: &HeaderName) -> bool {
         || name.as_str().eq_ignore_ascii_case(RESPONSE_NONCE_HEADER)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn is_reserved_raw_request_header(name: &HeaderName) -> bool {
+    name == HOST
+        || name.as_str().eq_ignore_ascii_case(ENCAPSULATED_KEY_HEADER)
+        || name.as_str().eq_ignore_ascii_case(RESPONSE_NONCE_HEADER)
+}
+
 fn encrypted_reqwest_body(body: Vec<u8>) -> reqwest::Body {
     reqwest::Body::wrap_stream(async_stream::stream! {
         yield Ok::<Bytes, std::io::Error>(Bytes::from(body));
@@ -658,6 +849,29 @@ struct SessionClearingStream {
     token: SessionRecoveryToken,
     session: Arc<Mutex<Option<SessionRecoveryToken>>>,
     cleared: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SessionGuard {
+    token: SessionRecoveryToken,
+    session: Arc<Mutex<Option<SessionRecoveryToken>>>,
+    active: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SessionGuard {
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            clear_session_recovery_token_if_current(&self.session, &self.token);
+        }
+    }
 }
 
 impl SessionClearingStream {
@@ -889,6 +1103,379 @@ mod tests {
         .unwrap()
     }
 
+    type TestPrivateKey = <hpke::kem::X25519HkdfSha256 as hpke::kem::Kem>::PrivateKey;
+
+    fn raw_client_with_private_key() -> (Client, TestPrivateKey) {
+        use hpke::{
+            kem::{Kem as _, X25519HkdfSha256},
+            Serializable as _,
+        };
+        use rand::{rngs::StdRng, SeedableRng as _};
+
+        let mut csprng = StdRng::from_os_rng();
+        let (private_key, public_key) = X25519HkdfSha256::gen_keypair(&mut csprng);
+        let identity = ServerIdentity::from_public_key_bytes(&public_key.to_bytes()).unwrap();
+        let client = Client::with_identity_and_http_client(
+            Url::parse("https://example.com/").unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        (client, private_key)
+    }
+
+    fn decrypt_request_frames(
+        private_key: &TestPrivateKey,
+        request_enc: &[u8],
+        framed: &[u8],
+    ) -> Vec<Vec<u8>> {
+        use hpke::{
+            aead::AesGcm256, kdf::HkdfSha256, kem::X25519HkdfSha256, setup_receiver,
+            Deserializable as _, OpModeR,
+        };
+
+        let encapped_key =
+            <X25519HkdfSha256 as hpke::kem::Kem>::EncappedKey::from_bytes(request_enc).unwrap();
+        let mut receiver = setup_receiver::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
+            &OpModeR::Base,
+            private_key,
+            &encapped_key,
+            crate::protocol::HPKE_REQUEST_INFO,
+        )
+        .unwrap();
+        let mut offset = 0usize;
+        let mut plaintext = Vec::new();
+
+        while offset < framed.len() {
+            let chunk_len = u32::from_be_bytes(
+                framed[offset..offset + 4]
+                    .try_into()
+                    .expect("frame must include a length"),
+            ) as usize;
+            offset += 4;
+            let chunk = &framed[offset..offset + chunk_len];
+            offset += chunk_len;
+            plaintext.push(receiver.open(chunk, &[]).unwrap());
+        }
+
+        plaintext
+    }
+
+    #[tokio::test]
+    async fn raw_transport_encrypts_streaming_request_chunks() {
+        let (client, private_key) = raw_client_with_private_key();
+        let plaintext = stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"first")),
+            Ok(Bytes::new()),
+            Ok(Bytes::from_static(b"second")),
+        ]);
+        let request = reqwest::Client::new()
+            .post("https://example.com/v1/audio")
+            .body(reqwest::Body::wrap_stream(plaintext))
+            .build()
+            .unwrap();
+
+        let mut prepared = client.prepare_raw_request(request).await.unwrap();
+        let token = prepared.token.unwrap();
+        let request_enc = hex::decode(
+            prepared.request.headers()[ENCAPSULATED_KEY_HEADER]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let body = prepared
+            .request
+            .body_mut()
+            .take()
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+
+        assert_eq!(request_enc, token.request_enc);
+        assert!(prepared.request.headers().get(CONTENT_LENGTH).is_none());
+        assert_eq!(
+            decrypt_request_frames(&private_key, &request_enc, &body),
+            [b"first".to_vec(), b"second".to_vec()]
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_transport_encrypts_streaming_multipart_requests() {
+        let (client, private_key) = raw_client_with_private_key();
+        let file = stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"audio-")),
+            Ok(Bytes::from_static(b"payload")),
+        ]);
+        let form = reqwest::multipart::Form::new()
+            .text("model", "gpt-oss-120b")
+            .part(
+                "file",
+                reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(file))
+                    .file_name("sample.wav"),
+            );
+        let request = reqwest::Client::new()
+            .post("https://example.com/v1/audio/transcriptions")
+            .multipart(form)
+            .build()
+            .unwrap();
+
+        let mut prepared = client.prepare_raw_request(request).await.unwrap();
+        let request_enc = hex::decode(
+            prepared.request.headers()[ENCAPSULATED_KEY_HEADER]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let body = prepared
+            .request
+            .body_mut()
+            .take()
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let chunks = decrypt_request_frames(&private_key, &request_enc, &body);
+        let plaintext = chunks.concat();
+        let plaintext = String::from_utf8(plaintext).unwrap();
+
+        assert!(chunks.len() > 1);
+        assert!(plaintext.contains("name=\"model\""));
+        assert!(plaintext.contains("gpt-oss-120b"));
+        assert!(plaintext.contains("filename=\"sample.wav\""));
+        assert!(plaintext.contains("audio-payload"));
+        assert!(prepared.request.headers().get(CONTENT_LENGTH).is_none());
+        assert!(prepared.request.headers().get(CONTENT_TYPE).is_some());
+    }
+
+    #[tokio::test]
+    async fn raw_transport_preserves_decrypted_response_metadata() {
+        use aes_gcm::{
+            aead::{Aead as _, KeyInit as _, Payload},
+            Aes256Gcm, Nonce,
+        };
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct Marker(u8);
+
+        let (client, _) = raw_client_with_private_key();
+        let request = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body("secret")
+            .build()
+            .unwrap();
+        let prepared = client.prepare_raw_request(request).await.unwrap();
+        let token = prepared.token.unwrap();
+        let response_nonce = [9u8; RESPONSE_NONCE_LENGTH];
+        let key_material =
+            derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)
+                .unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key).unwrap();
+        let nonce = crate::derive::compute_nonce(&key_material.nonce_base, 0);
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: b"decrypted reply",
+                    aad: &[],
+                },
+            )
+            .unwrap();
+        let body = crate::derive::frame_chunk(&ciphertext).unwrap();
+        let url = Url::parse("https://example.com/v1/chat").unwrap();
+        let response = http::Response::builder()
+            .status(StatusCode::OK)
+            .url(url.clone())
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, body.len())
+            .header(RESPONSE_NONCE_HEADER, hex::encode(response_nonce))
+            .body(reqwest::Body::from(body))
+            .unwrap();
+        let mut response = reqwest::Response::from(response);
+        response.extensions_mut().insert(Marker(7));
+
+        let response = client
+            .open_raw_response(response, Some(token))
+            .await
+            .unwrap();
+
+        assert_eq!(response.url(), &url);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.extensions().get::<Marker>(), Some(&Marker(7)));
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert!(response.headers().get(CONTENT_LENGTH).is_none());
+        assert!(client.get_session_recovery_token().is_some());
+        assert_eq!(response.bytes().await.unwrap(), "decrypted reply");
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_transport_returns_typed_key_config_mismatch() {
+        let (client, _) = raw_client_with_private_key();
+        let request = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body("secret")
+            .build()
+            .unwrap();
+        let prepared = client.prepare_raw_request(request).await.unwrap();
+        let response = http::Response::builder()
+            .status(StatusCode::UNPROCESSABLE_ENTITY)
+            .header(CONTENT_TYPE, "Application/Problem+Json; charset=utf-8")
+            .body(reqwest::Body::from(format!(
+                r#"{{"type":"{KEY_CONFIG_PROBLEM_TYPE}","title":"rotate key"}}"#
+            )))
+            .unwrap();
+        let response = reqwest::Response::from(response);
+
+        let err = client
+            .open_raw_response(response, prepared.token)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::KeyConfigMismatch(title) if title == "rotate key"));
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_transport_rejects_unsafe_request_identity() {
+        let (client, _) = raw_client_with_private_key();
+        let cross_origin = reqwest::Client::new()
+            .post("https://evil.example/v1/chat")
+            .body("secret")
+            .build()
+            .unwrap();
+        assert!(client.prepare_raw_request(cross_origin).await.is_err());
+
+        let reserved_header = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .header(ENCAPSULATED_KEY_HEADER, "00")
+            .body("secret")
+            .build()
+            .unwrap();
+        assert!(client.prepare_raw_request(reserved_header).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn raw_transport_leaves_bodyless_requests_unencrypted() {
+        let (client, _) = raw_client_with_private_key();
+        let request = reqwest::Client::new()
+            .get("https://example.com/v1/models")
+            .build()
+            .unwrap();
+
+        let prepared = client.prepare_raw_request(request).await.unwrap();
+
+        assert!(prepared.token.is_none());
+        assert!(prepared.request.body().is_none());
+        assert!(prepared
+            .request
+            .headers()
+            .get(ENCAPSULATED_KEY_HEADER)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_transport_propagates_request_stream_errors() {
+        #[derive(Debug)]
+        struct StreamError;
+
+        impl std::fmt::Display for StreamError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("request stream failed")
+            }
+        }
+
+        impl std::error::Error for StreamError {}
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            while socket.read(&mut buffer).await.unwrap_or_default() != 0 {}
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        let body = stream::iter([
+            Ok::<Bytes, StreamError>(Bytes::from_static(b"first")),
+            Err(StreamError),
+        ]);
+        let request = reqwest::Client::new()
+            .post(format!("http://{addr}/secure"))
+            .body(reqwest::Body::wrap_stream(body))
+            .build()
+            .unwrap();
+
+        assert!(client.execute(request).await.is_err());
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_raw_transport_clears_session_recovery_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request_received = Arc::new(tokio::sync::Notify::new());
+        let request_received_by_server = Arc::clone(&request_received);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await.unwrap();
+            request_received_by_server.notify_one();
+            std::future::pending::<()>().await;
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        let request = reqwest::Client::new()
+            .post(format!("http://{addr}/secure"))
+            .body("secret")
+            .build()
+            .unwrap();
+        let client_for_request = client.clone();
+        let request_task = tokio::spawn(async move { client_for_request.execute(request).await });
+
+        request_received.notified().await;
+        assert!(client.get_session_recovery_token().is_some());
+        request_task.abort();
+        let _ = request_task.await;
+
+        assert!(client.get_session_recovery_token().is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn raw_transport_uses_fresh_contexts_for_rebuilt_requests() {
+        let (client, _) = raw_client_with_private_key();
+        let build_request = || {
+            reqwest::Client::new()
+                .post("https://example.com/v1/chat")
+                .body("same plaintext")
+                .build()
+                .unwrap()
+        };
+
+        let first = client.prepare_raw_request(build_request()).await.unwrap();
+        let second = client.prepare_raw_request(build_request()).await.unwrap();
+
+        assert_ne!(
+            first.request.headers()[ENCAPSULATED_KEY_HEADER],
+            second.request.headers()[ENCAPSULATED_KEY_HEADER]
+        );
+    }
+
     async fn serve_key_config(content_type: &'static str) -> String {
         let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
         let config = identity.marshal_public_config();
@@ -1008,7 +1595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_requests_omit_content_length() {
+    async fn raw_execute_encrypts_requests_without_content_length() {
         let captured = Arc::new(Mutex::new(String::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1044,7 +1631,12 @@ mod tests {
         )
         .unwrap();
 
-        let _ = client.post("/secure").unwrap().body("secret").send().await;
+        let request = reqwest::Client::new()
+            .post(format!("http://{addr}/secure"))
+            .body("secret")
+            .build()
+            .unwrap();
+        let _ = client.execute(request).await;
 
         let request = captured.lock().unwrap().to_ascii_lowercase();
         assert!(request.contains("transfer-encoding: chunked"));
