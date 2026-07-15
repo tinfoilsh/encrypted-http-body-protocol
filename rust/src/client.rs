@@ -171,10 +171,8 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn execute(&self, request: reqwest::Request) -> Result<reqwest::Response> {
         let PreparedRawRequest { request, token } = self.prepare_raw_request(request).await?;
-        let mut guard = token.as_ref().map(|token| SessionGuard {
-            token: token.clone(),
-            session: Arc::clone(&self.last_session_recovery_token),
-            active: true,
+        let mut guard = token.as_ref().map(|token| {
+            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
         });
         let response = match self.http_client.execute(request).await {
             Ok(response) => response,
@@ -256,47 +254,49 @@ impl Client {
             return Ok(response);
         };
 
-        if !response.headers().contains_key(RESPONSE_NONCE_HEADER) {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
-                Ok(body) => body,
-                Err(err) => {
-                    self.replace_session_recovery_token(None);
-                    return Err(err);
-                }
-            };
-            self.replace_session_recovery_token(None);
+        let version = response.version();
+        let url = response.url().clone();
+        let extensions = std::mem::take(response.extensions_mut());
+        let opened = self.open_encrypted_response(response, token).await?;
+        let mut builder = http::Response::builder()
+            .status(opened.status)
+            .version(version);
+        if let Some(target) = builder.headers_mut() {
+            *target = opened.headers;
+        }
+        if let Some(target) = builder.extensions_mut() {
+            *target = extensions;
+        }
+        let rebuilt = builder
+            .url(url)
+            .body(reqwest::Body::wrap_stream(opened.body))
+            .map_err(|err| Error::Protocol(format!("failed to rebuild response: {err}")))?;
+        Ok(reqwest::Response::from(rebuilt))
+    }
+
+    async fn open_encrypted_response(
+        &self,
+        response: reqwest::Response,
+        token: SessionRecoveryToken,
+    ) -> Result<OpenedEncryptedResponse> {
+        let mut guard =
+            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token));
+        let status = response.status();
+        let mut headers = response.headers().clone();
+
+        if !headers.contains_key(RESPONSE_NONCE_HEADER) {
+            let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
             check_key_config_mismatch(status, &headers, &body)?;
             return Err(Error::Protocol(format!(
                 "missing {RESPONSE_NONCE_HEADER} header"
             )));
         }
 
-        let response_nonce = match response_nonce(response.headers()) {
-            Ok(nonce) => nonce,
-            Err(err) => {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-        };
+        let response_nonce = response_nonce(&headers)?;
         let key_material =
-            match derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)
-            {
-                Ok(key_material) => key_material,
-                Err(err) => {
-                    self.replace_session_recovery_token(None);
-                    return Err(err);
-                }
-            };
-        let status = response.status();
-        let version = response.version();
-        let url = response.url().clone();
-        let extensions = std::mem::take(response.extensions_mut());
-        let mut headers = response.headers().clone();
+            derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)?;
         strip_encrypted_framing_headers(&mut headers);
-
-        let body = SessionClearingStream {
+        let body = Box::pin(SessionClearingStream {
             inner: Box::pin(decrypt_response_stream(
                 response.bytes_stream(),
                 key_material,
@@ -304,34 +304,19 @@ impl Client {
             token,
             session: Arc::clone(&self.last_session_recovery_token),
             cleared: false,
-        };
-        let mut builder = http::Response::builder().status(status).version(version);
-        if let Some(target) = builder.headers_mut() {
-            *target = headers;
-        }
-        if let Some(target) = builder.extensions_mut() {
-            *target = extensions;
-        }
-        let rebuilt = builder
-            .url(url)
-            .body(reqwest::Body::wrap_stream(body))
-            .map_err(|err| Error::Protocol(format!("failed to rebuild response: {err}")))?;
-        Ok(reqwest::Response::from(rebuilt))
+        });
+        guard.disarm();
+
+        Ok(OpenedEncryptedResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn validate_raw_request(&self, request: &reqwest::Request) -> Result<()> {
-        if !same_origin(&self.base_url, request.url()) {
-            return Err(Error::InvalidInput(format!(
-                "request URL must use the configured origin: {}",
-                self.base_url.origin().ascii_serialization()
-            )));
-        }
-        if !request.url().username().is_empty() || request.url().password().is_some() {
-            return Err(Error::InvalidInput(
-                "request URL must not include credentials".into(),
-            ));
-        }
+        self.validate_request_url(request.url())?;
         for name in request.headers().keys() {
             if is_reserved_raw_request_header(name) {
                 return Err(Error::InvalidInput(format!(
@@ -351,26 +336,13 @@ impl Client {
     ) -> Result<Response> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err.into());
-            }
-        };
+        let mut guard = token.as_ref().map(|token| {
+            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
+        });
+        let response = request.send().await?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
-            Ok(body) => body,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err);
-            }
-        };
+        let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
 
         let Some(token) = token else {
             return Ok(Response {
@@ -380,26 +352,13 @@ impl Client {
             });
         };
 
-        if let Err(err) = check_key_config_mismatch(status, &headers, &body) {
-            self.replace_session_recovery_token(None);
-            return Err(err);
-        }
-
-        let response_nonce = match response_nonce(&headers) {
-            Ok(nonce) => nonce,
-            Err(err) => {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-        };
-        let decrypted = match token.decrypt_response_body(&response_nonce, &body) {
-            Ok(decrypted) => decrypted,
-            Err(err) => {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-        };
+        check_key_config_mismatch(status, &headers, &body)?;
+        let response_nonce = response_nonce(&headers)?;
+        let decrypted = token.decrypt_response_body(&response_nonce, &body)?;
         self.clear_session_recovery_token_if_current(&token);
+        if let Some(guard) = guard.as_mut() {
+            guard.disarm();
+        }
 
         let mut headers = headers;
         strip_encrypted_framing_headers(&mut headers);
@@ -419,75 +378,27 @@ impl Client {
     ) -> Result<StreamingResponse> {
         let PreparedRequest { request, token } =
             self.prepare_request_builder(method, url, headers, body)?;
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(err) => {
-                if token.is_some() {
-                    self.replace_session_recovery_token(None);
-                }
-                return Err(err.into());
-            }
-        };
-        let status = response.status();
-        let headers = response.headers().clone();
+        let mut guard = token.as_ref().map(|token| {
+            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
+        });
+        let response = request.send().await?;
 
         let Some(token) = token else {
             return Ok(StreamingResponse {
-                status,
-                headers,
+                status: response.status(),
+                headers: response.headers().clone(),
                 body: Box::pin(response.bytes_stream().map_reqwest_error()),
             });
         };
 
-        if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            let body = match read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await {
-                Ok(body) => body,
-                Err(err) => {
-                    self.replace_session_recovery_token(None);
-                    return Err(err);
-                }
-            };
-            if let Err(err) = check_key_config_mismatch(status, &headers, &body) {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-            self.replace_session_recovery_token(None);
-            return Err(Error::Protocol(format!(
-                "missing {RESPONSE_NONCE_HEADER} header"
-            )));
+        let opened = self.open_encrypted_response(response, token).await?;
+        if let Some(guard) = guard.as_mut() {
+            guard.disarm();
         }
-
-        let response_nonce = match response_nonce(&headers) {
-            Ok(nonce) => nonce,
-            Err(err) => {
-                self.replace_session_recovery_token(None);
-                return Err(err);
-            }
-        };
-        let key_material =
-            match derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)
-            {
-                Ok(key_material) => key_material,
-                Err(err) => {
-                    self.replace_session_recovery_token(None);
-                    return Err(err);
-                }
-            };
-
-        let mut headers = headers;
-        strip_encrypted_framing_headers(&mut headers);
         Ok(StreamingResponse {
-            status,
-            headers,
-            body: Box::pin(SessionClearingStream {
-                inner: Box::pin(decrypt_response_stream(
-                    response.bytes_stream(),
-                    key_material,
-                )),
-                token,
-                session: Arc::clone(&self.last_session_recovery_token),
-                cleared: false,
-            }),
+            status: opened.status,
+            headers: opened.headers,
+            body: opened.body,
         })
     }
 
@@ -524,7 +435,12 @@ impl Client {
 
     fn resolve_url(&self, path_or_url: &str) -> Result<Url> {
         let url = self.base_url.join(path_or_url)?;
-        if !same_origin(&self.base_url, &url) {
+        self.validate_request_url(&url)?;
+        Ok(url)
+    }
+
+    fn validate_request_url(&self, url: &Url) -> Result<()> {
+        if !same_origin(&self.base_url, url) {
             return Err(Error::InvalidInput(format!(
                 "request URL must use the configured origin: {}",
                 self.base_url.origin().ascii_serialization()
@@ -535,7 +451,7 @@ impl Client {
                 "request URL must not include credentials".into(),
             ));
         }
-        Ok(url)
+        Ok(())
     }
 }
 
@@ -556,6 +472,12 @@ struct PreparedRequest {
 struct PreparedRawRequest {
     request: reqwest::Request,
     token: Option<SessionRecoveryToken>,
+}
+
+struct OpenedEncryptedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
 }
 
 impl RequestBuilder {
@@ -851,21 +773,26 @@ struct SessionClearingStream {
     cleared: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct SessionGuard {
     token: SessionRecoveryToken,
     session: Arc<Mutex<Option<SessionRecoveryToken>>>,
     active: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl SessionGuard {
+    fn new(token: SessionRecoveryToken, session: Arc<Mutex<Option<SessionRecoveryToken>>>) -> Self {
+        Self {
+            token,
+            session,
+            active: true,
+        }
+    }
+
     fn disarm(&mut self) {
         self.active = false;
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         if self.active {
@@ -1339,6 +1266,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_raw_response_error_preserves_newer_recovery_token() {
+        let (client, _) = raw_client_with_private_key();
+        let build_request = || {
+            reqwest::Client::new()
+                .post("https://example.com/v1/chat")
+                .body("secret")
+                .build()
+                .unwrap()
+        };
+        let first = client.prepare_raw_request(build_request()).await.unwrap();
+        let first_token = first.token.unwrap();
+        let second = client.prepare_raw_request(build_request()).await.unwrap();
+        let second_token = second.token.unwrap();
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(reqwest::Body::from("missing nonce"))
+                .unwrap(),
+        );
+
+        let err = client
+            .open_raw_response(response, Some(first_token))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains("missing")
+        ));
+        assert_eq!(
+            client.get_session_recovery_token().as_ref(),
+            Some(&second_token)
+        );
+    }
+
+    #[tokio::test]
     async fn raw_transport_rejects_unsafe_request_identity() {
         let (client, _) = raw_client_with_private_key();
         let cross_origin = reqwest::Client::new()
@@ -1347,6 +1310,12 @@ mod tests {
             .build()
             .unwrap();
         assert!(client.prepare_raw_request(cross_origin).await.is_err());
+
+        let credential_url = reqwest::Request::new(
+            Method::POST,
+            Url::parse("https://user@example.com/v1/chat").unwrap(),
+        );
+        assert!(client.prepare_raw_request(credential_url).await.is_err());
 
         let reserved_header = reqwest::Client::new()
             .post("https://example.com/v1/chat")
