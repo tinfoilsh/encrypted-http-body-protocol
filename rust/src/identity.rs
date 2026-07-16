@@ -1,5 +1,5 @@
 use hpke::{
-    aead::AesGcm256,
+    aead::{AeadCtxS, AesGcm256},
     kdf::HkdfSha256,
     kem::{Kem, X25519HkdfSha256},
     setup_sender, Deserializable, OpModeS, Serializable,
@@ -78,7 +78,7 @@ impl ServerIdentity {
                 "no cipher suites found in config".into(),
             ));
         }
-        if suites_len % 4 != 0 {
+        if !suites_len.is_multiple_of(4) {
             return Err(Error::InvalidConfig(
                 "cipher suites length must be a multiple of 4".into(),
             ));
@@ -131,19 +131,25 @@ impl ServerIdentity {
             return Ok(None);
         }
 
+        let mut encryptor = self.request_encryptor()?;
+        let body = encryptor.encrypt_chunk(plaintext)?;
+
+        Ok(Some(EncryptedRequest {
+            encapsulated_key: encryptor.encapsulated_key,
+            body,
+            token: encryptor.token,
+        }))
+    }
+
+    pub(crate) fn request_encryptor(&self) -> Result<RequestEncryptor> {
         let mut csprng = StdRng::from_os_rng();
-        let (enc, mut sender) = setup_sender::<Aead, Kdf, KemSuite, _>(
+        let (enc, sender) = setup_sender::<Aead, Kdf, KemSuite, _>(
             &OpModeS::Base,
             &self.public_key,
             HPKE_REQUEST_INFO,
             &mut csprng,
         )
         .map_err(|err| Error::Hpke(format!("failed to set up sender: {err:?}")))?;
-
-        let ciphertext = sender
-            .seal(plaintext, &[])
-            .map_err(|err| Error::Hpke(format!("failed to seal request body: {err:?}")))?;
-        let body = frame_chunk(&ciphertext)?;
 
         let mut exported_secret = vec![0u8; EXPORT_LENGTH];
         sender
@@ -153,11 +159,27 @@ impl ServerIdentity {
         let request_enc = enc.to_bytes().to_vec();
         let token = SessionRecoveryToken::new(exported_secret, request_enc.clone())?;
 
-        Ok(Some(EncryptedRequest {
+        Ok(RequestEncryptor {
             encapsulated_key: request_enc,
-            body,
             token,
-        }))
+            sender,
+        })
+    }
+}
+
+pub(crate) struct RequestEncryptor {
+    pub encapsulated_key: Vec<u8>,
+    pub token: SessionRecoveryToken,
+    sender: AeadCtxS<Aead, Kdf, KemSuite>,
+}
+
+impl RequestEncryptor {
+    pub fn encrypt_chunk(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let ciphertext = self
+            .sender
+            .seal(plaintext, &[])
+            .map_err(|err| Error::Hpke(format!("failed to seal request body: {err:?}")))?;
+        frame_chunk(&ciphertext)
     }
 }
 
@@ -233,5 +255,36 @@ mod tests {
         };
 
         assert!(identity.encrypt_request_body(b"").unwrap().is_none());
+    }
+
+    #[test]
+    fn encrypts_multiple_request_chunks_in_one_context() {
+        let mut csprng = StdRng::from_os_rng();
+        let (private_key, public_key) = KemSuite::gen_keypair(&mut csprng);
+        let identity = ServerIdentity {
+            key_id: KEY_ID,
+            public_key,
+        };
+        let mut encryptor = identity.request_encryptor().unwrap();
+        let first = encryptor.encrypt_chunk(b"hello ").unwrap();
+        let second = encryptor.encrypt_chunk(b"stream").unwrap();
+
+        let encapped_key =
+            <KemSuite as Kem>::EncappedKey::from_bytes(&encryptor.encapsulated_key).unwrap();
+        let mut receiver = setup_receiver::<Aead, Kdf, KemSuite>(
+            &OpModeR::Base,
+            &private_key,
+            &encapped_key,
+            HPKE_REQUEST_INFO,
+        )
+        .unwrap();
+
+        let open = |receiver: &mut hpke::aead::AeadCtxR<Aead, Kdf, KemSuite>, frame: &[u8]| {
+            let chunk_len = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
+            receiver.open(&frame[4..4 + chunk_len], &[]).unwrap()
+        };
+
+        assert_eq!(open(&mut receiver, &first), b"hello ");
+        assert_eq!(open(&mut receiver, &second), b"stream");
     }
 }

@@ -1,6 +1,6 @@
 {
   "name": "ehbp",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "JavaScript client for Encrypted HTTP Body Protocol (EHBP)",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
@@ -13,13 +13,15 @@
     }
   },
   "scripts": {
-    "build": "npm run build:esm && npm run build:cjs",
+    "clean": "node -e \"const fs = require('node:fs'); for (const dir of ['dist/esm', 'dist/cjs']) fs.rmSync(dir, { recursive: true, force: true })\"",
+    "build": "npm run clean && npm run build:esm && npm run build:cjs",
     "build:esm": "tsc -p tsconfig.esm.json && echo '{\"type\":\"module\"}' > dist/esm/package.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "build:browser": "node build-browser.js",
     "build:all": "npm run build && npm run build:browser",
     "dev": "tsc --watch",
-    "test": "node --test dist/esm/test/*.test.js",
+    "test": "npm run build && node --test dist/esm/test/*.test.js",
+    "prepack": "npm run build",
     "test:integration": "node dist/esm/test/streaming.integration.js",
     "example": "node --experimental-strip-types examples/example.ts",
     "serve": "node serve.js"
