@@ -81,6 +81,20 @@ export class Transport {
     }
   }
 
+  private static async shouldDecryptResponse(response: Response): Promise<boolean> {
+    if (response.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER)) {
+      return true;
+    }
+
+    await Transport.checkKeyConfigMismatch(response);
+
+    if (!response.ok) {
+      return false;
+    }
+
+    throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+  }
+
   /**
    * Get the server identity
    */
@@ -167,13 +181,9 @@ export class Transport {
       return response;
     }
 
-    // Throws KeyConfigMismatchError if server returned 422 key-config mismatch
-    await Transport.checkKeyConfigMismatch(response);
-
-    // Check for response nonce header (required for response decryption)
-    const responseNonceHeader = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
-    if (!responseNonceHeader) {
-      throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    const shouldDecrypt = await Transport.shouldDecryptResponse(response);
+    if (!shouldDecrypt) {
+      return response;
     }
 
     // Publish token only after confirming the response is valid

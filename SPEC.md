@@ -142,8 +142,10 @@ This derivation ensures:
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
 - Inbound response:
 
-  - For requests with encrypted bodies: Require `Ehbp-Response-Nonce`; derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.
-  - If `Ehbp-Response-Nonce` is missing or invalid, the client MUST fail the request and MUST NOT treat the response body as authenticated application data. The client MAY parse plaintext error details only for diagnostics and recovery (Section 5.4), but this does not make the response trustworthy.
+  - For requests with encrypted bodies: Require `Ehbp-Response-Nonce` (subject to the error pass-through rule below); derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.
+  - If `Ehbp-Response-Nonce` is present, the client decrypts the response regardless of HTTP status code; servers encrypt error responses too whenever a receiver context was established (Section 5.2).
+  - If `Ehbp-Response-Nonce` is invalid, or absent on a response with a 2xx status code, the client MUST fail the request and MUST NOT treat the response body as authenticated application data. The client MAY parse plaintext error details only for diagnostics and recovery (Section 5.4), but this does not make the response trustworthy.
+  - If `Ehbp-Response-Nonce` is absent on a response with a non-2xx status code, the client MAY pass the response through to the caller unchanged as an unauthenticated plaintext error (see Section 5.3 for the trust implications). Any session recovery token for that exchange (Section 6) MUST be treated as consumed.
   - For bodyless requests: The response is unencrypted. Process as a normal HTTP response.
 
 ### 5.2 Server
@@ -171,7 +173,12 @@ The presence or absence of `Ehbp-Response-Nonce` in the response indicates wheth
 - `Ehbp-Response-Nonce` present → response body is encrypted
 - `Ehbp-Response-Nonce` absent → response body is plaintext
 
-Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is present in the response. If the header is missing, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
+Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is present before treating a response body as authenticated application data:
+
+- If the header is missing on a response with a 2xx status code, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
+- If the header is missing on a response with a non-2xx status code, the client MAY pass the response through to the caller unchanged. Such responses are typically produced by intermediaries (load balancers, CDNs, rate limiters) that reject or fail the request without it ever reaching the EHBP server. These bodies are unauthenticated: an on-path attacker can forge them, or strip the nonce header from a genuine encrypted error response and substitute arbitrary plaintext. Callers MUST treat pass-through error bodies as untrusted diagnostics and MUST NOT act on them as authenticated application data.
+
+The pass-through allowance applies only to non-2xx responses; exchanges that claim success always fail closed without a valid nonce.
 
 ### 5.4 Error Handling and Recovery
 
@@ -185,7 +192,7 @@ EHBP implementations MUST treat these as protocol failures:
 - HPKE setup/decapsulation failure
 - chunk framing violation
 - AEAD authentication/decryption failure
-- missing/invalid `Ehbp-Response-Nonce` when an encrypted response is expected
+- invalid `Ehbp-Response-Nonce`, or `Ehbp-Response-Nonce` missing from a 2xx response, when an encrypted response is expected (a missing nonce on a non-2xx response is handled per Section 5.3 and is not a protocol failure)
 
 Implementations MUST fail closed: no plaintext fallback for encrypted exchanges and no partial decrypted data exposure after authentication failure.
 

@@ -285,11 +285,26 @@ impl Client {
         let mut headers = response.headers().clone();
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
-            check_key_config_mismatch(status, &headers, &body)?;
-            return Err(Error::Protocol(format!(
-                "missing {RESPONSE_NONCE_HEADER} header"
-            )));
+            if status.is_success() {
+                return Err(Error::Protocol(format!(
+                    "missing {RESPONSE_NONCE_HEADER} header"
+                )));
+            }
+
+            let body = if is_problem_json_status(status, &headers) {
+                let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+                check_key_config_mismatch(status, &headers, &body)?;
+                Box::pin(async_stream::stream! {
+                    yield Ok(body);
+                }) as Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>
+            } else {
+                Box::pin(response.bytes_stream().map_reqwest_error())
+            };
+            return Ok(OpenedEncryptedResponse {
+                status,
+                headers,
+                body,
+            });
         }
 
         let response_nonce = response_nonce(&headers)?;
@@ -352,7 +367,17 @@ impl Client {
             });
         };
 
-        check_key_config_mismatch(status, &headers, &body)?;
+        if !headers.contains_key(RESPONSE_NONCE_HEADER) {
+            check_key_config_mismatch(status, &headers, &body)?;
+            if !status.is_success() {
+                return Ok(Response {
+                    status,
+                    headers,
+                    body,
+                });
+            }
+        }
+
         let response_nonce = response_nonce(&headers)?;
         let decrypted = token.decrypt_response_body(&response_nonce, &body)?;
         self.clear_session_recovery_token_if_current(&token);
@@ -1020,6 +1045,132 @@ mod tests {
         assert!(client.get_session_recovery_token().is_none());
     }
 
+    async fn client_with_unencrypted_response(status: StatusCode) -> Client {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.windows(5).any(|window| window == b"0\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let body = b"upstream unavailable";
+            let header = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nX-Upstream: proxy\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                status.as_u16(),
+                status.canonical_reason().unwrap(),
+                body.len(),
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn buffered_transport_passes_through_unencrypted_http_errors() {
+        let client = client_with_unencrypted_response(StatusCode::BAD_GATEWAY).await;
+
+        let response = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["x-upstream"], "proxy");
+        assert_eq!(response.text().unwrap(), "upstream unavailable");
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_transport_passes_through_unencrypted_http_errors() {
+        let client = client_with_unencrypted_response(StatusCode::TOO_MANY_REQUESTS).await;
+
+        let response = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send_stream()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["x-upstream"], "proxy");
+        assert!(client.get_session_recovery_token().is_none());
+        let body = response
+            .into_stream()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+            .concat();
+        assert_eq!(body, b"upstream unavailable");
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn buffered_transport_rejects_unencrypted_successes() {
+        let client = client_with_unencrypted_response(StatusCode::OK).await;
+
+        let err = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
+        ));
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_transport_rejects_unencrypted_successes() {
+        let client = client_with_unencrypted_response(StatusCode::OK).await;
+
+        let err = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send_stream()
+            .await
+            .err()
+            .unwrap();
+
+        assert!(matches!(
+            err,
+            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
+        ));
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
     fn dummy_client() -> Client {
         let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
         Client::with_identity_and_http_client(
@@ -1213,7 +1364,7 @@ mod tests {
         let body = crate::derive::frame_chunk(&ciphertext).unwrap();
         let url = Url::parse("https://example.com/v1/chat").unwrap();
         let response = http::Response::builder()
-            .status(StatusCode::OK)
+            .status(StatusCode::BAD_REQUEST)
             .url(url.clone())
             .header(CONTENT_TYPE, "text/plain")
             .header(CONTENT_LENGTH, body.len())
@@ -1229,7 +1380,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.url(), &url);
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.extensions().get::<Marker>(), Some(&Marker(7)));
         assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
         assert!(response.headers().get(CONTENT_LENGTH).is_none());
@@ -1266,6 +1417,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_transport_passes_through_unencrypted_http_errors() {
+        let (client, _) = raw_client_with_private_key();
+        let request = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body("secret")
+            .build()
+            .unwrap();
+        let prepared = client.prepare_raw_request(request).await.unwrap();
+        let url = Url::parse("https://example.com/v1/chat").unwrap();
+        let response = http::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .url(url.clone())
+            .header(CONTENT_TYPE, "text/plain")
+            .header("x-upstream", "proxy")
+            .body(reqwest::Body::from("upstream unavailable"))
+            .unwrap();
+
+        let response = client
+            .open_raw_response(reqwest::Response::from(response), prepared.token)
+            .await
+            .unwrap();
+
+        assert_eq!(response.url(), &url);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["x-upstream"], "proxy");
+        assert_eq!(
+            response.bytes().await.unwrap(),
+            Bytes::from_static(b"upstream unavailable")
+        );
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
     async fn older_raw_response_error_preserves_newer_recovery_token() {
         let (client, _) = raw_client_with_private_key();
         let build_request = || {
@@ -1286,15 +1471,12 @@ mod tests {
                 .unwrap(),
         );
 
-        let err = client
+        let response = client
             .open_raw_response(response, Some(first_token))
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("missing")
-        ));
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             client.get_session_recovery_token().as_ref(),
             Some(&second_token)

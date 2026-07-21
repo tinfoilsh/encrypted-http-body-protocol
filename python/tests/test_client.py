@@ -99,6 +99,37 @@ def test_missing_response_nonce_fails_closed(make_server):
     assert client.get_session_recovery_token() is None
 
 
+@pytest.mark.parametrize("status_code", [300, 400, 503])
+def test_unencrypted_non_success_response_passes_through(make_server, status_code):
+    server = make_server(mode="unencrypted_response", status_code=status_code)
+    client = server.make_client()
+    response = client.post("/v1/echo", body=b"payload")
+    assert response.status_code == status_code
+    assert response.headers["content-type"] == "text/plain"
+    assert response.headers["x-upstream"] == "proxy"
+    assert response.content == b"upstream unavailable"
+    assert client.get_session_recovery_token() is None
+
+
+def test_streaming_unencrypted_non_success_response_passes_through(make_server):
+    server = make_server(mode="unencrypted_response", status_code=429)
+    client = server.make_client()
+    with client.stream("POST", "/v1/echo", body=b"payload") as response:
+        assert response.status_code == 429
+        assert response.headers["content-type"] == "text/plain"
+        assert b"".join(response.iter_bytes()) == b"upstream unavailable"
+    assert client.get_session_recovery_token() is None
+
+
+def test_encrypted_non_success_response_is_decrypted(make_server):
+    server = make_server(status_code=503)
+    client = server.make_client()
+    response = client.post("/v1/echo", body=b"payload")
+    assert response.status_code == 503
+    assert response.content == b"echo:payload"
+    assert client.get_session_recovery_token() is not None
+
+
 def test_key_config_mismatch_raises_dedicated_error(make_server):
     server = make_server(mode="key_config_mismatch")
     client = server.make_client()

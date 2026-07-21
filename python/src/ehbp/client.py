@@ -1,10 +1,11 @@
 """Synchronous EHBP client transport built on httpx.
 
 The client encrypts request bodies to the server's HPKE public key and decrypts
-the bound response body. It fails closed on any missing/invalid response nonce
-and enforces several defensive constraints (single configured origin, no
-credentials in URLs, reserved protocol headers cannot be overridden, redirects
-disabled, response size capped).
+the bound response body. It passes through nonce-less non-success responses,
+fails closed on nonce-less successes or invalid nonces, and enforces several
+defensive constraints (single configured origin, no credentials in URLs,
+reserved protocol headers cannot be overridden, redirects disabled, response
+size capped).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from ._http import (
     raise_for_key_config_mismatch as _raise_for_key_config_mismatch,
 )
 from ._http import (
-    response_nonce as _response_nonce,
+    response_nonce_for_status as _response_nonce_for_status,
 )
 from ._http import (
     single_chunk_body as _single_chunk_body,
@@ -218,7 +219,10 @@ class Client:
                 response_headers = resp.headers
                 raw = self._read_body_capped(resp)
             _raise_for_key_config_mismatch(status, response_headers, raw)
-            response_nonce = _response_nonce(response_headers)
+            response_nonce = _response_nonce_for_status(status, response_headers)
+            if response_nonce is None:
+                self._clear_token_if_current(token)
+                return Response(status, response_headers, raw)
             decrypted = token.decrypt_response_body(response_nonce, raw)
         except BaseException:
             self._clear_token_if_current(token)
@@ -290,8 +294,13 @@ class Client:
                     raw = self._read_body_capped(resp)
                     self._clear_token_if_current(token)
                     _raise_for_key_config_mismatch(status, response_headers, raw)
-                    raise ProtocolError(f"missing {RESPONSE_NONCE_HEADER} header")
-                response_nonce = _response_nonce(response_headers)
+                    response_nonce = _response_nonce_for_status(status, response_headers)
+                    if response_nonce is None:
+                        yield StreamingResponse(status, response_headers, iter((raw,)))
+                        return
+                else:
+                    response_nonce = _response_nonce_for_status(status, response_headers)
+                assert response_nonce is not None
                 key_material = derive_response_keys(
                     token.exported_secret, token.request_enc, response_nonce
                 )

@@ -238,6 +238,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, identity.NewKeyConfigError(fmt.Errorf("%s", title))
 		}
 
+		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
+			(resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+			return resp, nil
+		}
+
 		if err := identity.DecryptResponseWithToken(resp, token); err != nil {
 			resp.Body.Close()
 			return nil, fmt.Errorf("failed to decrypt response: %v", err)

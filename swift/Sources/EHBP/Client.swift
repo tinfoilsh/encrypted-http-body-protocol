@@ -52,7 +52,8 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - path: URL path (will be appended to baseURL)
     ///   - headers: Additional headers to include
     ///   - body: Request body (will be encrypted)
-    /// - Returns: Decrypted response data
+    /// - Returns: Decrypted response data, or an untouched non-success response
+    ///   when an intermediary returns an unencrypted error
     public func request(
         method: String,
         path: String,
@@ -96,12 +97,11 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.networkError("expected HTTP response")
         }
 
-        guard requestContext != nil else {
+        guard let responseNonceHex = try EHBPClient.responseNonceHex(
+            from: httpResponse,
+            requestWasEncrypted: requestContext != nil
+        ) else {
             return (data, httpResponse)
-        }
-
-        guard let responseNonceHex = httpResponse.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) else {
-            throw EHBPError.missingHeader(EHBPProtocol.responseNonceHeader)
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
@@ -132,7 +132,8 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - path: URL path
     ///   - headers: Additional headers
     ///   - body: Request body (will be encrypted)
-    /// - Returns: AsyncThrowingStream of decrypted response chunks
+    /// - Returns: AsyncThrowingStream of decrypted response chunks, or untouched
+    ///   non-success response chunks when an intermediary returns an unencrypted error
     public func requestStream(
         method: String,
         path: String,
@@ -176,7 +177,10 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.networkError("expected HTTP response")
         }
 
-        guard requestContext != nil else {
+        guard let responseNonceHex = try EHBPClient.responseNonceHex(
+            from: httpResponse,
+            requestWasEncrypted: requestContext != nil
+        ) else {
             let stream = AsyncThrowingStream<Data, Error> { continuation in
                 Task {
                     do {
@@ -194,10 +198,6 @@ public final class EHBPClient: @unchecked Sendable {
                 }
             }
             return (stream, httpResponse)
-        }
-
-        guard let responseNonceHex = httpResponse.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) else {
-            throw EHBPError.missingHeader(EHBPProtocol.responseNonceHeader)
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
@@ -264,6 +264,20 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         return (stream, EHBPClient.sanitizedResponse(httpResponse))
+    }
+
+    private static func responseNonceHex(
+        from response: HTTPURLResponse,
+        requestWasEncrypted: Bool
+    ) throws -> String? {
+        guard requestWasEncrypted else { return nil }
+        if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
+            return nonce
+        }
+        guard !(200..<300).contains(response.statusCode) else {
+            throw EHBPError.missingHeader(EHBPProtocol.responseNonceHeader)
+        }
+        return nil
     }
 
     /// Removes framing headers that describe the encrypted body. The
