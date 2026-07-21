@@ -85,6 +85,35 @@ def test_missing_response_nonce_fails_closed(make_server):
         client.post(URL, content=b"payload")
 
 
+@pytest.mark.parametrize("status_code", [300, 400, 503])
+def test_unencrypted_non_success_response_passes_through(make_server, status_code):
+    server = make_server(mode="unencrypted_response", status_code=status_code)
+    with _sync_client(server) as client:
+        response = client.post(URL, content=b"payload")
+    assert response.status_code == status_code
+    assert response.headers["content-type"] == "text/plain"
+    assert response.headers["x-upstream"] == "proxy"
+    assert response.content == b"upstream unavailable"
+
+
+def test_streaming_unencrypted_non_success_response_passes_through(make_server):
+    server = make_server(mode="unencrypted_response", status_code=429)
+    with _sync_client(server) as client, client.stream(
+        "POST", URL, content=b"payload"
+    ) as response:
+        assert response.status_code == 429
+        assert response.headers["content-type"] == "text/plain"
+        assert b"".join(response.iter_bytes()) == b"upstream unavailable"
+
+
+def test_encrypted_non_success_response_is_decrypted(make_server):
+    server = make_server(status_code=503)
+    with _sync_client(server) as client:
+        response = client.post(URL, content=b"payload")
+    assert response.status_code == 503
+    assert response.content == b"echo:payload"
+
+
 def test_oversized_response_chunk_is_rejected(server: MockServer):
     with _sync_client(server, max_response_bytes=4) as client, pytest.raises(ProtocolError):
         client.post(URL, content=b"this response will exceed the tiny cap")
@@ -138,6 +167,34 @@ def test_async_bodyless_request_passes_through(server: MockServer):
     response = asyncio.run(run())
     assert response.content == b"plaintext ok"
     assert ENCAPSULATED_KEY_HEADER not in server.last_request.headers
+
+
+def test_async_unencrypted_non_success_response_passes_through(make_server):
+    server = make_server(mode="unencrypted_response", status_code=503)
+
+    async def run() -> httpx.Response:
+        async with _async_client(server) as client:
+            return await client.post(URL, content=b"payload")
+
+    response = asyncio.run(run())
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "text/plain"
+    assert response.headers["x-upstream"] == "proxy"
+    assert response.content == b"upstream unavailable"
+
+
+def test_async_streaming_unencrypted_non_success_response_passes_through(make_server):
+    server = make_server(mode="unencrypted_response", status_code=429)
+
+    async def run() -> bytes:
+        async with _async_client(server) as client, client.stream(
+            "POST", URL, content=b"payload"
+        ) as response:
+            assert response.status_code == 429
+            assert response.headers["content-type"] == "text/plain"
+            return b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    assert asyncio.run(run()) == b"upstream unavailable"
 
 
 def test_async_key_config_mismatch_raises_dedicated_error(make_server):

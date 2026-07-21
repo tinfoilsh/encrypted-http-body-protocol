@@ -1,6 +1,12 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
-import { Identity, Transport, createTransport, KeyConfigMismatchError } from '../index.js';
+import {
+  Identity,
+  Transport,
+  createTransport,
+  KeyConfigMismatchError,
+  ProtocolError,
+} from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
@@ -31,7 +37,11 @@ function toArrayBuffer(bytes: Uint8Array<ArrayBufferLike>): ArrayBuffer {
   return copy.buffer;
 }
 
-async function buildEncryptedResponse(request: Request, serverIdentity: Identity): Promise<Response> {
+async function buildEncryptedResponse(
+  request: Request,
+  serverIdentity: Identity,
+  status = 200
+): Promise<Response> {
   const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
   assert(requestEncHex, `Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header`);
   const requestEnc = hexToBytes(requestEncHex);
@@ -79,7 +89,7 @@ async function buildEncryptedResponse(request: Request, serverIdentity: Identity
   );
 
   return new Response(toArrayBuffer(encodeSingleChunk(responseCiphertext)), {
-    status: 200,
+    status,
     headers: {
       [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(responseNonce),
     },
@@ -226,27 +236,57 @@ describe('Transport', () => {
     }
   });
 
-  it('should not throw KeyConfigMismatchError for 422 without problem+json', async () => {
+  it('should pass through nonce-less 4xx and 5xx responses', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let responseStatus = 400;
+    let rawResponse!: Response;
+
+    globalThis.fetch = (async (): Promise<Response> => {
+      rawResponse = new Response(`upstream error ${responseStatus}`, {
+        status: responseStatus,
+        headers: { 'content-type': 'text/plain' },
+      });
+      return rawResponse;
+    }) as typeof fetch;
+
+    try {
+      for (const status of [400, 503]) {
+        responseStatus = status;
+        const response = await transport.post('https://server.test/secure', 'hello');
+
+        assert.strictEqual(response, rawResponse);
+        assert.strictEqual(response.status, status);
+        assert.strictEqual(response.headers.get('content-type'), 'text/plain');
+        assert.strictEqual(await response.text(), `upstream error ${status}`);
+        assert.throws(
+          () => transport.getSessionRecoveryToken(),
+          /No session recovery token available/
+        );
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should reject a nonce-less 2xx response', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
 
     const originalFetch = globalThis.fetch;
 
     globalThis.fetch = (async (): Promise<Response> => {
-      // 422 without problem+json content type — not a key mismatch
-      return new Response('Unprocessable', {
-        status: 422,
-        headers: { 'content-type': 'text/plain' },
-      });
+      return new Response('plaintext success', { status: 200 });
     }) as typeof fetch;
 
     try {
-      // Should not throw KeyConfigMismatchError — but will throw ProtocolError
-      // because the response has no Ehbp-Response-Nonce header
       await assert.rejects(
         () => transport.post('https://server.test/secure', 'hello'),
         (err: unknown) => {
-          assert(!(err instanceof KeyConfigMismatchError), 'Should not be KeyConfigMismatchError');
+          assert(err instanceof ProtocolError);
+          assert.match(err.message, new RegExp(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`));
           return true;
         }
       );
@@ -270,6 +310,26 @@ describe('Transport', () => {
       const response = await transport.post('https://server.test/secure', 'hello');
       const responseText = await response.text();
       assert.strictEqual(responseText, 'processed:hello');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should decrypt a response with a nonce regardless of HTTP status', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      return buildEncryptedResponse(request, serverIdentity, 503);
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+      assert.strictEqual(response.status, 503);
+      assert.strictEqual(await response.text(), 'processed:hello');
     } finally {
       globalThis.fetch = originalFetch;
     }

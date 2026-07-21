@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from typing import Optional
 
 import httpx
 
@@ -69,3 +70,9 @@ def response_nonce(headers: httpx.Headers) -> bytes:
             f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}"
         )
     return nonce
+
+
+def response_nonce_for_status(status: int, headers: httpx.Headers) -> Optional[bytes]:
+    if RESPONSE_NONCE_HEADER not in headers and status // 100 != 2:
+        return None
+    return response_nonce(headers)

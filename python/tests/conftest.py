@@ -44,12 +44,15 @@ def _new_suite() -> CipherSuite:
 
 
 class MockServer:
-    def __init__(self, *, mode: str = "ok", chunk_size: Optional[int] = None) -> None:
+    def __init__(
+        self, *, mode: str = "ok", chunk_size: Optional[int] = None, status_code: int = 200
+    ) -> None:
         self.suite = _new_suite()
         self.keypair = self.suite.kem.derive_key_pair(b"ehbp-python-test-server-ikm-0001")
         self.public_key_bytes = self.keypair.public_key.to_public_bytes()
         self.mode = mode
         self.chunk_size = chunk_size
+        self.status_code = status_code
         self.last_request: Optional[httpx.Request] = None
 
     def config_bytes(self) -> bytes:
@@ -105,6 +108,13 @@ class MockServer:
         enc = bytes.fromhex(enc_hex)
         request_plaintext, exported = self._open_request(enc, body)
 
+        if self.mode == "unencrypted_response":
+            return httpx.Response(
+                self.status_code,
+                headers={"content-type": "text/plain", "x-upstream": "proxy"},
+                content=b"upstream unavailable",
+            )
+
         if self.mode == "key_config_mismatch":
             problem = {"type": KEY_CONFIG_PROBLEM_TYPE, "title": "stale key configuration"}
             return httpx.Response(
@@ -118,7 +128,7 @@ class MockServer:
         headers = {}
         if self.mode != "strip_nonce":
             headers[RESPONSE_NONCE_HEADER] = response_nonce.hex()
-        return httpx.Response(200, headers=headers, content=framed)
+        return httpx.Response(self.status_code, headers=headers, content=framed)
 
     def http_client(self) -> httpx.Client:
         return httpx.Client(
@@ -136,8 +146,10 @@ class MockServer:
 
 @pytest.fixture
 def make_server():
-    def _factory(*, mode: str = "ok", chunk_size: Optional[int] = None) -> MockServer:
-        return MockServer(mode=mode, chunk_size=chunk_size)
+    def _factory(
+        *, mode: str = "ok", chunk_size: Optional[int] = None, status_code: int = 200
+    ) -> MockServer:
+        return MockServer(mode=mode, chunk_size=chunk_size, status_code=status_code)
 
     return _factory
 

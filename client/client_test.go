@@ -407,6 +407,67 @@ func TestTransportReturnsErrorOnKeyConfigMismatch(t *testing.T) {
 	assert.True(t, identity.IsKeyConfigError(err))
 }
 
+func TestTransportPassesThroughNonceLessErrorResponse(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream-Error", "rate-limited")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"try again later"}`))
+	}))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "rate-limited", resp.Header.Get("X-Upstream-Error"))
+	assert.Equal(t, `{"error":"try again later"}`, string(body))
+	assert.Nil(t, transport.GetSessionRecoveryToken())
+}
+
+func TestTransportRejectsNonceLessSuccessResponse(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("plaintext"))
+	}))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	assert.Nil(t, resp)
+	assert.ErrorContains(t, err, protocol.ResponseNonceHeader)
+	assert.Nil(t, transport.GetSessionRecoveryToken())
+}
+
 func TestTransportGetSessionRecoveryToken(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
