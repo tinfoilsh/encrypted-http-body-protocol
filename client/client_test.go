@@ -158,6 +158,72 @@ func TestNewTransportWithIdentityRequiresIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// A RoundTripper must perform a single HTTP transaction: redirects have to
+// surface to the outer http.Client so its CheckRedirect policy and cookie jar
+// apply, instead of being swallowed by an internal client.
+func TestRoundTripSurfacesRedirectsToOuterClient(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	middleware := serverIdentity.Middleware()
+	mux := http.NewServeMux()
+	mux.Handle("/redirect", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		http.Redirect(w, r, "/secure", http.StatusTemporaryRedirect)
+	})))
+	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("Hello, " + string(body)))
+	})))
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	t.Run("RoundTrip returns the redirect unfollowed", func(t *testing.T) {
+		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
+		assert.NoError(t, err)
+
+		resp, err := transport.RoundTrip(req)
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+		assert.Equal(t, "/secure", resp.Header.Get("Location"))
+	})
+
+	t.Run("outer client follows and re-encrypts each hop", func(t *testing.T) {
+		redirectsSeen := 0
+		httpClient := &http.Client{
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				redirectsSeen++
+				return nil
+			},
+		}
+
+		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
+		assert.NoError(t, err)
+
+		resp, err := httpClient.Do(req)
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, "Hello, test", string(body))
+		assert.Equal(t, 1, redirectsSeen)
+	})
+}
+
 // TestTransportClearsRequestURI ensures the transport can carry a request that
 // originated as an inbound server request, which is how httputil.ReverseProxy
 // drives a RoundTripper. Such requests have RequestURI populated, and

@@ -13,6 +13,7 @@ import {
   ResponseKeyMaterial,
 } from './derive.js';
 import { ProtocolError, DecryptionError } from './errors.js';
+import { forwardedRequestInit } from './request-options.js';
 
 /**
  * Request context for response decryption.
@@ -260,6 +261,7 @@ export class Identity {
     if (body.byteLength === 0) {
       return {
         request: new Request(request.url, {
+          ...forwardedRequestInit(request),
           method: request.method,
           headers: request.headers,
           body: null,
@@ -297,6 +299,7 @@ export class Identity {
 
     return {
       request: new Request(request.url, {
+        ...forwardedRequestInit(request),
         method: request.method,
         headers,
         body: chunkedData,

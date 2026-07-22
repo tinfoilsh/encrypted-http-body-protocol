@@ -140,6 +140,7 @@ This derivation ensures:
 
   - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length. Retain the HPKE sender context for response decryption.
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
+  - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
 
   - For requests with encrypted bodies: Require `Ehbp-Response-Nonce` (subject to the error pass-through rule below); derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.

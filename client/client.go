@@ -37,6 +37,11 @@ type Option func(*Transport)
 // requests (and, for NewTransport, to fetch the server key configuration). It
 // lets callers compose EHBP with a TLS-pinned or otherwise customized
 // http.Client. A nil client is ignored so the default remains in place.
+//
+// Encrypted requests are sent through the client's Transport only. Redirect
+// policy, cookie jar, and timeout are supplied by the outer http.Client that
+// drives this RoundTripper, not by the client passed here; the full client is
+// used for the key-configuration fetch.
 func WithHTTPClient(c *http.Client) Option {
 	return func(t *Transport) {
 		if c != nil {
@@ -183,6 +188,15 @@ func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
 	return true, problem.Title, nil
 }
 
+// roundTripper returns the RoundTripper used to send encrypted requests,
+// honoring a Transport configured via WithHTTPClient.
+func (t *Transport) roundTripper() http.RoundTripper {
+	if t.httpClient.Transport != nil {
+		return t.httpClient.Transport
+	}
+	return http.DefaultTransport
+}
+
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
@@ -218,7 +232,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.mu.Unlock()
 	}
 
-	resp, err := t.httpClient.Do(newReq)
+	// Send through a RoundTripper rather than a nested http.Client: a
+	// RoundTripper performs a single HTTP transaction, so redirects surface
+	// to the outer client, whose CheckRedirect and cookie jar then apply
+	// (and each redirected attempt is re-encrypted for its target).
+	resp, err := t.roundTripper().RoundTrip(newReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make request: %v", err)
 	}
