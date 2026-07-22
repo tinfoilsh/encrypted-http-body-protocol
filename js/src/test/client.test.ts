@@ -315,6 +315,115 @@ describe('Transport', () => {
     }
   });
 
+  it('should preserve fetch options on the encrypted request', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let capturedRequest!: Request;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      capturedRequest = input as Request;
+      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
+    }) as typeof fetch;
+
+    try {
+      const controller = new AbortController();
+      const response = await transport.post('https://server.test/secure', 'hello', {
+        credentials: 'include',
+        redirect: 'manual',
+        signal: controller.signal,
+      });
+      assert.strictEqual(await response.text(), 'processed:hello');
+
+      assert.strictEqual(capturedRequest.credentials, 'include');
+      assert.strictEqual(capturedRequest.redirect, 'manual');
+
+      // The outgoing request's signal must follow the caller's signal
+      assert.strictEqual(capturedRequest.signal.aborted, false);
+      controller.abort();
+      assert.strictEqual(capturedRequest.signal.aborted, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should preserve fetch options when input is a Request instance', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let capturedRequest!: Request;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      capturedRequest = input as Request;
+      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
+    }) as typeof fetch;
+
+    try {
+      const request = new Request('https://server.test/secure', {
+        method: 'POST',
+        body: 'hello',
+        credentials: 'include',
+        duplex: 'half',
+      } as RequestInit);
+      const response = await transport.request(request);
+      assert.strictEqual(await response.text(), 'processed:hello');
+      assert.strictEqual(capturedRequest.credentials, 'include');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should preserve fetch options on bodyless passthrough requests', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let capturedRequest!: Request;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      capturedRequest = input as Request;
+      return new Response('plain', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.get('https://server.test/status', {
+        credentials: 'include',
+      });
+      assert.strictEqual(await response.text(), 'plain');
+      assert.strictEqual(capturedRequest.credentials, 'include');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should pass init to the key fetch in createTransport', async () => {
+    const serverIdentity = await Identity.generate();
+    const config = await serverIdentity.marshalConfig();
+
+    const originalFetch = globalThis.fetch;
+    let capturedInit: RequestInit | undefined;
+
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      capturedInit = init;
+      return new Response(toArrayBuffer(config), {
+        status: 200,
+        headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
+      });
+    }) as typeof fetch;
+
+    try {
+      await createTransport('https://server.test', { credentials: 'include' });
+      assert.strictEqual(capturedInit?.credentials, 'include');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should decrypt a response with a nonce regardless of HTTP status', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');

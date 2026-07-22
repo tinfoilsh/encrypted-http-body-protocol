@@ -2,6 +2,7 @@ import { Identity } from './identity.js';
 import { extractSessionRecoveryToken, decryptResponseWithToken } from './identity.js';
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
+import { forwardedRequestInit } from './request-options.js';
 import { KeyConfigMismatchError, ProtocolError } from './errors.js';
 import type { Key } from 'hpke';
 
@@ -32,14 +33,15 @@ export class Transport {
 
   /**
    * Create a new transport by fetching server public key.
+   * The optional init is applied to the key fetch (e.g. credentials).
    */
-  static async create(serverURL: string): Promise<Transport> {
+  static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
     const url = new URL(serverURL);
     const serverHost = url.host;
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
-    const response = await fetch(keysURL.toString());
+    const response = await fetch(keysURL.toString(), init);
 
     if (!response.ok) {
       throw new Error(`Failed to get server public key: ${response.status}`);
@@ -156,7 +158,12 @@ export class Transport {
 
     url.host = this.serverHost;
 
+    // Carry fetch options (credentials, signal, ...) through re-construction
+    // so they reach the final fetch of the encrypted request.
+    const forwardedInit = forwardedRequestInit(input instanceof Request ? input : init);
+
     const request = new Request(url.toString(), {
+      ...forwardedInit,
       method,
       headers,
       body: requestBody,
@@ -224,7 +231,8 @@ export class Transport {
 
 /**
  * Create a new transport instance.
+ * The optional init is applied to the server key fetch (e.g. credentials).
  */
-export async function createTransport(serverURL: string): Promise<Transport> {
-  return Transport.create(serverURL);
+export async function createTransport(serverURL: string, init?: RequestInit): Promise<Transport> {
+  return Transport.create(serverURL, init);
 }
