@@ -384,4 +384,110 @@ final class StreamingTests: XCTestCase {
             }
         }
     }
+
+    func testTokenDecryptorDeliversBeforeEOFAndHandlesFramingPatterns() throws {
+        let token = SessionRecoveryToken(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength)
+        )
+        let responseNonce = Data(
+            repeating: 0xEF,
+            count: EHBPConstants.responseNonceLength
+        )
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: token.exportedSecret,
+            requestEnc: token.requestEnc,
+            responseNonce: responseNonce
+        )
+        let first = try framedChunk(
+            keyMaterial: keyMaterial,
+            sequence: 0,
+            plaintext: Data("first".utf8)
+        )
+        let second = try framedChunk(
+            keyMaterial: keyMaterial,
+            sequence: 1,
+            plaintext: Data("second".utf8)
+        )
+        var decryptor = try token.makeResponseDecryptor(responseNonce: responseNonce)
+
+        XCTAssertTrue(try decryptor.push(first.prefix(3)).isEmpty)
+        XCTAssertEqual(try decryptor.push(first.dropFirst(3)), [Data("first".utf8)])
+
+        var coalesced = Data(repeating: 0, count: 4)
+        coalesced.append(second)
+        coalesced.append(Data(repeating: 0, count: 4))
+        XCTAssertEqual(try decryptor.push(coalesced), [Data("second".utf8)])
+        try decryptor.finish()
+    }
+
+    func testTokenDecryptorRejectsTruncationAndAuthenticationFailure() throws {
+        let token = SessionRecoveryToken(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength)
+        )
+        let responseNonce = Data(
+            repeating: 0xEF,
+            count: EHBPConstants.responseNonceLength
+        )
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: token.exportedSecret,
+            requestEnc: token.requestEnc,
+            responseNonce: responseNonce
+        )
+        let frame = try framedChunk(
+            keyMaterial: keyMaterial,
+            sequence: 0,
+            plaintext: Data("secret".utf8)
+        )
+        var truncated = try token.makeResponseDecryptor(responseNonce: responseNonce)
+
+        XCTAssertTrue(try truncated.push(frame.dropLast()).isEmpty)
+        XCTAssertThrowsError(try truncated.finish())
+
+        var tamperedFrame = frame
+        tamperedFrame[tamperedFrame.index(before: tamperedFrame.endIndex)] ^= 1
+        var tampered = try token.makeResponseDecryptor(responseNonce: responseNonce)
+        XCTAssertThrowsError(try tampered.push(tamperedFrame))
+    }
+
+    func testResponseDecryptorEnforcesSizeAndSequenceLimits() throws {
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength),
+            responseNonce: Data(repeating: 0xEF, count: EHBPConstants.responseNonceLength)
+        )
+        var oversized = ResponseDecryptor(keyMaterial: keyMaterial, maxChunkLength: 16)
+        XCTAssertThrowsError(try oversized.push(Data([0, 0, 0, 17])))
+
+        var exhausted = ResponseDecryptor(
+            keyMaterial: keyMaterial,
+            maxChunkLength: EHBPConstants.maxResponseChunkBytes,
+            initialSequence: UInt64.max
+        )
+        var frame = Data([0, 0, 0, 16])
+        frame.append(Data(repeating: 0, count: 16))
+        XCTAssertThrowsError(try exhausted.push(frame)) { error in
+            guard case EHBPError.invalidResponse(let message) = error else {
+                return XCTFail("expected invalidResponse, got \(error)")
+            }
+            XCTAssertTrue(message.contains("sequence overflow"))
+        }
+    }
+
+    private func framedChunk(
+        keyMaterial: ResponseKeyMaterial,
+        sequence: UInt64,
+        plaintext: Data
+    ) throws -> Data {
+        let ciphertext = try encryptChunk(
+            keyMaterial: keyMaterial,
+            seq: sequence,
+            plaintext: plaintext
+        )
+        var length = UInt32(ciphertext.count).bigEndian
+        var frame = Data(bytes: &length, count: 4)
+        frame.append(ciphertext)
+        return frame
+    }
 }

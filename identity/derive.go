@@ -140,6 +140,9 @@ func (r *ResponseAEAD) Seal(plaintext, aad []byte) []byte {
 // and increments the sequence for the next operation.
 // Returns an error if authentication fails.
 func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
+	if r.seq == ^uint64(0) {
+		return nil, fmt.Errorf("response chunk sequence overflow")
+	}
 	nonce := r.computeNonce()
 	r.seq++
 	return r.aead.Open(nil, nonce, ciphertext, aad)

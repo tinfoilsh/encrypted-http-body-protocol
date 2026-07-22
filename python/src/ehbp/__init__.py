@@ -3,6 +3,7 @@
 from . import protocol
 from .client import Client, Response, StreamingResponse
 from .derive import (
+    FrameDecryptor,
     ResponseKeyMaterial,
     compute_nonce,
     decrypt_chunk,
@@ -34,6 +35,7 @@ __all__ = [
     "ServerIdentity",
     "EncryptedRequest",
     "SessionRecoveryToken",
+    "FrameDecryptor",
     "ResponseKeyMaterial",
     "derive_response_keys",
     "compute_nonce",

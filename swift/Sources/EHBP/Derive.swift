@@ -118,6 +118,85 @@ public func decryptChunk(
     return try AES.GCM.open(sealedBox, using: keyMaterial.key)
 }
 
+/// Incrementally decrypts an EHBP length-prefixed response stream.
+///
+/// Feed encrypted network bytes with ``push(_:)`` and call ``finish()`` when
+/// the source reaches EOF. Each returned chunk has been authenticated and can
+/// be consumed before the source reaches EOF.
+public struct ResponseDecryptor {
+    private let keyMaterial: ResponseKeyMaterial
+    private let maxChunkLength: Int
+    private var buffer = [UInt8]()
+    private var sequence: UInt64
+
+    init(
+        keyMaterial: ResponseKeyMaterial,
+        maxChunkLength: Int = EHBPConstants.maxResponseChunkBytes
+    ) {
+        self.init(
+            keyMaterial: keyMaterial,
+            maxChunkLength: maxChunkLength,
+            initialSequence: 0
+        )
+    }
+
+    init(
+        keyMaterial: ResponseKeyMaterial,
+        maxChunkLength: Int,
+        initialSequence: UInt64
+    ) {
+        self.keyMaterial = keyMaterial
+        self.maxChunkLength = maxChunkLength
+        self.sequence = initialSequence
+    }
+
+    /// Adds encrypted bytes and returns all newly authenticated plaintext chunks.
+    public mutating func push(_ data: Data) throws -> [Data] {
+        buffer.append(contentsOf: data)
+        var plaintext = [Data]()
+
+        while buffer.count >= 4 {
+            let chunkLength = Int(buffer[0]) << 24 |
+                              Int(buffer[1]) << 16 |
+                              Int(buffer[2]) << 8 |
+                              Int(buffer[3])
+
+            if chunkLength == 0 {
+                buffer.removeFirst(4)
+                continue
+            }
+            if chunkLength > maxChunkLength {
+                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+            }
+            guard buffer.count >= 4 + chunkLength else {
+                break
+            }
+            guard sequence < UInt64.max else {
+                throw EHBPError.invalidResponse("response chunk sequence overflow")
+            }
+
+            let ciphertext = Data(buffer[4..<(4 + chunkLength)])
+            buffer.removeFirst(4 + chunkLength)
+            let opened = try decryptChunk(
+                keyMaterial: keyMaterial,
+                seq: sequence,
+                ciphertext: ciphertext
+            )
+            sequence += 1
+            plaintext.append(opened)
+        }
+
+        return plaintext
+    }
+
+    /// Validates that source EOF occurred on a frame boundary.
+    public func finish() throws {
+        guard buffer.isEmpty else {
+            throw EHBPError.invalidResponse("truncated encrypted response chunk")
+        }
+    }
+}
+
 /// EHBP errors
 public enum EHBPError: Error, LocalizedError {
     case invalidInput(String)

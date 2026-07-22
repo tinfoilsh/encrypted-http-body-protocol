@@ -182,7 +182,7 @@ public final class EHBPClient: @unchecked Sendable {
             requestWasEncrypted: requestContext != nil
         ) else {
             let stream = AsyncThrowingStream<Data, Error> { continuation in
-                Task {
+                let task = Task {
                     do {
                         var buffer = Data()
                         for try await byte in asyncBytes {
@@ -196,6 +196,7 @@ public final class EHBPClient: @unchecked Sendable {
                         continuation.finish(throwing: error)
                     }
                 }
+                continuation.onTermination = { _ in task.cancel() }
             }
             return (stream, httpResponse)
         }
@@ -204,9 +205,7 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError.invalidResponse("invalid response nonce hex")
         }
 
-        let keyMaterial = try EHBP.deriveResponseKeys(
-            exportedSecret: token!.exportedSecret,
-            requestEnc: token!.requestEnc,
+        let responseDecryptor = try token!.makeResponseDecryptor(
             responseNonce: responseNonce
         )
 
@@ -215,52 +214,23 @@ public final class EHBPClient: @unchecked Sendable {
         tokenLock.unlock()
 
         let stream = AsyncThrowingStream<Data, Error> { continuation in
-            Task {
+            let task = Task {
                 do {
-                    var buffer = [UInt8]()
-                    var seq: UInt64 = 0
+                    var decryptor = responseDecryptor
 
                     for try await byte in asyncBytes {
-                        buffer.append(byte)
-
-                        while buffer.count >= 4 {
-                            let chunkLength = Int(buffer[0]) << 24 |
-                                              Int(buffer[1]) << 16 |
-                                              Int(buffer[2]) << 8 |
-                                              Int(buffer[3])
-
-                            if chunkLength == 0 {
-                                buffer.removeFirst(4)
-                                continue
-                            }
-
-                            if chunkLength > EHBPConstants.maxResponseChunkBytes {
-                                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
-                            }
-
-                            guard buffer.count >= 4 + chunkLength else {
-                                break
-                            }
-
-                            let ciphertext = Data(buffer[4..<(4 + chunkLength)])
-                            buffer.removeFirst(4 + chunkLength)
-
-                            let plaintext = try decryptChunk(
-                                keyMaterial: keyMaterial,
-                                seq: seq,
-                                ciphertext: ciphertext
-                            )
-                            seq += 1
-
+                        for plaintext in try decryptor.push(Data([byte])) {
                             continuation.yield(plaintext)
                         }
                     }
 
+                    try decryptor.finish()
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
 
         return (stream, EHBPClient.sanitizedResponse(httpResponse))

@@ -71,6 +71,27 @@ fn decrypts_response_from_shared_vector() {
 }
 
 #[test]
+fn incrementally_decrypts_response_from_shared_vector() {
+    let vector: ResponseVector =
+        serde_json::from_str(include_str!("../../test-vectors/response-decryption.json")).unwrap();
+    let token = SessionRecoveryToken::new(
+        hex::decode(vector.exported_secret).unwrap(),
+        hex::decode(vector.request_enc).unwrap(),
+    )
+    .unwrap();
+    let encrypted = hex::decode(vector.encrypted_response).unwrap();
+    let mut decryptor = token
+        .response_decryptor(&hex::decode(vector.response_nonce).unwrap())
+        .unwrap();
+
+    assert!(decryptor.push(&encrypted[..3]).unwrap().is_empty());
+    let plaintext = decryptor.push(&encrypted[3..]).unwrap().concat();
+    decryptor.finish().unwrap();
+
+    assert_eq!(hex::encode(plaintext), vector.plaintext);
+}
+
+#[test]
 fn session_recovery_token_serializes_shared_json_shape() {
     let vector: TokenVector = serde_json::from_str(include_str!(
         "../../test-vectors/session-recovery-token.json"

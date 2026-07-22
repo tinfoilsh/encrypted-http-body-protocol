@@ -106,6 +106,14 @@ describe('computeNonce', () => {
     const nonce = computeNonce(nonceBase, 0xFFFFFFFF);
     assert.strictEqual(nonce.length, 12);
   });
+
+  it('should reject sequence number overflow', () => {
+    const nonceBase = new Uint8Array(12).fill(0);
+    assert.throws(
+      () => computeNonce(nonceBase, 0x100000000),
+      /sequence number must be an integer in range/,
+    );
+  });
 });
 
 describe('encrypt/decrypt round trip', () => {

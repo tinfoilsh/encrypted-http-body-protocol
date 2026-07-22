@@ -67,8 +67,10 @@ func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, er
 	}, nil
 }
 
-// DecryptResponseWithToken decrypts an HTTP response using only a
-// SessionRecoveryToken (no live HPKE context required).
+// DecryptResponseWithToken replaces an HTTP response body with an incremental
+// authenticated plaintext stream using only a SessionRecoveryToken (no live
+// HPKE context required). Plaintext frames become readable before the encrypted
+// body reaches EOF. Closing the replacement body closes the original body.
 func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) error {
 	if token == nil {
 		return fmt.Errorf("session recovery token is nil")

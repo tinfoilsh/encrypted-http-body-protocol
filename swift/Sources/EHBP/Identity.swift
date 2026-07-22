@@ -61,6 +61,25 @@ public struct SessionRecoveryToken: Sendable, Codable {
         }
         self.requestEnc = requestEncData
     }
+
+    /// Creates an incremental authenticated decryptor for this response.
+    public func makeResponseDecryptor(
+        responseNonce: Data,
+        maxChunkLength: Int = EHBPConstants.maxResponseChunkBytes
+    ) throws -> ResponseDecryptor {
+        guard maxChunkLength > 0 else {
+            throw EHBPError.invalidInput("maximum chunk length must be positive")
+        }
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: exportedSecret,
+            requestEnc: requestEnc,
+            responseNonce: responseNonce
+        )
+        return ResponseDecryptor(
+            keyMaterial: keyMaterial,
+            maxChunkLength: maxChunkLength
+        )
+    }
 }
 
 /// Extracts a session recovery token from an HPKE request context
@@ -83,44 +102,12 @@ public func decryptResponseBody(
     responseNonce: Data,
     encryptedData: Data
 ) throws -> Data {
-    let keyMaterial = try deriveResponseKeys(
-        exportedSecret: token.exportedSecret,
-        requestEnc: token.requestEnc,
-        responseNonce: responseNonce
-    )
-
+    var decryptor = try token.makeResponseDecryptor(responseNonce: responseNonce)
     var result = Data()
-    var offset = 0
-    var seq: UInt64 = 0
-
-    while offset + 4 <= encryptedData.count {
-        let chunkLength = Int(encryptedData[offset]) << 24 |
-                          Int(encryptedData[offset + 1]) << 16 |
-                          Int(encryptedData[offset + 2]) << 8 |
-                          Int(encryptedData[offset + 3])
-        offset += 4
-
-        if chunkLength == 0 {
-            continue
-        }
-
-        guard offset + chunkLength <= encryptedData.count else {
-            throw EHBPError.invalidResponse("incomplete chunk at offset \(offset)")
-        }
-
-        let ciphertext = encryptedData.subdata(in: offset..<(offset + chunkLength))
-        offset += chunkLength
-
-        let plaintext = try decryptChunk(
-            keyMaterial: keyMaterial,
-            seq: seq,
-            ciphertext: ciphertext
-        )
-        seq += 1
-
+    for plaintext in try decryptor.push(encryptedData) {
         result.append(plaintext)
     }
-
+    try decryptor.finish()
     return result
 }
 

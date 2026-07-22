@@ -259,6 +259,32 @@ To decrypt a response using a session recovery token:
 2. Derive response keys using the procedure in Section 4.4, substituting the token's `exported_secret` for the HPKE export and the token's `request_enc` for `enc`.
 3. Decrypt the response body using the derived AES-256-GCM key and the chunked framing in Section 4.3.
 
+### 6.2.1 Incremental Recovery, Replay, and Tailing
+
+Recovery decryption MAY be performed incrementally as encrypted response bytes
+arrive. An incremental decryptor:
+
+- MUST use the original `Ehbp-Response-Nonce` associated with the response.
+- MUST begin the frame sequence number at zero and increment it only after
+  successfully authenticating a non-empty frame.
+- MUST buffer incomplete framing and MUST emit a frame's plaintext only after
+  that complete frame has been authenticated.
+- MUST reject an end-of-stream that leaves a partial length prefix or partial
+  encrypted frame.
+
+Authenticated emission establishes only that the emitted frames are valid
+prefixes of the response. Application-level completion (for example an SSE
+terminal event or a complete JSON document) MUST be established separately;
+transport EOF alone does not prove that the application response is complete.
+
+If recovery reconnects to a server that replays and then tails the response,
+the encrypted response MUST be replayed from the first frame and the client
+MUST restart decryption at sequence number zero with the original response
+nonce. EHBP does not support resuming from an arbitrary ciphertext or plaintext
+byte offset. A client MAY suppress already-delivered application data after
+authenticating the replayed frames, but it MUST still process those frames from
+sequence number zero.
+
 ### 6.3 Security Considerations for Tokens
 
 - A session recovery token is equivalent in power to the ability to decrypt a single response. It MUST be treated as sensitive key material.
