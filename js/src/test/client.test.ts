@@ -375,6 +375,37 @@ describe('Transport', () => {
     }
   });
 
+  it('should let init options override a Request input, like fetch()', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let capturedRequest!: Request;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      capturedRequest = input as Request;
+      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
+    }) as typeof fetch;
+
+    try {
+      const request = new Request('https://server.test/secure', {
+        method: 'POST',
+        body: 'hello',
+        credentials: 'include',
+        redirect: 'manual',
+        duplex: 'half',
+      } as RequestInit);
+      const response = await transport.request(request, { credentials: 'omit' });
+      assert.strictEqual(await response.text(), 'processed:hello');
+
+      // init overrides the Request; unset init members fall back to it
+      assert.strictEqual(capturedRequest.credentials, 'omit');
+      assert.strictEqual(capturedRequest.redirect, 'manual');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should preserve fetch options on bodyless passthrough requests', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');

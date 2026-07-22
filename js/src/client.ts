@@ -159,8 +159,12 @@ export class Transport {
     url.host = this.serverHost;
 
     // Carry fetch options (credentials, signal, ...) through re-construction
-    // so they reach the final fetch of the encrypted request.
-    const forwardedInit = forwardedRequestInit(input instanceof Request ? input : init);
+    // so they reach the final fetch of the encrypted request. Like fetch(),
+    // init members override those of a Request input.
+    const forwardedInit =
+      input instanceof Request
+        ? { ...forwardedRequestInit(input), ...forwardedRequestInit(init) }
+        : forwardedRequestInit(init);
 
     const request = new Request(url.toString(), {
       ...forwardedInit,
