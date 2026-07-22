@@ -143,12 +143,24 @@ impl ResponseDecryptor {
 
     /// Adds encrypted bytes and returns all newly authenticated plaintext frames.
     pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
-        self.buffer.extend_from_slice(data);
+        self.feed(data);
         let mut plaintext = Vec::new();
 
+        while let Some(frame) = self.next_frame()? {
+            plaintext.push(frame);
+        }
+
+        Ok(plaintext)
+    }
+
+    pub(crate) fn feed(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub(crate) fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
         loop {
             if self.buffer.len() < 4 {
-                break;
+                return Ok(None);
             }
 
             let chunk_len = u32::from_be_bytes([
@@ -168,20 +180,22 @@ impl ResponseDecryptor {
                 ));
             }
             if self.buffer.len() < 4 + chunk_len {
-                break;
+                return Ok(None);
             }
             if self.sequence == u64::MAX {
                 return Err(Error::Protocol("response chunk sequence overflow".into()));
             }
 
-            self.buffer.advance(4);
-            let ciphertext = self.buffer.split_to(chunk_len).freeze();
-            let opened = decrypt_chunk(&self.key_material, self.sequence, &ciphertext)?;
+            let frame_len = 4 + chunk_len;
+            let opened = decrypt_chunk(
+                &self.key_material,
+                self.sequence,
+                &self.buffer[4..frame_len],
+            )?;
+            self.buffer.advance(frame_len);
             self.sequence += 1;
-            plaintext.push(opened);
+            return Ok(Some(opened));
         }
-
-        Ok(plaintext)
     }
 
     /// Validates that source EOF occurred on a frame boundary.
@@ -284,6 +298,8 @@ mod tests {
             tampered.push(&tampered_frame),
             Err(Error::Crypto(_))
         ));
+        assert_eq!(tampered.sequence, 0);
+        assert_eq!(&tampered.buffer[..], tampered_frame);
     }
 
     #[test]

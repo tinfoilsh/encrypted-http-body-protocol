@@ -219,7 +219,7 @@ public final class EHBPClient: @unchecked Sendable {
                     var decryptor = responseDecryptor
 
                     for try await byte in asyncBytes {
-                        for plaintext in try decryptor.push(Data([byte])) {
+                        if let plaintext = try decryptor.push(byte) {
                             continuation.yield(plaintext)
                         }
                     }

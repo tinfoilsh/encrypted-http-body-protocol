@@ -449,6 +449,63 @@ final class StreamingTests: XCTestCase {
         tamperedFrame[tamperedFrame.index(before: tamperedFrame.endIndex)] ^= 1
         var tampered = try token.makeResponseDecryptor(responseNonce: responseNonce)
         XCTAssertThrowsError(try tampered.push(tamperedFrame))
+        XCTAssertThrowsError(try tampered.push(Data()))
+    }
+
+    func testResponseDecryptorParsesManyCoalescedFrames() throws {
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength),
+            responseNonce: Data(repeating: 0xEF, count: EHBPConstants.responseNonceLength)
+        )
+        let chunkCount = 128
+        var framedData = Data()
+        var plaintexts = [Data]()
+
+        for index in 0..<chunkCount {
+            let plaintext = Data("coalesced chunk \(index)".utf8)
+            plaintexts.append(plaintext)
+            framedData.append(try framedChunk(
+                keyMaterial: keyMaterial,
+                sequence: UInt64(index),
+                plaintext: plaintext
+            ))
+        }
+
+        var decryptor = ResponseDecryptor(keyMaterial: keyMaterial)
+        XCTAssertEqual(try decryptor.push(framedData), plaintexts)
+        try decryptor.finish()
+    }
+
+    func testResponseDecryptorIngestsIndividualBytes() throws {
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength),
+            responseNonce: Data(repeating: 0xEF, count: EHBPConstants.responseNonceLength)
+        )
+        let plaintexts = [
+            Data("first byte-fed chunk".utf8),
+            Data("second byte-fed chunk".utf8)
+        ]
+        var framedData = Data(repeating: 0, count: EHBPConstants.responseLengthPrefixBytes)
+        for (index, plaintext) in plaintexts.enumerated() {
+            framedData.append(try framedChunk(
+                keyMaterial: keyMaterial,
+                sequence: UInt64(index),
+                plaintext: plaintext
+            ))
+        }
+
+        var decryptor = ResponseDecryptor(keyMaterial: keyMaterial)
+        var opened = [Data]()
+        for byte in framedData {
+            if let plaintext = try decryptor.push(byte) {
+                opened.append(plaintext)
+            }
+        }
+
+        XCTAssertEqual(opened, plaintexts)
+        try decryptor.finish()
     }
 
     func testResponseDecryptorEnforcesSizeAndSequenceLimits() throws {
@@ -486,7 +543,10 @@ final class StreamingTests: XCTestCase {
             plaintext: plaintext
         )
         var length = UInt32(ciphertext.count).bigEndian
-        var frame = Data(bytes: &length, count: 4)
+        var frame = Data(
+            bytes: &length,
+            count: EHBPConstants.responseLengthPrefixBytes
+        )
         frame.append(ciphertext)
         return frame
     }

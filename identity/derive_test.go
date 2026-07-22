@@ -338,6 +338,25 @@ func TestMultipleChunksRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResponseAEADSealRejectsSequenceOverflow(t *testing.T) {
+	km := &ResponseKeyMaterial{
+		Key:       make([]byte, AES256KeyLength),
+		NonceBase: make([]byte, AESGCMNonceLength),
+	}
+	aead, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("NewResponseAEAD failed: %v", err)
+	}
+	aead.seq = ^uint64(0)
+
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("Seal should panic when the response sequence is exhausted")
+		}
+	}()
+	aead.Seal([]byte("data"), nil)
+}
+
 func TestWrongSequenceNumberFails(t *testing.T) {
 	exportedSecret := make([]byte, 32)
 	requestEnc := make([]byte, 32)

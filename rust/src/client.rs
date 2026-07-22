@@ -868,7 +868,8 @@ fn decrypt_response_stream(
 
         while let Some(chunk) = poll_next(&mut stream).await {
             let chunk = chunk?;
-            for plaintext in decryptor.push(&chunk)? {
+            decryptor.feed(&chunk);
+            while let Some(plaintext) = decryptor.next_frame()? {
                 yield Bytes::from(plaintext);
             }
         }
@@ -1004,6 +1005,48 @@ mod tests {
 
         drop(decrypted);
         assert!(source_dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn streaming_decryption_yields_before_processing_later_frames() {
+        use aes_gcm::{
+            aead::{Aead as _, KeyInit as _, Payload},
+            Aes256Gcm, Nonce,
+        };
+
+        let vector: ResponseVector =
+            serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
+                .unwrap();
+        let key_material = derive_response_keys(
+            &hex::decode(vector.exported_secret).unwrap(),
+            &hex::decode(vector.request_enc).unwrap(),
+            &hex::decode(vector.response_nonce).unwrap(),
+        )
+        .unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key).unwrap();
+        let nonce = crate::derive::compute_nonce(&key_material.nonce_base, 1);
+        let mut second = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: b"second",
+                    aad: &[],
+                },
+            )
+            .unwrap();
+        *second.last_mut().unwrap() ^= 1;
+
+        let mut coalesced = hex::decode(vector.encrypted_response).unwrap();
+        coalesced.extend_from_slice(&crate::derive::frame_chunk(&second).unwrap());
+        let source = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(coalesced))]);
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+
+        let first = decrypted.next().await.unwrap().unwrap();
+        assert_eq!(hex::encode(first), vector.plaintext);
+        assert!(matches!(
+            decrypted.next().await.unwrap(),
+            Err(Error::Crypto(_))
+        ));
     }
 
     #[tokio::test]

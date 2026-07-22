@@ -129,7 +129,11 @@ func (km *ResponseKeyMaterial) NewResponseAEAD() (*ResponseAEAD, error) {
 // Seal encrypts plaintext with the given additional authenticated data.
 // It automatically computes the nonce from the current sequence number
 // and increments the sequence for the next operation.
+// It panics if the sequence number is exhausted.
 func (r *ResponseAEAD) Seal(plaintext, aad []byte) []byte {
+	if r.seq == ^uint64(0) {
+		panic("response chunk sequence overflow")
+	}
 	nonce := r.computeNonce()
 	r.seq++
 	return r.aead.Seal(nil, nonce, plaintext, aad)
