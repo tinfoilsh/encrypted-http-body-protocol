@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
+
+type closeTrackingBody struct {
+	io.Reader
+	closed chan struct{}
+}
+
+func (b *closeTrackingBody) Close() error {
+	close(b.closed)
+	return nil
+}
 
 func TestSessionRecoveryTokenFields(t *testing.T) {
 	serverIdentity, err := NewIdentity()
@@ -218,6 +229,130 @@ func TestDecryptResponseWithTokenMultiChunk(t *testing.T) {
 	decrypted, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Equal(t, "chunk1chunk2chunk3", string(decrypted))
+}
+
+func TestDecryptResponseWithTokenDeliversBeforeSourceEOF(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/test", strings.NewReader("request"))
+	reqCtx, err := serverIdentity.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+	token, err := ExtractSessionRecoveryToken(reqCtx)
+	require.NoError(t, err)
+
+	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
+	require.NoError(t, err)
+	_, err = io.ReadAll(req.Body)
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	writer, err := serverIdentity.SetupDerivedResponseEncryption(recorder, respCtx)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("first"))
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("second"))
+	require.NoError(t, err)
+	writer.Flush()
+
+	encrypted := recorder.Body.Bytes()
+	firstFrameLength := 4 + int(binary.BigEndian.Uint32(encrypted[:4]))
+	sourceReader, sourceWriter := io.Pipe()
+	releaseTail := make(chan struct{})
+	writeResult := make(chan error, 1)
+	go func() {
+		if _, writeErr := sourceWriter.Write(encrypted[:firstFrameLength]); writeErr != nil {
+			writeResult <- writeErr
+			return
+		}
+		<-releaseTail
+		_, writeErr := sourceWriter.Write(encrypted[firstFrameLength:])
+		closeErr := sourceWriter.CloseWithError(writeErr)
+		if writeErr == nil {
+			writeErr = closeErr
+		}
+		writeResult <- writeErr
+	}()
+
+	resp := &http.Response{
+		Header: recorder.Header(),
+		Body:   sourceReader,
+	}
+	require.NoError(t, DecryptResponseWithToken(resp, token))
+
+	first := make([]byte, len("first"))
+	_, err = io.ReadFull(resp.Body, first)
+	require.NoError(t, err)
+	assert.Equal(t, "first", string(first))
+
+	close(releaseTail)
+	tail, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "second", string(tail))
+	require.NoError(t, <-writeResult)
+}
+
+func TestDecryptResponseWithTokenRejectsTruncatedLengthPrefix(t *testing.T) {
+	token := &SessionRecoveryToken{
+		ExportedSecret: make([]byte, ExportLength),
+		RequestEnc:     make([]byte, ExportLength),
+	}
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   io.NopCloser(bytes.NewReader([]byte{0, 0, 0})),
+	}
+	resp.Header.Set(protocol.ResponseNonceHeader, hex.EncodeToString(make([]byte, ResponseNonceLength)))
+
+	require.NoError(t, DecryptResponseWithToken(resp, token))
+	_, err := io.ReadAll(resp.Body)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chunk length")
+}
+
+func TestDecryptResponseWithTokenCloseCancelsSource(t *testing.T) {
+	source := &closeTrackingBody{
+		Reader: strings.NewReader(""),
+		closed: make(chan struct{}),
+	}
+	token := &SessionRecoveryToken{
+		ExportedSecret: make([]byte, ExportLength),
+		RequestEnc:     make([]byte, ExportLength),
+	}
+	resp := &http.Response{
+		Header: make(http.Header),
+		Body:   source,
+	}
+	resp.Header.Set(protocol.ResponseNonceHeader, hex.EncodeToString(make([]byte, ResponseNonceLength)))
+
+	require.NoError(t, DecryptResponseWithToken(resp, token))
+	require.NoError(t, resp.Body.Close())
+
+	select {
+	case <-source.closed:
+	default:
+		t.Fatal("closing decrypted response body did not close encrypted source")
+	}
+}
+
+func TestDerivedStreamingDecryptReaderRejectsSequenceOverflow(t *testing.T) {
+	keyMaterial := &ResponseKeyMaterial{
+		Key:       make([]byte, AES256KeyLength),
+		NonceBase: make([]byte, AESGCMNonceLength),
+	}
+	aead, err := keyMaterial.NewResponseAEAD()
+	require.NoError(t, err)
+	aead.seq = ^uint64(0)
+
+	frame := make([]byte, 4+aead.Overhead())
+	binary.BigEndian.PutUint32(frame[:4], uint32(aead.Overhead()))
+	reader := &DerivedStreamingDecryptReader{
+		reader: bytes.NewReader(frame),
+		aead:   aead,
+	}
+
+	_, err = io.ReadAll(reader)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sequence overflow")
 }
 
 func TestDecryptResponseWithTokenEquivalentToContextPath(t *testing.T) {

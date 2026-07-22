@@ -3,6 +3,7 @@
 from . import protocol
 from .client import Client, Response, StreamingResponse
 from .derive import (
+    FrameDecryptor,
     ResponseKeyMaterial,
     compute_nonce,
     decrypt_chunk,
@@ -23,7 +24,7 @@ from .identity import EncryptedRequest, ServerIdentity
 from .session import SessionRecoveryToken
 from .transport import AsyncEHBPTransport, EHBPTransport
 
-__version__ = "0.2.6"
+__version__ = "0.3.0"
 
 __all__ = [
     "Client",
@@ -34,6 +35,7 @@ __all__ = [
     "ServerIdentity",
     "EncryptedRequest",
     "SessionRecoveryToken",
+    "FrameDecryptor",
     "ResponseKeyMaterial",
     "derive_response_keys",
     "compute_nonce",

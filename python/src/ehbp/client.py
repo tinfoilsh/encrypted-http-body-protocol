@@ -32,7 +32,6 @@ from ._http import (
 from ._http import (
     single_chunk_body as _single_chunk_body,
 )
-from .derive import FrameDecryptor, derive_response_keys
 from .errors import InvalidInputError, ProtocolError
 from .identity import ServerIdentity
 from .protocol import (
@@ -301,22 +300,21 @@ class Client:
                 else:
                     response_nonce = _response_nonce_for_status(status, response_headers)
                 assert response_nonce is not None
-                key_material = derive_response_keys(
-                    token.exported_secret, token.request_enc, response_nonce
-                )
                 yield StreamingResponse(
                     status,
                     response_headers,
-                    self._decrypt_stream(resp, token, key_material),
+                    self._decrypt_stream(resp, token, response_nonce),
                 )
         except BaseException:
             self._clear_token_if_current(token)
             raise
 
     def _decrypt_stream(
-        self, resp: httpx.Response, token: SessionRecoveryToken, key_material: Any
+        self, resp: httpx.Response, token: SessionRecoveryToken, response_nonce: bytes
     ) -> Iterator[bytes]:
-        decryptor = FrameDecryptor(key_material, self._max_response_bytes)
+        decryptor = token.create_response_decryptor(
+            response_nonce, max_chunk_length=self._max_response_bytes
+        )
         try:
             for chunk in resp.iter_bytes():
                 yield from decryptor.push(chunk)

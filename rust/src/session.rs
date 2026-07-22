@@ -3,7 +3,7 @@ use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    derive::{decrypt_framed_response, derive_response_keys},
+    derive::{decrypt_framed_response, derive_response_keys, ResponseDecryptor},
     protocol::{EXPORT_LENGTH, REQUEST_ENC_LENGTH, RESPONSE_NONCE_LENGTH},
     Error, Result,
 };
@@ -71,6 +71,22 @@ impl SessionRecoveryToken {
         let key_material =
             derive_response_keys(&self.exported_secret, &self.request_enc, response_nonce)?;
         decrypt_framed_response(&key_material, body)
+    }
+
+    /// Creates an incremental authenticated decryptor for this response.
+    ///
+    /// The caller must feed the response from its first frame and call
+    /// [`ResponseDecryptor::finish`] when the encrypted source reaches EOF.
+    pub fn response_decryptor(&self, response_nonce: &[u8]) -> Result<ResponseDecryptor> {
+        if response_nonce.len() != RESPONSE_NONCE_LENGTH {
+            return Err(Error::Protocol(format!(
+                "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
+                response_nonce.len()
+            )));
+        }
+        let key_material =
+            derive_response_keys(&self.exported_secret, &self.request_enc, response_nonce)?;
+        Ok(ResponseDecryptor::from_key_material(key_material))
     }
 }
 

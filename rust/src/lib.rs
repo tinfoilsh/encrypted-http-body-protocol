@@ -8,7 +8,7 @@ mod protocol;
 mod session;
 
 pub use client::{Client, RequestBuilder, Response, StreamingResponse};
-pub use derive::{compute_nonce, derive_response_keys, ResponseKeyMaterial};
+pub use derive::{compute_nonce, derive_response_keys, ResponseDecryptor, ResponseKeyMaterial};
 pub use error::{Error, Result};
 pub use identity::ServerIdentity;
 pub use protocol::*;

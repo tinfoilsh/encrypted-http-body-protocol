@@ -2,6 +2,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
+use bytes::{Buf, BytesMut};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use std::fmt;
@@ -14,6 +15,8 @@ use crate::{
     },
     Error, Result,
 };
+
+const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ResponseKeyMaterial {
@@ -110,39 +113,99 @@ pub(crate) fn decrypt_framed_response(
     key_material: &ResponseKeyMaterial,
     body: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut offset = 0usize;
-    let mut seq = 0u64;
+    let mut decryptor = ResponseDecryptor::from_key_material(key_material.clone());
+    let out = decryptor.push(body)?.concat();
+    decryptor.finish()?;
+    Ok(out)
+}
 
-    while offset < body.len() {
-        if body.len() - offset < 4 {
-            return Err(Error::Protocol("truncated chunk length".into()));
+/// Incrementally decrypts an EHBP framed response.
+///
+/// Feed encrypted network bytes with [`Self::push`] and call [`Self::finish`]
+/// when the source reaches EOF. `push` returns each authenticated plaintext
+/// frame as soon as it is complete, without waiting for source EOF.
+pub struct ResponseDecryptor {
+    key_material: ResponseKeyMaterial,
+    buffer: BytesMut,
+    sequence: u64,
+    max_chunk_length: usize,
+}
+
+impl ResponseDecryptor {
+    pub(crate) fn from_key_material(key_material: ResponseKeyMaterial) -> Self {
+        Self {
+            key_material,
+            buffer: BytesMut::new(),
+            sequence: 0,
+            max_chunk_length: DEFAULT_MAX_RESPONSE_CHUNK_BYTES,
         }
-
-        let chunk_len = u32::from_be_bytes([
-            body[offset],
-            body[offset + 1],
-            body[offset + 2],
-            body[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        if chunk_len == 0 {
-            continue;
-        }
-        if body.len() - offset < chunk_len {
-            return Err(Error::Protocol("truncated encrypted chunk".into()));
-        }
-
-        let plaintext = decrypt_chunk(key_material, seq, &body[offset..offset + chunk_len])?;
-        out.extend_from_slice(&plaintext);
-        seq = seq
-            .checked_add(1)
-            .ok_or_else(|| Error::Protocol("response chunk sequence overflow".into()))?;
-        offset += chunk_len;
     }
 
-    Ok(out)
+    /// Adds encrypted bytes and returns all newly authenticated plaintext frames.
+    pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
+        self.feed(data);
+        let mut plaintext = Vec::new();
+
+        while let Some(frame) = self.next_frame()? {
+            plaintext.push(frame);
+        }
+
+        Ok(plaintext)
+    }
+
+    pub(crate) fn feed(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub(crate) fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        loop {
+            if self.buffer.len() < 4 {
+                return Ok(None);
+            }
+
+            let chunk_len = u32::from_be_bytes([
+                self.buffer[0],
+                self.buffer[1],
+                self.buffer[2],
+                self.buffer[3],
+            ]) as usize;
+
+            if chunk_len == 0 {
+                self.buffer.advance(4);
+                continue;
+            }
+            if chunk_len > self.max_chunk_length {
+                return Err(Error::Protocol(
+                    "response chunk exceeds maximum allowed size".into(),
+                ));
+            }
+            if self.buffer.len() < 4 + chunk_len {
+                return Ok(None);
+            }
+            if self.sequence == u64::MAX {
+                return Err(Error::Protocol("response chunk sequence overflow".into()));
+            }
+
+            let frame_len = 4 + chunk_len;
+            let opened = decrypt_chunk(
+                &self.key_material,
+                self.sequence,
+                &self.buffer[4..frame_len],
+            )?;
+            self.buffer.advance(frame_len);
+            self.sequence += 1;
+            return Ok(Some(opened));
+        }
+    }
+
+    /// Validates that source EOF occurred on a frame boundary.
+    pub fn finish(&self) -> Result<()> {
+        if self.buffer.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Protocol("truncated encrypted response chunk".into()))
+        }
+    }
 }
 
 pub(crate) fn frame_chunk(ciphertext: &[u8]) -> Result<Vec<u8>> {
@@ -157,6 +220,28 @@ pub(crate) fn frame_chunk(ciphertext: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_material() -> ResponseKeyMaterial {
+        ResponseKeyMaterial {
+            key: [7; AES256_KEY_LENGTH],
+            nonce_base: [9; AES_GCM_NONCE_LENGTH],
+        }
+    }
+
+    fn encrypted_frame(key_material: &ResponseKeyMaterial, seq: u64, plaintext: &[u8]) -> Vec<u8> {
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key).unwrap();
+        let nonce = compute_nonce(&key_material.nonce_base, seq);
+        let ciphertext = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: plaintext,
+                    aad: &[],
+                },
+            )
+            .unwrap();
+        frame_chunk(&ciphertext).unwrap()
+    }
 
     #[test]
     fn nonce_uses_big_endian_sequence_xor() {
@@ -176,5 +261,62 @@ mod tests {
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("1, 1"));
         assert!(!debug.contains("2, 2"));
+    }
+
+    #[test]
+    fn response_decryptor_delivers_before_finish_and_handles_fragmentation() {
+        let key_material = key_material();
+        let first = encrypted_frame(&key_material, 0, b"first");
+        let second = encrypted_frame(&key_material, 1, b"second");
+        let mut decryptor = ResponseDecryptor::from_key_material(key_material);
+
+        assert!(decryptor.push(&first[..3]).unwrap().is_empty());
+        assert_eq!(decryptor.push(&first[3..]).unwrap(), [b"first".to_vec()]);
+
+        let mut coalesced = vec![0, 0, 0, 0];
+        coalesced.extend_from_slice(&second);
+        coalesced.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(decryptor.push(&coalesced).unwrap(), [b"second".to_vec()]);
+        decryptor.finish().unwrap();
+    }
+
+    #[test]
+    fn response_decryptor_rejects_truncation_and_authentication_failure() {
+        let key_material = key_material();
+        let frame = encrypted_frame(&key_material, 0, b"secret");
+        let mut truncated = ResponseDecryptor::from_key_material(key_material.clone());
+        assert!(truncated
+            .push(&frame[..frame.len() - 1])
+            .unwrap()
+            .is_empty());
+        assert!(matches!(truncated.finish(), Err(Error::Protocol(_))));
+
+        let mut tampered_frame = frame;
+        *tampered_frame.last_mut().unwrap() ^= 1;
+        let mut tampered = ResponseDecryptor::from_key_material(key_material);
+        assert!(matches!(
+            tampered.push(&tampered_frame),
+            Err(Error::Crypto(_))
+        ));
+        assert_eq!(tampered.sequence, 0);
+        assert_eq!(&tampered.buffer[..], tampered_frame);
+    }
+
+    #[test]
+    fn response_decryptor_enforces_size_and_sequence_limits() {
+        let mut oversized = ResponseDecryptor::from_key_material(key_material());
+        let oversized_prefix = u32::MAX.to_be_bytes();
+        assert!(matches!(
+            oversized.push(&oversized_prefix),
+            Err(Error::Protocol(message)) if message.contains("maximum allowed size")
+        ));
+
+        let mut exhausted = ResponseDecryptor::from_key_material(key_material());
+        exhausted.sequence = u64::MAX;
+        let frame = frame_chunk(&[0; 16]).unwrap();
+        assert!(matches!(
+            exhausted.push(&frame),
+            Err(Error::Protocol(message)) if message.contains("sequence overflow")
+        ));
     }
 }

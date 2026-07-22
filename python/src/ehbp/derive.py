@@ -117,29 +117,10 @@ def frame_chunk(ciphertext: bytes) -> bytes:
 
 
 def decrypt_framed_response(km: ResponseKeyMaterial, body: bytes) -> bytes:
-    out = bytearray()
-    offset = 0
-    seq = 0
-    total = len(body)
-
-    while offset < total:
-        if total - offset < LENGTH_PREFIX_SIZE:
-            raise ProtocolError("truncated chunk length")
-        chunk_len = struct.unpack_from(">I", body, offset)[0]
-        offset += LENGTH_PREFIX_SIZE
-
-        if chunk_len == 0:
-            continue
-        if total - offset < chunk_len:
-            raise ProtocolError("truncated encrypted chunk")
-
-        out += decrypt_chunk(km, seq, body[offset : offset + chunk_len])
-        if seq >= MAX_SEQUENCE:
-            raise ProtocolError("response chunk sequence overflow")
-        seq += 1
-        offset += chunk_len
-
-    return bytes(out)
+    decryptor = FrameDecryptor(km)
+    chunks = decryptor.push(body)
+    decryptor.finish()
+    return b"".join(chunks)
 
 
 class FrameDecryptor:

@@ -2,10 +2,10 @@
 
 import pytest
 
-from ehbp import ResponseKeyMaterial, SessionRecoveryToken, compute_nonce
-from ehbp.derive import FrameDecryptor, decrypt_framed_response, encrypt_chunk, frame_chunk
-from ehbp.errors import ProtocolError
-from ehbp.protocol import AES_GCM_NONCE_LENGTH
+from ehbp import FrameDecryptor, ResponseKeyMaterial, SessionRecoveryToken, compute_nonce
+from ehbp.derive import decrypt_framed_response, derive_response_keys, encrypt_chunk, frame_chunk
+from ehbp.errors import CryptoError, ProtocolError
+from ehbp.protocol import AES_GCM_NONCE_LENGTH, MAX_SEQUENCE, RESPONSE_NONCE_LENGTH
 
 
 def test_nonce_uses_big_endian_sequence_xor():
@@ -81,3 +81,73 @@ def test_streaming_decryptor_rejects_oversized_chunk_length():
     oversized_prefix = (1 << 20).to_bytes(4, "big")
     with pytest.raises(ProtocolError):
         decryptor.push(oversized_prefix)
+
+
+def test_token_decryptor_delivers_before_source_eof():
+    exported_secret = bytes(range(32))
+    request_enc = bytes(reversed(range(32)))
+    response_nonce = bytes([7]) * RESPONSE_NONCE_LENGTH
+    token = SessionRecoveryToken(exported_secret, request_enc)
+    km = derive_response_keys(exported_secret, request_enc, response_nonce)
+    first = frame_chunk(encrypt_chunk(km, 0, b"first"))
+    second = frame_chunk(encrypt_chunk(km, 1, b"second"))
+
+    decryptor = token.create_response_decryptor(response_nonce)
+
+    assert decryptor.push(first) == [b"first"]
+    assert decryptor.push(second) == [b"second"]
+    decryptor.finish()
+
+
+def test_token_decryptor_handles_coalesced_and_zero_length_frames():
+    exported_secret = bytes(range(32))
+    request_enc = bytes(reversed(range(32)))
+    response_nonce = bytes([9]) * RESPONSE_NONCE_LENGTH
+    token = SessionRecoveryToken(exported_secret, request_enc)
+    km = derive_response_keys(exported_secret, request_enc, response_nonce)
+    framed = (
+        b"\x00\x00\x00\x00"
+        + frame_chunk(encrypt_chunk(km, 0, b"one"))
+        + frame_chunk(encrypt_chunk(km, 1, b"two"))
+        + b"\x00\x00\x00\x00"
+    )
+
+    decryptor = token.create_response_decryptor(response_nonce)
+
+    assert decryptor.push(framed) == [b"one", b"two"]
+    decryptor.finish()
+
+
+def test_token_decryptor_rejects_authentication_failure_before_emitting():
+    exported_secret = bytes(range(32))
+    request_enc = bytes(reversed(range(32)))
+    response_nonce = bytes([11]) * RESPONSE_NONCE_LENGTH
+    token = SessionRecoveryToken(exported_secret, request_enc)
+    km = derive_response_keys(exported_secret, request_enc, response_nonce)
+    framed = bytearray(frame_chunk(encrypt_chunk(km, 0, b"secret")))
+    framed[-1] ^= 1
+
+    decryptor = token.create_response_decryptor(response_nonce)
+
+    with pytest.raises(CryptoError):
+        decryptor.push(bytes(framed))
+
+
+def test_streaming_decryptor_rejects_truncated_eof():
+    km = _key_material()
+    framed = frame_chunk(encrypt_chunk(km, 0, b"data"))
+    decryptor = FrameDecryptor(km)
+
+    assert decryptor.push(framed[:-1]) == []
+    with pytest.raises(ProtocolError):
+        decryptor.finish()
+
+
+def test_streaming_decryptor_rejects_sequence_overflow():
+    km = _key_material()
+    framed = frame_chunk(encrypt_chunk(km, MAX_SEQUENCE, b"last"))
+    decryptor = FrameDecryptor(km)
+    decryptor._seq = MAX_SEQUENCE
+
+    with pytest.raises(ProtocolError, match="sequence overflow"):
+        decryptor.push(framed)

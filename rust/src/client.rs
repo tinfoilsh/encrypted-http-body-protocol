@@ -1,4 +1,4 @@
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 #[cfg(not(target_arch = "wasm32"))]
 use http_body_util::BodyExt;
@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::{
-    derive::{decrypt_chunk, derive_response_keys},
+    derive::{derive_response_keys, ResponseDecryptor},
     identity::ServerIdentity,
     protocol::{
         ENCAPSULATED_KEY_HEADER, KEYS_MEDIA_TYPE, KEYS_PATH, KEY_CONFIG_PROBLEM_TYPE,
@@ -864,53 +864,17 @@ fn decrypt_response_stream(
     key_material: crate::derive::ResponseKeyMaterial,
 ) -> impl Stream<Item = Result<Bytes>> + Send {
     async_stream::try_stream! {
-        let mut buffer = BytesMut::new();
-        let mut seq = 0u64;
+        let mut decryptor = ResponseDecryptor::from_key_material(key_material);
 
         while let Some(chunk) = poll_next(&mut stream).await {
             let chunk = chunk?;
-            buffer.extend_from_slice(&chunk);
-
-            loop {
-                if buffer.len() < 4 {
-                    break;
-                }
-
-                let chunk_len = u32::from_be_bytes([
-                    buffer[0],
-                    buffer[1],
-                    buffer[2],
-                    buffer[3],
-                ]) as usize;
-
-                if chunk_len == 0 {
-                    buffer.advance(4);
-                    continue;
-                }
-
-                if chunk_len > DEFAULT_MAX_RESPONSE_BYTES {
-                    Err(Error::Protocol(
-                        "response chunk exceeds maximum allowed size".into(),
-                    ))?;
-                }
-
-                if buffer.len() < 4 + chunk_len {
-                    break;
-                }
-
-                buffer.advance(4);
-                let ciphertext = buffer.split_to(chunk_len).freeze();
-                let plaintext = decrypt_chunk(&key_material, seq, &ciphertext)?;
-                seq = seq
-                    .checked_add(1)
-                    .ok_or_else(|| Error::Protocol("response chunk sequence overflow".into()))?;
+            decryptor.feed(&chunk);
+            while let Some(plaintext) = decryptor.next_frame()? {
                 yield Bytes::from(plaintext);
             }
         }
 
-        if !buffer.is_empty() {
-            Err(Error::Protocol("truncated encrypted response chunk".into()))?;
-        }
+        decryptor.finish()?;
     }
 }
 
@@ -944,7 +908,10 @@ mod tests {
     use super::*;
     use futures_util::{stream, StreamExt};
     use serde::Deserialize;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -958,6 +925,28 @@ mod tests {
         response_nonce: String,
         plaintext: String,
         encrypted_response: String,
+    }
+
+    struct DropTrackedResponseStream {
+        first: Option<Bytes>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for DropTrackedResponseStream {
+        type Item = reqwest::Result<Bytes>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.first.take() {
+                Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for DropTrackedResponseStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
     }
 
     #[tokio::test]
@@ -986,6 +975,78 @@ mod tests {
         }
 
         assert_eq!(hex::encode(plaintext), vector.plaintext);
+    }
+
+    #[tokio::test]
+    async fn streaming_decryption_delivers_before_eof_and_cancels_source() {
+        let vector: ResponseVector =
+            serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
+                .unwrap();
+        let key_material = derive_response_keys(
+            &hex::decode(vector.exported_secret).unwrap(),
+            &hex::decode(vector.request_enc).unwrap(),
+            &hex::decode(vector.response_nonce).unwrap(),
+        )
+        .unwrap();
+        let source_dropped = Arc::new(AtomicBool::new(false));
+        let source = DropTrackedResponseStream {
+            first: Some(Bytes::from(hex::decode(vector.encrypted_response).unwrap())),
+            dropped: Arc::clone(&source_dropped),
+        };
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+
+        let plaintext = decrypted
+            .next()
+            .await
+            .expect("first frame should be delivered without source EOF")
+            .unwrap();
+        assert_eq!(hex::encode(plaintext), vector.plaintext);
+        assert!(!source_dropped.load(Ordering::SeqCst));
+
+        drop(decrypted);
+        assert!(source_dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn streaming_decryption_yields_before_processing_later_frames() {
+        use aes_gcm::{
+            aead::{Aead as _, KeyInit as _, Payload},
+            Aes256Gcm, Nonce,
+        };
+
+        let vector: ResponseVector =
+            serde_json::from_str(include_str!("../../test-vectors/response-decryption.json"))
+                .unwrap();
+        let key_material = derive_response_keys(
+            &hex::decode(vector.exported_secret).unwrap(),
+            &hex::decode(vector.request_enc).unwrap(),
+            &hex::decode(vector.response_nonce).unwrap(),
+        )
+        .unwrap();
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key).unwrap();
+        let nonce = crate::derive::compute_nonce(&key_material.nonce_base, 1);
+        let mut second = cipher
+            .encrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: b"second",
+                    aad: &[],
+                },
+            )
+            .unwrap();
+        *second.last_mut().unwrap() ^= 1;
+
+        let mut coalesced = hex::decode(vector.encrypted_response).unwrap();
+        coalesced.extend_from_slice(&crate::derive::frame_chunk(&second).unwrap());
+        let source = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(coalesced))]);
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+
+        let first = decrypted.next().await.unwrap().unwrap();
+        assert_eq!(hex::encode(first), vector.plaintext);
+        assert!(matches!(
+            decrypted.next().await.unwrap(),
+            Err(Error::Crypto(_))
+        ));
     }
 
     #[tokio::test]

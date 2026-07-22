@@ -446,6 +446,8 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 const maxResponseChunkBytes = 64 << 20
 
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
+// It emits each plaintext chunk as soon as the complete encrypted frame has
+// been authenticated and rejects truncated framing at end-of-stream.
 type DerivedStreamingDecryptReader struct {
 	reader io.Reader
 	aead   *ResponseAEAD
@@ -466,45 +468,48 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		return n, nil
 	}
 
-	// Read chunk length (4 bytes)
-	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			r.eof = true
-			return 0, io.EOF
+	for {
+		// Read chunk length (4 bytes)
+		chunkLenBytes := make([]byte, 4)
+		var bytesRead int
+		bytesRead, err = io.ReadFull(r.reader, chunkLenBytes)
+		if err != nil {
+			if err == io.EOF && bytesRead == 0 {
+				r.eof = true
+				return 0, io.EOF
+			}
+			return 0, fmt.Errorf("failed to read chunk length: %w", err)
 		}
-		return 0, fmt.Errorf("failed to read chunk length: %w", err)
-	}
 
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		return r.Read(p) // Skip empty chunks
-	}
-	if chunkLen > maxResponseChunkBytes {
-		return 0, fmt.Errorf("encrypted response chunk exceeds maximum allowed size")
-	}
+		chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
+		if chunkLen == 0 {
+			continue
+		}
+		if chunkLen > maxResponseChunkBytes {
+			return 0, fmt.Errorf("encrypted response chunk exceeds maximum allowed size")
+		}
 
-	// Read encrypted chunk
-	encryptedChunk := make([]byte, chunkLen)
-	_, err = io.ReadFull(r.reader, encryptedChunk)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
-	}
+		// Read encrypted chunk
+		encryptedChunk := make([]byte, chunkLen)
+		_, err = io.ReadFull(r.reader, encryptedChunk)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
+		}
 
-	// Decrypt chunk (nonce is computed and sequence incremented automatically)
-	decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
-	}
+		// Decrypt chunk (nonce is computed and sequence incremented automatically)
+		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
+		if err != nil {
+			return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
+		}
 
-	// Return as much as fits, buffer the rest
-	n = copy(p, decryptedChunk)
-	if n < len(decryptedChunk) {
-		r.buffer = decryptedChunk[n:]
-	}
+		// Return as much as fits, buffer the rest
+		n = copy(p, decryptedChunk)
+		if n < len(decryptedChunk) {
+			r.buffer = decryptedChunk[n:]
+		}
 
-	return n, nil
+		return n, nil
+	}
 }
 
 func (r *DerivedStreamingDecryptReader) Close() error {

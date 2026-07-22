@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "tinfoil-ehbp"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "async-stream",

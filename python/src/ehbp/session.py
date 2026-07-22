@@ -11,9 +11,14 @@ import json
 from collections.abc import Mapping
 from typing import Any, Union
 
-from .derive import decrypt_framed_response, derive_response_keys
+from .derive import FrameDecryptor, decrypt_framed_response, derive_response_keys
 from .errors import InvalidInputError, ProtocolError
-from .protocol import EXPORT_LENGTH, REQUEST_ENC_LENGTH, RESPONSE_NONCE_LENGTH
+from .protocol import (
+    EXPORT_LENGTH,
+    MAX_CHUNK_LENGTH,
+    REQUEST_ENC_LENGTH,
+    RESPONSE_NONCE_LENGTH,
+)
 
 _EXPORTED_SECRET_KEY = "exportedSecret"
 _REQUEST_ENC_KEY = "requestEnc"
@@ -85,6 +90,7 @@ class SessionRecoveryToken:
         return cls.from_dict(decoded)
 
     def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
+        """Decrypt a complete framed response body."""
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
             raise ProtocolError(
                 f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
@@ -93,3 +99,24 @@ class SessionRecoveryToken:
             self._exported_secret, self._request_enc, response_nonce
         )
         return decrypt_framed_response(key_material, body)
+
+    def create_response_decryptor(
+        self,
+        response_nonce: bytes,
+        *,
+        max_chunk_length: int = MAX_CHUNK_LENGTH,
+    ) -> FrameDecryptor:
+        """Create an incremental authenticated decryptor for this response.
+
+        Feed encrypted network bytes to :meth:`FrameDecryptor.push` and call
+        :meth:`FrameDecryptor.finish` at source EOF. Each returned plaintext
+        chunk has been authenticated and may be consumed before source EOF.
+        """
+        if len(response_nonce) != RESPONSE_NONCE_LENGTH:
+            raise ProtocolError(
+                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
+            )
+        key_material = derive_response_keys(
+            self._exported_secret, self._request_enc, response_nonce
+        )
+        return FrameDecryptor(key_material, max_chunk_length=max_chunk_length)

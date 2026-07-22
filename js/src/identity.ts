@@ -362,6 +362,10 @@ export function deserializeSessionRecoveryToken(json: string): SessionRecoveryTo
 
 /**
  * Decrypt a response using a SessionRecoveryToken.
+ *
+ * The returned Response exposes an incremental authenticated plaintext stream:
+ * each complete frame is available before the encrypted response reaches EOF.
+ * Cancelling the returned body cancels the encrypted source body.
  */
 export async function decryptResponseWithToken(
   response: Response,
@@ -452,7 +456,11 @@ function createDecryptStream(
 
         const { done, value } = await reader.read();
         if (done) {
-          controller.close();
+          if (buffer.length !== 0) {
+            fail(new ProtocolError('truncated encrypted response chunk'));
+          } else {
+            controller.close();
+          }
           return;
         }
 

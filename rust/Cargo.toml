@@ -1,6 +1,6 @@
 [package]
 name = "tinfoil-ehbp"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.87"
 description = "Rust client for the encrypted HTTP body protocol"

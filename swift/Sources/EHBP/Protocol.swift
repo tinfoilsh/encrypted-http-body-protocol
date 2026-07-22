@@ -50,6 +50,9 @@ public enum EHBPConstants {
     /// X25519 encapsulated key length
     public static let requestEncLength = 32
 
+    /// Length of a framed response chunk's big-endian length prefix
+    public static let responseLengthPrefixBytes = 4
+
     /// Label for deriving response key
     public static let responseKeyLabel = "key"
 

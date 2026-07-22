@@ -324,6 +324,144 @@ describe('Session Recovery Token', () => {
       assert.strictEqual(text, chunks.join(''));
     });
 
+    it('should deliver an authenticated frame before source EOF', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const request = new Request('https://server.test/api', {
+        method: 'POST',
+        body: 'hello',
+      });
+      const { request: encryptedRequest, context } =
+        await identity.encryptRequestWithContext(request);
+      assert(context);
+
+      const token = await extractSessionRecoveryToken(context);
+      const bufferedResponse = await buildStreamingEncryptedResponse(
+        encryptedRequest,
+        privateKey,
+        ['first', 'second'],
+      );
+      const nonce = bufferedResponse.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!;
+      const encrypted = new Uint8Array(await bufferedResponse.arrayBuffer());
+      const firstFrameLength =
+        4 + new DataView(encrypted.buffer, encrypted.byteOffset, 4).getUint32(0, false);
+      let sourceController!: ReadableStreamDefaultController<Uint8Array>;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          sourceController = controller;
+          controller.enqueue(encrypted.slice(0, firstFrameLength));
+        },
+      });
+
+      const decrypted = await decryptResponseWithToken(
+        new Response(source, {
+          headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+        }),
+        token,
+      );
+      const reader = decrypted.body!.getReader();
+      const first = await reader.read();
+
+      assert.strictEqual(first.done, false);
+      assert.strictEqual(new TextDecoder().decode(first.value), 'first');
+
+      sourceController.enqueue(encrypted.slice(firstFrameLength));
+      sourceController.close();
+      const second = await reader.read();
+      assert.strictEqual(new TextDecoder().decode(second.value), 'second');
+      assert.strictEqual((await reader.read()).done, true);
+    });
+
+    it('should handle fragmented, coalesced, and zero-length frames', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const request = new Request('https://server.test/api', {
+        method: 'POST',
+        body: 'hello',
+      });
+      const { request: encryptedRequest, context } =
+        await identity.encryptRequestWithContext(request);
+      assert(context);
+
+      const token = await extractSessionRecoveryToken(context);
+      const bufferedResponse = await buildStreamingEncryptedResponse(
+        encryptedRequest,
+        privateKey,
+        ['one', 'two', 'three'],
+      );
+      const nonce = bufferedResponse.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!;
+      const encrypted = new Uint8Array(await bufferedResponse.arrayBuffer());
+      const framed = new Uint8Array(encrypted.length + 8);
+      framed.set(new Uint8Array(4), 0);
+      framed.set(encrypted, 4);
+      framed.set(new Uint8Array(4), 4 + encrypted.length);
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(framed.slice(0, 1));
+          controller.enqueue(framed.slice(1, 7));
+          controller.enqueue(framed.slice(7));
+          controller.close();
+        },
+      });
+
+      const decrypted = await decryptResponseWithToken(
+        new Response(source, {
+          headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+        }),
+        token,
+      );
+
+      assert.strictEqual(await decrypted.text(), 'onetwothree');
+    });
+
+    it('should reject truncated framing at source EOF', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const request = new Request('https://server.test/api', {
+        method: 'POST',
+        body: 'hello',
+      });
+      const { request: encryptedRequest, context } =
+        await identity.encryptRequestWithContext(request);
+      assert(context);
+
+      const token = await extractSessionRecoveryToken(context);
+      const bufferedResponse = await buildEncryptedResponse(
+        encryptedRequest,
+        privateKey,
+        'truncated',
+      );
+      const nonce = bufferedResponse.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!;
+      const encrypted = new Uint8Array(await bufferedResponse.arrayBuffer());
+      const truncated = new Response(toArrayBuffer(encrypted.slice(0, -1)), {
+        headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+      });
+
+      const decrypted = await decryptResponseWithToken(truncated, token);
+      await assert.rejects(() => decrypted.text(), /truncated encrypted response chunk/);
+    });
+
+    it('should cancel the encrypted source when the decrypted body is cancelled', async () => {
+      const token: SessionRecoveryToken = {
+        exportedSecret: new Uint8Array(32),
+        requestEnc: new Uint8Array(32),
+      };
+      let sourceCancelled = false;
+      const source = new ReadableStream<Uint8Array>({
+        cancel() {
+          sourceCancelled = true;
+        },
+      });
+      const response = new Response(source, {
+        headers: {
+          [PROTOCOL.RESPONSE_NONCE_HEADER]:
+            bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH)),
+        },
+      });
+
+      const decrypted = await decryptResponseWithToken(response, token);
+      await decrypted.body!.cancel('consumer stopped');
+
+      assert.strictEqual(sourceCancelled, true);
+    });
+
     it('should preserve response status and headers', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const request = new Request('https://server.test/api', {

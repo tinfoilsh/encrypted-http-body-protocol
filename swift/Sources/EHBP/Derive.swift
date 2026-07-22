@@ -118,6 +118,112 @@ public func decryptChunk(
     return try AES.GCM.open(sealedBox, using: keyMaterial.key)
 }
 
+/// Incrementally decrypts an EHBP length-prefixed response stream.
+///
+/// Feed encrypted network bytes with ``push(_:)`` and call ``finish()`` when
+/// the source reaches EOF. Each returned chunk has been authenticated and can
+/// be consumed before the source reaches EOF.
+public struct ResponseDecryptor {
+    private let keyMaterial: ResponseKeyMaterial
+    private let maxChunkLength: Int
+    private var buffer = [UInt8]()
+    private var readOffset = 0
+    private var sequence: UInt64
+
+    init(
+        keyMaterial: ResponseKeyMaterial,
+        maxChunkLength: Int = EHBPConstants.maxResponseChunkBytes
+    ) {
+        self.init(
+            keyMaterial: keyMaterial,
+            maxChunkLength: maxChunkLength,
+            initialSequence: 0
+        )
+    }
+
+    init(
+        keyMaterial: ResponseKeyMaterial,
+        maxChunkLength: Int,
+        initialSequence: UInt64
+    ) {
+        self.keyMaterial = keyMaterial
+        self.maxChunkLength = maxChunkLength
+        self.sequence = initialSequence
+    }
+
+    /// Adds encrypted bytes and returns all newly authenticated plaintext chunks.
+    public mutating func push(_ data: Data) throws -> [Data] {
+        buffer.append(contentsOf: data)
+        defer { compactReadBytes() }
+        var plaintext = [Data]()
+
+        while let opened = try decryptNextChunk() {
+            plaintext.append(opened)
+        }
+
+        return plaintext
+    }
+
+    /// Adds one encrypted byte and returns a newly authenticated plaintext chunk, if available.
+    public mutating func push(_ byte: UInt8) throws -> Data? {
+        buffer.append(byte)
+        defer { compactReadBytes() }
+        return try decryptNextChunk()
+    }
+
+    private mutating func decryptNextChunk() throws -> Data? {
+        let prefixBytes = EHBPConstants.responseLengthPrefixBytes
+
+        while buffer.count - readOffset >= prefixBytes {
+            let chunkLength = Int(buffer[readOffset]) << 24 |
+                              Int(buffer[readOffset + 1]) << 16 |
+                              Int(buffer[readOffset + 2]) << 8 |
+                              Int(buffer[readOffset + 3])
+            let ciphertextStart = readOffset + prefixBytes
+
+            if chunkLength == 0 {
+                readOffset = ciphertextStart
+                continue
+            }
+            if chunkLength > maxChunkLength {
+                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+            }
+            guard buffer.count - ciphertextStart >= chunkLength else {
+                return nil
+            }
+            guard sequence < UInt64.max else {
+                throw EHBPError.invalidResponse("response chunk sequence overflow")
+            }
+
+            let frameEnd = ciphertextStart + chunkLength
+            let ciphertext = Data(buffer[ciphertextStart..<frameEnd])
+            let opened = try decryptChunk(
+                keyMaterial: keyMaterial,
+                seq: sequence,
+                ciphertext: ciphertext
+            )
+            readOffset = frameEnd
+            sequence += 1
+            return opened
+        }
+
+        return nil
+    }
+
+    private mutating func compactReadBytes() {
+        guard readOffset > 0 else { return }
+        buffer.removeFirst(readOffset)
+        readOffset = 0
+    }
+
+    /// Validates that source EOF occurred on a frame boundary.
+    public func finish() throws {
+        guard buffer.count == readOffset else {
+            throw EHBPError.invalidResponse("truncated encrypted response chunk")
+        }
+    }
+}
+
 /// EHBP errors
 public enum EHBPError: Error, LocalizedError {
     case invalidInput(String)
