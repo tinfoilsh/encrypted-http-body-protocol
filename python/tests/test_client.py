@@ -1,5 +1,7 @@
 """Client behavior tests against the in-process EHBP mock server."""
 
+import threading
+
 import httpx
 import pytest
 
@@ -11,7 +13,7 @@ from ehbp.errors import (
     KeyConfigMismatchError,
     ProtocolError,
 )
-from ehbp.protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
+from ehbp.protocol import RESPONSE_NONCE_HEADER
 
 
 def test_encrypted_round_trip(server: MockServer):
@@ -46,14 +48,136 @@ def test_bodyless_request_passes_through_as_plaintext(server: MockServer):
     assert client.get_session_recovery_token() is None
 
 
-def test_successful_request_retains_session_recovery_token(server: MockServer):
+def test_successful_request_clears_session_recovery_token(server: MockServer):
     client = server.make_client()
     client.post("/v1/echo", body=b"payload")
-    token = client.get_session_recovery_token()
-    assert token is not None
-    assert token.request_enc == bytes.fromhex(
-        server.last_request.headers[ENCAPSULATED_KEY_HEADER]
+    assert client.get_session_recovery_token() is None
+
+
+def test_streaming_request_clears_session_recovery_token_after_full_consumption(make_server):
+    server = make_server(chunk_size=4)
+    client = server.make_client()
+
+    with client.stream("POST", "/v1/echo", body=b"payload") as response:
+        assert client.get_session_recovery_token() is not None
+        assert b"".join(response.iter_bytes()) == b"echo:payload"
+
+    assert client.get_session_recovery_token() is None
+
+
+def test_streaming_request_retains_session_recovery_token_after_partial_consumption(make_server):
+    server = make_server(chunk_size=4)
+    client = server.make_client()
+
+    with client.stream("POST", "/v1/echo", body=b"payload") as response:
+        next(iter(response))
+
+    assert client.get_session_recovery_token() is not None
+
+
+def test_older_stream_completion_does_not_clear_newer_recovery_token(make_server):
+    server = make_server(chunk_size=4)
+    client = server.make_client()
+
+    with client.stream("POST", "/v1/echo", body=b"older") as older:
+        with client.stream("POST", "/v1/echo", body=b"newer"):
+            newer_token = client.get_session_recovery_token()
+            assert newer_token is not None
+            assert b"".join(older.iter_bytes()) == b"echo:older"
+            assert client.get_session_recovery_token() == newer_token
+
+
+@pytest.mark.parametrize("older_api", ["request", "stream"])
+@pytest.mark.parametrize("older_outcome", ["success", "error"])
+def test_older_request_cannot_publish_or_clear_newer_recovery_token(
+    make_server, monkeypatch, older_api, older_outcome
+):
+    server = make_server(chunk_size=4)
+    older_encryption_started = threading.Event()
+    release_older_encryption = threading.Event()
+    older_request_started = threading.Event()
+    release_older_request = threading.Event()
+    newer_request_started = threading.Event()
+    release_newer_request = threading.Event()
+    original_encrypt = ServerIdentity.encrypt_request_body
+
+    def encrypt(identity, plaintext):
+        if plaintext == b"older":
+            older_encryption_started.set()
+            if not release_older_encryption.wait(5):
+                raise RuntimeError("timed out waiting to release older encryption")
+        return original_encrypt(identity, plaintext)
+
+    monkeypatch.setattr(ServerIdentity, "encrypt_request_body", encrypt)
+
+    def handler(request):
+        if request.url.path == "/older":
+            older_request_started.set()
+            if not release_older_request.wait(5):
+                raise RuntimeError("timed out waiting to release older request")
+            if older_outcome == "error":
+                raise RuntimeError("older request failed")
+        else:
+            newer_request_started.set()
+            if not release_newer_request.wait(5):
+                raise RuntimeError("timed out waiting to release newer request")
+        return server.handler(request)
+
+    client = Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
+    errors = []
+
+    def run_older():
+        try:
+            if older_api == "request":
+                client.post("/older", body=b"older")
+            else:
+                with client.stream("POST", "/older", body=b"older") as response:
+                    assert b"".join(response.iter_bytes()) == b"echo:older"
+        except BaseException as error:
+            errors.append(error)
+
+    def run_newer():
+        try:
+            client.post("/newer", body=b"newer")
+        except BaseException as error:
+            errors.append(error)
+
+    older_thread = threading.Thread(target=run_older, daemon=True)
+    newer_thread = threading.Thread(target=run_newer, daemon=True)
+    try:
+        older_thread.start()
+        assert older_encryption_started.wait(5)
+        newer_thread.start()
+        assert newer_request_started.wait(5)
+        newer_token = client.get_session_recovery_token()
+        assert newer_token is not None
+
+        release_older_encryption.set()
+        assert older_request_started.wait(5)
+        assert client.get_session_recovery_token() is newer_token
+
+        release_older_request.set()
+        older_thread.join(5)
+        assert not older_thread.is_alive()
+        assert client.get_session_recovery_token() is newer_token
+    finally:
+        release_older_encryption.set()
+        release_older_request.set()
+        release_newer_request.set()
+        older_thread.join(5)
+        newer_thread.join(5)
+
+    assert not newer_thread.is_alive()
+    if older_outcome == "error":
+        assert len(errors) == 1
+        assert str(errors[0]) == "older request failed"
+    else:
+        assert errors == []
+    assert client.get_session_recovery_token() is None
 
 
 def test_encrypted_body_uses_chunked_transfer_without_content_length(server: MockServer):
@@ -127,7 +251,7 @@ def test_encrypted_non_success_response_is_decrypted(make_server):
     response = client.post("/v1/echo", body=b"payload")
     assert response.status_code == 503
     assert response.content == b"echo:payload"
-    assert client.get_session_recovery_token() is not None
+    assert client.get_session_recovery_token() is None
 
 
 def test_key_config_mismatch_raises_dedicated_error(make_server):

@@ -11,6 +11,8 @@ interface ProblemDetails {
   title?: string;
 }
 
+const MAX_PROBLEM_DETAILS_BYTES = 64 * 1024;
+
 /**
  * HTTP transport for EHBP
  */
@@ -18,6 +20,7 @@ export class Transport {
   private serverIdentity: Identity;
   private serverHost: string;
   private _lastSessionRecoveryToken?: SessionRecoveryToken;
+  private requestGeneration = 0;
 
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
@@ -72,7 +75,30 @@ export class Transport {
 
     let problem: ProblemDetails | undefined;
     try {
-      problem = (await response.clone().json()) as ProblemDetails;
+      const clone = response.clone();
+      if (!clone.body) return;
+
+      const reader = clone.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > MAX_PROBLEM_DETAILS_BYTES) {
+          reader.cancel().catch(() => {});
+          return;
+        }
+        chunks.push(value);
+      }
+
+      const body = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        body.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      problem = JSON.parse(new TextDecoder().decode(body)) as ProblemDetails;
     } catch {
       return; // Not valid JSON — not a key config mismatch
     }
@@ -122,54 +148,29 @@ export class Transport {
    * Make an encrypted HTTP request.
    */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const generation = ++this.requestGeneration;
+    this._lastSessionRecoveryToken = undefined;
+
     // Skip EHBP for non-network URLs (data:, blob:)
     const inputUrl = input instanceof Request ? input.url : String(input);
     if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) {
       return fetch(input, init);
     }
 
-    // Extract body from init or original request before creating Request object
-    let requestBody: BodyInit | null = null;
+    // Normalize through the platform Request constructor first so RequestInit
+    // overrides a Request input with the same semantics as fetch().
+    const normalizedRequest = new Request(input, init);
+    const requestBody = normalizedRequest.body
+      ? await normalizedRequest.arrayBuffer()
+      : null;
 
-    if (input instanceof Request) {
-      // If input is a Request, extract its body
-      if (input.body) {
-        requestBody = await input.arrayBuffer();
-      }
-    } else {
-      // If input is URL/string, get body from init
-      requestBody = init?.body || null;
-    }
-
-    // Create the URL with correct host
-    let url: URL;
-    let method: string;
-    let headers: HeadersInit;
-
-    if (input instanceof Request) {
-      url = new URL(input.url);
-      method = input.method;
-      headers = input.headers;
-    } else {
-      url = new URL(input);
-      method = init?.method || 'GET';
-      headers = init?.headers || {};
-    }
-
+    const url = new URL(normalizedRequest.url);
     url.host = this.serverHost;
 
-    // Carry fetch options (credentials, signal, ...) through re-construction
-    // so they reach the final fetch of the encrypted request. Like fetch(),
-    // init members override those of a Request input.
-    const forwardedInit =
-      input instanceof Request
-        ? { ...forwardedRequestInit(input), ...forwardedRequestInit(init) }
-        : forwardedRequestInit(init);
-
     const request = new Request(url.toString(), {
-      ...forwardedInit,
-      method,
-      headers,
+      ...forwardedRequestInit(normalizedRequest),
+      method: normalizedRequest.method,
+      headers: normalizedRequest.headers,
       body: requestBody,
       duplex: 'half',
     } as RequestInit);
@@ -188,7 +189,6 @@ export class Transport {
 
     // Bodyless requests: context is null, response is plaintext
     if (!token) {
-      this._lastSessionRecoveryToken = undefined;
       return response;
     }
 
@@ -197,11 +197,26 @@ export class Transport {
       return response;
     }
 
-    // Publish token only after confirming the response is valid
-    this._lastSessionRecoveryToken = token;
-
     // Decrypt response using the already-extracted token
-    return await decryptResponseWithToken(response, token);
+    let streamTerminated = false;
+    const clearToken = () => {
+      streamTerminated = true;
+      if (this.requestGeneration === generation) {
+        this._lastSessionRecoveryToken = undefined;
+      }
+    };
+    const decryptedResponse = await decryptResponseWithToken(
+      response,
+      token,
+      clearToken,
+      clearToken,
+    );
+
+    // Publish token only after confirming the response is valid
+    if (this.requestGeneration === generation) {
+      this._lastSessionRecoveryToken = streamTerminated ? undefined : token;
+    }
+    return decryptedResponse;
   }
 
   /**

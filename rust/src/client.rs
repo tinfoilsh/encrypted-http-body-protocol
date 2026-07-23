@@ -29,13 +29,20 @@ use crate::{
 };
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PROBLEM_DETAILS_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct Client {
     base_url: Url,
     identity: ServerIdentity,
     http_client: reqwest::Client,
-    last_session_recovery_token: Arc<Mutex<Option<SessionRecoveryToken>>>,
+    session: Arc<Mutex<SessionState>>,
+}
+
+#[derive(Default)]
+struct SessionState {
+    generation: u64,
+    token: Option<SessionRecoveryToken>,
 }
 
 impl Client {
@@ -112,7 +119,7 @@ impl Client {
             base_url,
             identity,
             http_client,
-            last_session_recovery_token: Arc::new(Mutex::new(None)),
+            session: Arc::new(Mutex::new(SessionState::default())),
         })
     }
 
@@ -125,21 +132,30 @@ impl Client {
     }
 
     pub fn get_session_recovery_token(&self) -> Option<SessionRecoveryToken> {
-        self.last_session_recovery_token.lock().ok()?.clone()
+        self.session.lock().ok()?.token.clone()
     }
 
     pub fn take_session_recovery_token(&self) -> Option<SessionRecoveryToken> {
-        self.last_session_recovery_token.lock().ok()?.take()
+        self.session.lock().ok()?.token.take()
     }
 
-    fn replace_session_recovery_token(&self, token: Option<SessionRecoveryToken>) {
-        if let Ok(mut guard) = self.last_session_recovery_token.lock() {
-            *guard = token;
+    fn begin_request(&self) -> u64 {
+        let mut state = self.session.lock().expect("session mutex poisoned");
+        state.generation = state.generation.wrapping_add(1);
+        state.token = None;
+        state.generation
+    }
+
+    fn publish_session_recovery_token(&self, generation: u64, token: SessionRecoveryToken) {
+        if let Ok(mut state) = self.session.lock() {
+            if state.generation == generation {
+                state.token = Some(token);
+            }
         }
     }
 
-    fn clear_session_recovery_token_if_current(&self, token: &SessionRecoveryToken) {
-        clear_session_recovery_token_if_current(&self.last_session_recovery_token, token);
+    fn clear_session_recovery_token_if_current(&self, generation: u64) {
+        clear_session_recovery_token_if_current(&self.session, generation);
     }
 
     pub fn request(&self, method: Method, path_or_url: impl AsRef<str>) -> Result<RequestBuilder> {
@@ -170,15 +186,19 @@ impl Client {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn execute(&self, request: reqwest::Request) -> Result<reqwest::Response> {
-        let PreparedRawRequest { request, token } = self.prepare_raw_request(request).await?;
-        let mut guard = token.as_ref().map(|token| {
-            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
-        });
+        let PreparedRawRequest {
+            request,
+            token,
+            generation,
+        } = self.prepare_raw_request(request).await?;
+        let mut guard = token
+            .as_ref()
+            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
         let response = match self.http_client.execute(request).await {
             Ok(response) => response,
             Err(err) => return Err(err.into()),
         };
-        let response = self.open_raw_response(response, token).await?;
+        let response = self.open_raw_response(response, token, generation).await?;
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
         }
@@ -190,13 +210,14 @@ impl Client {
         &self,
         mut request: reqwest::Request,
     ) -> Result<PreparedRawRequest> {
+        let generation = self.begin_request();
         self.validate_raw_request(&request)?;
-        self.replace_session_recovery_token(None);
 
         let Some(body) = request.body_mut().take() else {
             return Ok(PreparedRawRequest {
                 request,
                 token: None,
+                generation,
             });
         };
 
@@ -209,6 +230,7 @@ impl Client {
                     return Ok(PreparedRawRequest {
                         request,
                         token: None,
+                        generation,
                     });
                 }
             }
@@ -236,11 +258,12 @@ impl Client {
         request.headers_mut().remove(CONTENT_LENGTH);
         request.headers_mut().remove(TRANSFER_ENCODING);
         *request.body_mut() = Some(reqwest::Body::wrap_stream(encrypted));
-        self.replace_session_recovery_token(Some(token.clone()));
+        self.publish_session_recovery_token(generation, token.clone());
 
         Ok(PreparedRawRequest {
             request,
             token: Some(token),
+            generation,
         })
     }
 
@@ -249,6 +272,7 @@ impl Client {
         &self,
         mut response: reqwest::Response,
         token: Option<SessionRecoveryToken>,
+        generation: u64,
     ) -> Result<reqwest::Response> {
         let Some(token) = token else {
             return Ok(response);
@@ -257,7 +281,9 @@ impl Client {
         let version = response.version();
         let url = response.url().clone();
         let extensions = std::mem::take(response.extensions_mut());
-        let opened = self.open_encrypted_response(response, token).await?;
+        let opened = self
+            .open_encrypted_response(response, token, generation)
+            .await?;
         let mut builder = http::Response::builder()
             .status(opened.status)
             .version(version);
@@ -278,9 +304,9 @@ impl Client {
         &self,
         response: reqwest::Response,
         token: SessionRecoveryToken,
+        generation: u64,
     ) -> Result<OpenedEncryptedResponse> {
-        let mut guard =
-            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token));
+        let mut guard = SessionGuard::new(generation, Arc::clone(&self.session));
         let status = response.status();
         let mut headers = response.headers().clone();
 
@@ -292,11 +318,7 @@ impl Client {
             }
 
             let body = if is_problem_json_status(status, &headers) {
-                let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
-                check_key_config_mismatch(status, &headers, &body)?;
-                Box::pin(async_stream::stream! {
-                    yield Ok(body);
-                }) as Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>
+                inspect_problem_response(response, status, &headers).await?
             } else {
                 Box::pin(response.bytes_stream().map_reqwest_error())
             };
@@ -316,8 +338,8 @@ impl Client {
                 response.bytes_stream(),
                 key_material,
             )),
-            token,
-            session: Arc::clone(&self.last_session_recovery_token),
+            generation,
+            session: Arc::clone(&self.session),
             cleared: false,
         });
         guard.disarm();
@@ -349,11 +371,14 @@ impl Client {
         headers: HeaderMap,
         body: Option<Bytes>,
     ) -> Result<Response> {
-        let PreparedRequest { request, token } =
-            self.prepare_request_builder(method, url, headers, body)?;
-        let mut guard = token.as_ref().map(|token| {
-            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
-        });
+        let PreparedRequest {
+            request,
+            token,
+            generation,
+        } = self.prepare_request_builder(method, url, headers, body)?;
+        let mut guard = token
+            .as_ref()
+            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
         let response = request.send().await?;
         let status = response.status();
         let headers = response.headers().clone();
@@ -380,7 +405,7 @@ impl Client {
 
         let response_nonce = response_nonce(&headers)?;
         let decrypted = token.decrypt_response_body(&response_nonce, &body)?;
-        self.clear_session_recovery_token_if_current(&token);
+        self.clear_session_recovery_token_if_current(generation);
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
         }
@@ -401,11 +426,14 @@ impl Client {
         headers: HeaderMap,
         body: Option<Bytes>,
     ) -> Result<StreamingResponse> {
-        let PreparedRequest { request, token } =
-            self.prepare_request_builder(method, url, headers, body)?;
-        let mut guard = token.as_ref().map(|token| {
-            SessionGuard::new(token.clone(), Arc::clone(&self.last_session_recovery_token))
-        });
+        let PreparedRequest {
+            request,
+            token,
+            generation,
+        } = self.prepare_request_builder(method, url, headers, body)?;
+        let mut guard = token
+            .as_ref()
+            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
         let response = request.send().await?;
 
         let Some(token) = token else {
@@ -416,7 +444,9 @@ impl Client {
             });
         };
 
-        let opened = self.open_encrypted_response(response, token).await?;
+        let opened = self
+            .open_encrypted_response(response, token, generation)
+            .await?;
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
         }
@@ -435,7 +465,7 @@ impl Client {
         body: Option<Bytes>,
     ) -> Result<PreparedRequest> {
         let plaintext_body = body.unwrap_or_default();
-        self.replace_session_recovery_token(None);
+        let generation = self.begin_request();
         let encrypted = self.identity.encrypt_request_body(&plaintext_body)?;
 
         let mut request = self.http_client.request(method, url);
@@ -445,7 +475,7 @@ impl Client {
                 HeaderValue::from_str(&hex::encode(&encrypted.encapsulated_key))?,
             );
             let token = encrypted.token;
-            self.replace_session_recovery_token(Some(token.clone()));
+            self.publish_session_recovery_token(generation, token.clone());
             request = request
                 .headers(headers)
                 .body(encrypted_reqwest_body(encrypted.body));
@@ -455,7 +485,11 @@ impl Client {
             None
         };
 
-        Ok(PreparedRequest { request, token })
+        Ok(PreparedRequest {
+            request,
+            token,
+            generation,
+        })
     }
 
     fn resolve_url(&self, path_or_url: &str) -> Result<Url> {
@@ -491,12 +525,14 @@ pub struct RequestBuilder {
 struct PreparedRequest {
     request: reqwest::RequestBuilder,
     token: Option<SessionRecoveryToken>,
+    generation: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 struct PreparedRawRequest {
     request: reqwest::Request,
     token: Option<SessionRecoveryToken>,
+    generation: u64,
 }
 
 struct OpenedEncryptedResponse {
@@ -673,13 +709,10 @@ fn encrypted_reqwest_body(body: Vec<u8>) -> reqwest::Body {
     })
 }
 
-fn clear_session_recovery_token_if_current(
-    session: &Arc<Mutex<Option<SessionRecoveryToken>>>,
-    token: &SessionRecoveryToken,
-) {
-    if let Ok(mut guard) = session.lock() {
-        if guard.as_ref() == Some(token) {
-            *guard = None;
+fn clear_session_recovery_token_if_current(session: &Arc<Mutex<SessionState>>, generation: u64) {
+    if let Ok(mut state) = session.lock() {
+        if state.generation == generation {
+            state.token = None;
         }
     }
 }
@@ -729,6 +762,9 @@ fn check_key_config_mismatch(status: StatusCode, headers: &HeaderMap, body: &[u8
     if media_type != PROBLEM_JSON_MEDIA_TYPE {
         return Ok(());
     }
+    if body.len() > MAX_PROBLEM_DETAILS_BYTES {
+        return Ok(());
+    }
 
     let Ok(problem) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Ok(());
@@ -742,6 +778,59 @@ fn check_key_config_mismatch(status: StatusCode, headers: &HeaderMap, body: &[u8
     }
 
     Ok(())
+}
+
+async fn inspect_problem_response(
+    response: reqwest::Response,
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+    let mut stream = Box::pin(response.bytes_stream());
+    let mut prefix = BytesMut::with_capacity(MAX_PROBLEM_DETAILS_BYTES + 1);
+
+    while prefix.len() <= MAX_PROBLEM_DETAILS_BYTES {
+        let Some(chunk) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await else {
+            let body = prefix.freeze();
+            check_key_config_mismatch(status, headers, &body)?;
+            return Ok(Box::pin(async_stream::stream! {
+                yield Ok(body);
+            }));
+        };
+        let chunk = chunk?;
+        let remaining = MAX_PROBLEM_DETAILS_BYTES + 1 - prefix.len();
+        if chunk.len() <= remaining {
+            prefix.extend_from_slice(&chunk);
+        } else {
+            prefix.extend_from_slice(&chunk[..remaining]);
+            let tail = chunk.slice(remaining..);
+            let prefix = prefix.freeze();
+            return Ok(Box::pin(async_stream::try_stream! {
+                yield prefix;
+                if !tail.is_empty() {
+                    yield tail;
+                }
+                while let Some(chunk) =
+                    std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+                {
+                    yield chunk?;
+                }
+            }));
+        }
+
+        if prefix.len() > MAX_PROBLEM_DETAILS_BYTES {
+            let prefix = prefix.freeze();
+            return Ok(Box::pin(async_stream::try_stream! {
+                yield prefix;
+                while let Some(chunk) =
+                    std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await
+                {
+                    yield chunk?;
+                }
+            }));
+        }
+    }
+
+    unreachable!()
 }
 
 fn is_problem_json_status(status: StatusCode, headers: &HeaderMap) -> bool {
@@ -793,21 +882,21 @@ where
 
 struct SessionClearingStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>,
-    token: SessionRecoveryToken,
-    session: Arc<Mutex<Option<SessionRecoveryToken>>>,
+    generation: u64,
+    session: Arc<Mutex<SessionState>>,
     cleared: bool,
 }
 
 struct SessionGuard {
-    token: SessionRecoveryToken,
-    session: Arc<Mutex<Option<SessionRecoveryToken>>>,
+    generation: u64,
+    session: Arc<Mutex<SessionState>>,
     active: bool,
 }
 
 impl SessionGuard {
-    fn new(token: SessionRecoveryToken, session: Arc<Mutex<Option<SessionRecoveryToken>>>) -> Self {
+    fn new(generation: u64, session: Arc<Mutex<SessionState>>) -> Self {
         Self {
-            token,
+            generation,
             session,
             active: true,
         }
@@ -821,7 +910,7 @@ impl SessionGuard {
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         if self.active {
-            clear_session_recovery_token_if_current(&self.session, &self.token);
+            clear_session_recovery_token_if_current(&self.session, self.generation);
         }
     }
 }
@@ -829,7 +918,7 @@ impl Drop for SessionGuard {
 impl SessionClearingStream {
     fn clear_if_current(&mut self) {
         if !self.cleared {
-            clear_session_recovery_token_if_current(&self.session, &self.token);
+            clear_session_recovery_token_if_current(&self.session, self.generation);
             self.cleared = true;
         }
     }
@@ -1061,6 +1150,35 @@ mod tests {
             err,
             Error::Protocol(message) if message.contains("exceeds maximum allowed size")
         ));
+    }
+
+    #[tokio::test]
+    async fn oversized_problem_diagnostics_remain_streaming_passthrough() {
+        let body = Bytes::from(format!(
+            r#"{{"type":"{KEY_CONFIG_PROBLEM_TYPE}","title":"{}"}}"#,
+            "x".repeat(MAX_PROBLEM_DETAILS_BYTES)
+        ));
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(StatusCode::UNPROCESSABLE_ENTITY)
+                .header(CONTENT_TYPE, PROBLEM_JSON_MEDIA_TYPE)
+                .body(reqwest::Body::from(body.clone()))
+                .unwrap(),
+        );
+        let status = response.status();
+        let headers = response.headers().clone();
+
+        let streamed = inspect_problem_response(response, status, &headers)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+            .concat();
+
+        assert_eq!(streamed, body);
     }
 
     #[tokio::test]
@@ -1406,6 +1524,7 @@ mod tests {
             .build()
             .unwrap();
         let prepared = client.prepare_raw_request(request).await.unwrap();
+        let generation = prepared.generation;
         let token = prepared.token.unwrap();
         let response_nonce = [9u8; RESPONSE_NONCE_LENGTH];
         let key_material =
@@ -1436,7 +1555,7 @@ mod tests {
         response.extensions_mut().insert(Marker(7));
 
         let response = client
-            .open_raw_response(response, Some(token))
+            .open_raw_response(response, Some(token), generation)
             .await
             .unwrap();
 
@@ -1469,7 +1588,7 @@ mod tests {
         let response = reqwest::Response::from(response);
 
         let err = client
-            .open_raw_response(response, prepared.token)
+            .open_raw_response(response, prepared.token, prepared.generation)
             .await
             .unwrap_err();
 
@@ -1496,7 +1615,11 @@ mod tests {
             .unwrap();
 
         let response = client
-            .open_raw_response(reqwest::Response::from(response), prepared.token)
+            .open_raw_response(
+                reqwest::Response::from(response),
+                prepared.token,
+                prepared.generation,
+            )
             .await
             .unwrap();
 
@@ -1522,6 +1645,7 @@ mod tests {
                 .unwrap()
         };
         let first = client.prepare_raw_request(build_request()).await.unwrap();
+        let first_generation = first.generation;
         let first_token = first.token.unwrap();
         let second = client.prepare_raw_request(build_request()).await.unwrap();
         let second_token = second.token.unwrap();
@@ -1533,7 +1657,7 @@ mod tests {
         );
 
         let response = client
-            .open_raw_response(response, Some(first_token))
+            .open_raw_response(response, Some(first_token), first_generation)
             .await
             .unwrap();
 
@@ -1795,15 +1919,65 @@ mod tests {
 
     #[test]
     fn token_cleanup_does_not_clear_newer_request_token() {
-        let first = SessionRecoveryToken::new(vec![1; 32], vec![2; 32]).unwrap();
         let second = SessionRecoveryToken::new(vec![3; 32], vec![4; 32]).unwrap();
-        let session = Arc::new(Mutex::new(Some(second.clone())));
+        let session = Arc::new(Mutex::new(SessionState {
+            generation: 2,
+            token: Some(second.clone()),
+        }));
 
-        clear_session_recovery_token_if_current(&session, &first);
-        assert_eq!(session.lock().unwrap().as_ref(), Some(&second));
+        clear_session_recovery_token_if_current(&session, 1);
+        assert_eq!(session.lock().unwrap().token.as_ref(), Some(&second));
 
-        clear_session_recovery_token_if_current(&session, &second);
-        assert!(session.lock().unwrap().is_none());
+        clear_session_recovery_token_if_current(&session, 2);
+        assert!(session.lock().unwrap().token.is_none());
+    }
+
+    #[tokio::test]
+    async fn stalled_older_raw_request_cannot_overwrite_or_clear_newer_token() {
+        let (client, _) = raw_client_with_private_key();
+        let first_polled = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let first_polled_by_stream = Arc::clone(&first_polled);
+        let release_first_stream = Arc::clone(&release_first);
+        let body = async_stream::stream! {
+            yield Ok::<Bytes, std::io::Error>(Bytes::new());
+            first_polled_by_stream.notify_one();
+            release_first_stream.notified().await;
+            yield Ok(Bytes::from_static(b"older"));
+        };
+        let first_request = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body(reqwest::Body::wrap_stream(body))
+            .build()
+            .unwrap();
+        let first_client = client.clone();
+        let first_task =
+            tokio::spawn(async move { first_client.prepare_raw_request(first_request).await });
+
+        first_polled.notified().await;
+        let second_request = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body("newer")
+            .build()
+            .unwrap();
+        let second = client.prepare_raw_request(second_request).await.unwrap();
+        let second_token = second.token.unwrap();
+
+        release_first.notify_one();
+        let first = first_task.await.unwrap().unwrap();
+        assert_eq!(
+            client.get_session_recovery_token().as_ref(),
+            Some(&second_token)
+        );
+
+        drop(SessionGuard::new(
+            first.generation,
+            Arc::clone(&client.session),
+        ));
+        assert_eq!(
+            client.get_session_recovery_token().as_ref(),
+            Some(&second_token)
+        );
     }
 
     #[tokio::test]

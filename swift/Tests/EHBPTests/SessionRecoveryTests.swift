@@ -434,6 +434,216 @@ final class SessionRecoveryTests: XCTestCase {
                      "stale Transfer-Encoding must not survive decryption")
         XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "text/plain")
         XCTAssertNotNil(response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader))
+        XCTAssertThrowsError(try client.getSessionRecoveryToken())
+    }
+
+    func testOlderBufferedCompletionPreservesLatestRecoveryToken() async throws {
+        let (_, serverPrivateKey) = makeIdentityAndServer()
+        let firstStarted = expectation(description: "first request started")
+
+        ControlledURLProtocol.handler = { [simulateServerResponse] request, index in
+            guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
+                  let requestEnc = Data(hexString: encHex) else {
+                throw EHBPError.invalidInput("missing encapsulated key header")
+            }
+            if index == 1 {
+                ControlledURLProtocol.setSecondRequestEnc(requestEnc)
+            }
+            let (responseNonce, encryptedBody) = try simulateServerResponse(
+                serverPrivateKey, requestEnc, Data("ok".utf8), nil
+            )
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [EHBPProtocol.responseNonceHeader: responseNonce.hexString]
+            )!
+            return (response, encryptedBody)
+        }
+        ControlledURLProtocol.onFirstStarted = { firstStarted.fulfill() }
+        defer { ControlledURLProtocol.reset() }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ControlledURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(serverPrivateKey.publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+
+        let first = Task {
+            try await client.request(method: "POST", path: "/first", body: Data("first".utf8))
+        }
+        await fulfillment(of: [firstStarted], timeout: 2)
+
+        let (newerStream, _) = try await client.requestStream(
+            method: "POST",
+            path: "/second",
+            body: Data("second".utf8)
+        )
+        let expectedRequestEnc = ControlledURLProtocol.getSecondRequestEnc()
+        XCTAssertEqual(try client.getSessionRecoveryToken().requestEnc, expectedRequestEnc)
+
+        ControlledURLProtocol.releaseFirst()
+        _ = try await first.value
+        XCTAssertEqual(try client.getSessionRecoveryToken().requestEnc, expectedRequestEnc)
+        withExtendedLifetime(newerStream) {}
+    }
+
+    func testSuccessfulStreamingCompletionClearsRecoveryToken() async throws {
+        let (_, serverPrivateKey) = makeIdentityAndServer()
+
+        StubURLProtocol.handler = { [simulateServerResponse] request in
+            guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
+                  let requestEnc = Data(hexString: encHex) else {
+                throw EHBPError.invalidInput("missing encapsulated key header")
+            }
+            let (responseNonce, encryptedBody) = try simulateServerResponse(
+                serverPrivateKey, requestEnc, Data("ok".utf8), nil
+            )
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [EHBPProtocol.responseNonceHeader: responseNonce.hexString]
+            )!
+            return (response, encryptedBody)
+        }
+        defer { StubURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(serverPrivateKey.publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+
+        let (stream, _) = try await client.requestStream(
+            method: "POST",
+            path: "/secure",
+            body: Data("hello".utf8)
+        )
+        XCTAssertNoThrow(try client.getSessionRecoveryToken())
+
+        var iterator = stream.makeAsyncIterator()
+        let plaintext = try await iterator.next()
+        XCTAssertEqual(plaintext, Data("ok".utf8))
+        XCTAssertNoThrow(try client.getSessionRecoveryToken())
+        let end = try await iterator.next()
+        XCTAssertNil(end)
+        XCTAssertThrowsError(try client.getSessionRecoveryToken())
+        let repeatedEnd = try await iterator.next()
+        XCTAssertNil(repeatedEnd)
+    }
+
+    func testLatestStreamingFailureClearsRecoveryToken() async throws {
+        let (_, serverPrivateKey) = makeIdentityAndServer()
+
+        StubURLProtocol.handler = { [simulateServerResponse] request in
+            guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
+                  let requestEnc = Data(hexString: encHex) else {
+                throw EHBPError.invalidInput("missing encapsulated key header")
+            }
+            let (responseNonce, encryptedBody) = try simulateServerResponse(
+                serverPrivateKey, requestEnc, Data("ok".utf8), nil
+            )
+            var corrupted = encryptedBody
+            corrupted[corrupted.index(before: corrupted.endIndex)] ^= 1
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [EHBPProtocol.responseNonceHeader: responseNonce.hexString]
+            )!
+            return (response, corrupted)
+        }
+        defer { StubURLProtocol.handler = nil }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(serverPrivateKey.publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+
+        let (stream, _) = try await client.requestStream(
+            method: "POST",
+            path: "/secure",
+            body: Data("hello".utf8)
+        )
+        XCTAssertNoThrow(try client.getSessionRecoveryToken())
+
+        do {
+            for try await _ in stream {}
+            XCTFail("expected stream authentication failure")
+        } catch {
+            XCTAssertThrowsError(try client.getSessionRecoveryToken())
+        }
+    }
+
+    func testOlderStreamingFailurePreservesNewerRecoveryToken() async throws {
+        let (_, serverPrivateKey) = makeIdentityAndServer()
+
+        DelayedFailureURLProtocol.handler = { [simulateServerResponse] request, index in
+            guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
+                  let requestEnc = Data(hexString: encHex) else {
+                throw EHBPError.invalidInput("missing encapsulated key header")
+            }
+            if index == 1 {
+                DelayedFailureURLProtocol.setSecondRequestEnc(requestEnc)
+            }
+            let plaintext = index == 0
+                ? Data(repeating: 0x41, count: 16 * 1024 + 2)
+                : Data("ok".utf8)
+            let chunkSizes = index == 0 ? [16 * 1024, 2] : nil
+            let (responseNonce, encryptedBody) = try simulateServerResponse(
+                serverPrivateKey, requestEnc, plaintext, chunkSizes
+            )
+            var body = encryptedBody
+            if index == 0 {
+                body[body.index(before: body.endIndex)] ^= 1
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: [EHBPProtocol.responseNonceHeader: responseNonce.hexString]
+            )!
+            return (response, body)
+        }
+        defer { DelayedFailureURLProtocol.reset() }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DelayedFailureURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(serverPrivateKey.publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+
+        let (olderStream, _) = try await client.requestStream(
+            method: "POST",
+            path: "/older",
+            body: Data("older".utf8)
+        )
+        let (newerStream, _) = try await client.requestStream(
+            method: "POST",
+            path: "/newer",
+            body: Data("newer".utf8)
+        )
+        let expectedRequestEnc = DelayedFailureURLProtocol.getSecondRequestEnc()
+        XCTAssertEqual(try client.getSessionRecoveryToken().requestEnc, expectedRequestEnc)
+
+        DelayedFailureURLProtocol.releaseFirstBody()
+        do {
+            for try await _ in olderStream {}
+            XCTFail("expected older stream authentication failure")
+        } catch {
+            XCTAssertEqual(try client.getSessionRecoveryToken().requestEnc, expectedRequestEnc)
+        }
+        withExtendedLifetime(newerStream) {}
     }
 }
 
@@ -460,4 +670,157 @@ final class StubURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class ControlledURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest, Int) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var onFirstStarted: (() -> Void)?
+    nonisolated(unsafe) static var firstDelivery: (() -> Void)?
+    nonisolated(unsafe) static var requestCount = 0
+    nonisolated(unsafe) static var secondRequestEnc = Data()
+    private static let lock = NSLock()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let index = Self.requestCount
+        Self.requestCount += 1
+        Self.lock.unlock()
+
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no controlled handler"))
+            return
+        }
+        do {
+            let (response, data) = try handler(request, index)
+            let deliver = { [weak self] in
+                guard let self else { return }
+                self.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                self.client?.urlProtocol(self, didLoad: data)
+                self.client?.urlProtocolDidFinishLoading(self)
+            }
+            if index == 0 {
+                Self.lock.lock()
+                Self.firstDelivery = deliver
+                Self.lock.unlock()
+                Self.onFirstStarted?()
+            } else {
+                deliver()
+            }
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    static func releaseFirst() {
+        lock.lock()
+        let delivery = firstDelivery
+        firstDelivery = nil
+        lock.unlock()
+        delivery?()
+    }
+
+    static func setSecondRequestEnc(_ requestEnc: Data) {
+        lock.lock()
+        secondRequestEnc = requestEnc
+        lock.unlock()
+    }
+
+    static func getSecondRequestEnc() -> Data {
+        lock.lock()
+        let requestEnc = secondRequestEnc
+        lock.unlock()
+        return requestEnc
+    }
+
+    static func reset() {
+        releaseFirst()
+        lock.lock()
+        handler = nil
+        onFirstStarted = nil
+        requestCount = 0
+        secondRequestEnc = Data()
+        lock.unlock()
+    }
+}
+
+private final class DelayedFailureURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var handler: ((URLRequest, Int) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var firstBodyDelivery: (() -> Void)?
+    nonisolated(unsafe) static var requestCount = 0
+    nonisolated(unsafe) static var secondRequestEnc = Data()
+    private static let lock = NSLock()
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let index = Self.requestCount
+        Self.requestCount += 1
+        Self.lock.unlock()
+
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no delayed handler"))
+            return
+        }
+        do {
+            let (response, data) = try handler(request, index)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if index == 0 {
+                let finalByte = data.suffix(1)
+                client?.urlProtocol(self, didLoad: data.dropLast())
+                Self.lock.lock()
+                Self.firstBodyDelivery = { [weak self] in
+                    guard let self else { return }
+                    self.client?.urlProtocol(self, didLoad: finalByte)
+                    self.client?.urlProtocolDidFinishLoading(self)
+                }
+                Self.lock.unlock()
+            } else {
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            }
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    static func setSecondRequestEnc(_ requestEnc: Data) {
+        lock.lock()
+        secondRequestEnc = requestEnc
+        lock.unlock()
+    }
+
+    static func getSecondRequestEnc() -> Data {
+        lock.lock()
+        let requestEnc = secondRequestEnc
+        lock.unlock()
+        return requestEnc
+    }
+
+    static func releaseFirstBody() {
+        lock.lock()
+        let delivery = firstBodyDelivery
+        firstBodyDelivery = nil
+        lock.unlock()
+        delivery?()
+    }
+
+    static func reset() {
+        releaseFirstBody()
+        lock.lock()
+        handler = nil
+        requestCount = 0
+        secondRequestEnc = Data()
+        lock.unlock()
+    }
 }

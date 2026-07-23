@@ -148,8 +148,12 @@ func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
 		return nil, fmt.Errorf("response chunk sequence overflow")
 	}
 	nonce := r.computeNonce()
+	plaintext, err := r.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, err
+	}
 	r.seq++
-	return r.aead.Open(nil, nonce, ciphertext, aad)
+	return plaintext, nil
 }
 
 // OpenWithSeq decrypts ciphertext using a specific sequence number without

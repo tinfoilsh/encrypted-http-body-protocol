@@ -389,6 +389,40 @@ func TestWrongSequenceNumberFails(t *testing.T) {
 	}
 }
 
+func TestResponseAEADOpenAdvancesOnlyAfterAuthentication(t *testing.T) {
+	km := &ResponseKeyMaterial{
+		Key:       make([]byte, AES256KeyLength),
+		NonceBase: make([]byte, AESGCMNonceLength),
+	}
+	sealer, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("NewResponseAEAD failed: %v", err)
+	}
+	opener, err := km.NewResponseAEAD()
+	if err != nil {
+		t.Fatalf("NewResponseAEAD failed: %v", err)
+	}
+
+	ciphertext := sealer.Seal([]byte("authenticated"), nil)
+	tampered := append([]byte(nil), ciphertext...)
+	tampered[len(tampered)-1] ^= 1
+
+	if _, err := opener.Open(tampered, nil); err == nil {
+		t.Fatal("tampered ciphertext should fail authentication")
+	}
+	if opener.Seq() != 0 {
+		t.Fatalf("failed authentication advanced sequence to %d", opener.Seq())
+	}
+
+	plaintext, err := opener.Open(ciphertext, nil)
+	if err != nil {
+		t.Fatalf("valid ciphertext should still decrypt: %v", err)
+	}
+	if !bytes.Equal(plaintext, []byte("authenticated")) {
+		t.Fatalf("unexpected plaintext: %q", plaintext)
+	}
+}
+
 func TestDifferentKeysCannotDecrypt(t *testing.T) {
 	// Server's key material
 	serverSecret := make([]byte, 32)

@@ -373,6 +373,8 @@ export function deserializeSessionRecoveryToken(json: string): SessionRecoveryTo
 export async function decryptResponseWithToken(
   response: Response,
   token: SessionRecoveryToken,
+  onStreamError?: () => void,
+  onStreamComplete?: () => void,
 ): Promise<Response> {
   if (!response.body) return response;
 
@@ -387,7 +389,12 @@ export async function decryptResponseWithToken(
   }
 
   const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
-  const decryptedStream = createDecryptStream(response.body, km);
+  const decryptedStream = createDecryptStream(
+    response.body,
+    km,
+    onStreamError,
+    onStreamComplete,
+  );
 
   // Framing headers describe the encrypted body, not the decrypted stream.
   // Consumers that forward the response headers verbatim (for example a
@@ -409,10 +416,13 @@ const MAX_RESPONSE_CHUNK_BYTES = 64 * 1024 * 1024;
 function createDecryptStream(
   body: ReadableStream<Uint8Array>,
   km: ResponseKeyMaterial,
+  onStreamError?: () => void,
+  onStreamComplete?: () => void,
 ): ReadableStream<Uint8Array> {
   let buffer = new Uint8Array(0);
   let seq = 0;
   const reader = body.getReader();
+  let consumerCancelled = false;
 
   return new ReadableStream({
     async pull(controller) {
@@ -420,6 +430,7 @@ function createDecryptStream(
       // so the upstream body must be cancelled explicitly; otherwise a rejected
       // (e.g. oversized) chunk leaves the underlying response downloading.
       const fail = (error: Error) => {
+        onStreamError?.();
         controller.error(error);
         reader.cancel(error).catch(() => {});
       };
@@ -457,11 +468,27 @@ function createDecryptStream(
           }
         }
 
-        const { done, value } = await reader.read();
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await reader.read();
+        } catch (error) {
+          if (consumerCancelled) {
+            return;
+          }
+          fail(error instanceof Error ? error : new Error('Encrypted response read failed', {
+            cause: error,
+          }));
+          return;
+        }
+        const { done, value } = result;
         if (done) {
+          if (consumerCancelled) {
+            return;
+          }
           if (buffer.length !== 0) {
             fail(new ProtocolError('truncated encrypted response chunk'));
           } else {
+            onStreamComplete?.();
             controller.close();
           }
           return;
@@ -474,6 +501,7 @@ function createDecryptStream(
       }
     },
     cancel(reason) {
+      consumerCancelled = true;
       return reader.cancel(reason);
     },
   });

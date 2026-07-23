@@ -97,6 +97,7 @@ class Client:
         self._max_response_bytes = max_response_bytes
         self._token_lock = threading.Lock()
         self._last_token: Optional[SessionRecoveryToken] = None
+        self._request_generation = 0
 
     @classmethod
     def discover(
@@ -193,7 +194,7 @@ class Client:
     ) -> Response:
         url = self._resolve_url(path_or_url)
         request_headers, plaintext = self._prepare_body(headers, body, json_body)
-        self._set_token(None)
+        generation = self._begin_request()
         encrypted = self._identity.encrypt_request_body(plaintext)
 
         if encrypted is None:
@@ -205,7 +206,7 @@ class Client:
 
         request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
         token = encrypted.token
-        self._set_token(token)
+        self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
@@ -220,12 +221,13 @@ class Client:
             _raise_for_key_config_mismatch(status, response_headers, raw)
             response_nonce = _response_nonce_for_status(status, response_headers)
             if response_nonce is None:
-                self._clear_token_if_current(token)
+                self._clear_token_if_current(generation)
                 return Response(status, response_headers, raw)
             decrypted = token.decrypt_response_body(response_nonce, raw)
         except BaseException:
-            self._clear_token_if_current(token)
+            self._clear_token_if_current(generation)
             raise
+        self._clear_token_if_current(generation)
         return Response(status, response_headers, decrypted)
 
     def get(self, path_or_url: str, *, headers: HeadersInput = None) -> Response:
@@ -266,7 +268,7 @@ class Client:
     ) -> Iterator[StreamingResponse]:
         url = self._resolve_url(path_or_url)
         request_headers, plaintext = self._prepare_body(headers, body, json_body)
-        self._set_token(None)
+        generation = self._begin_request()
         encrypted = self._identity.encrypt_request_body(plaintext)
 
         if encrypted is None:
@@ -278,7 +280,7 @@ class Client:
 
         request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
         token = encrypted.token
-        self._set_token(token)
+        self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
@@ -291,7 +293,7 @@ class Client:
                 response_headers = resp.headers
                 if RESPONSE_NONCE_HEADER not in response_headers:
                     raw = self._read_body_capped(resp)
-                    self._clear_token_if_current(token)
+                    self._clear_token_if_current(generation)
                     _raise_for_key_config_mismatch(status, response_headers, raw)
                     response_nonce = _response_nonce_for_status(status, response_headers)
                     if response_nonce is None:
@@ -303,14 +305,20 @@ class Client:
                 yield StreamingResponse(
                     status,
                     response_headers,
-                    self._decrypt_stream(resp, token, response_nonce),
+                    self._decrypt_stream(resp, token, response_nonce, generation),
                 )
+        except GeneratorExit:
+            raise
         except BaseException:
-            self._clear_token_if_current(token)
+            self._clear_token_if_current(generation)
             raise
 
     def _decrypt_stream(
-        self, resp: httpx.Response, token: SessionRecoveryToken, response_nonce: bytes
+        self,
+        resp: httpx.Response,
+        token: SessionRecoveryToken,
+        response_nonce: bytes,
+        generation: int,
     ) -> Iterator[bytes]:
         decryptor = token.create_response_decryptor(
             response_nonce, max_chunk_length=self._max_response_bytes
@@ -319,8 +327,11 @@ class Client:
             for chunk in resp.iter_bytes():
                 yield from decryptor.push(chunk)
             decryptor.finish()
+            self._clear_token_if_current(generation)
+        except GeneratorExit:
+            raise
         except BaseException:
-            self._clear_token_if_current(token)
+            self._clear_token_if_current(generation)
             raise
 
     def _prepare_body(
@@ -364,13 +375,20 @@ class Client:
             raise InvalidInputError("request URL must not include credentials")
         return url
 
-    def _set_token(self, token: Optional[SessionRecoveryToken]) -> None:
+    def _begin_request(self) -> int:
         with self._token_lock:
-            self._last_token = token
+            self._request_generation += 1
+            self._last_token = None
+            return self._request_generation
 
-    def _clear_token_if_current(self, token: SessionRecoveryToken) -> None:
+    def _publish_token(self, generation: int, token: SessionRecoveryToken) -> None:
         with self._token_lock:
-            if self._last_token == token:
+            if self._request_generation == generation:
+                self._last_token = token
+
+    def _clear_token_if_current(self, generation: int) -> None:
+        with self._token_lock:
+            if self._request_generation == generation:
                 self._last_token = None
 
 

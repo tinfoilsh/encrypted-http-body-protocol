@@ -449,14 +449,18 @@ const maxResponseChunkBytes = 64 << 20
 // It emits each plaintext chunk as soon as the complete encrypted frame has
 // been authenticated and rejects truncated framing at end-of-stream.
 type DerivedStreamingDecryptReader struct {
-	reader io.Reader
-	aead   *ResponseAEAD
-	buffer []byte
-	eof    bool
+	reader      io.Reader
+	aead        *ResponseAEAD
+	buffer      []byte
+	eof         bool
+	terminalErr error
 }
 
 // Read implements io.Reader, decrypting chunks as they are read.
 func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
+	if r.terminalErr != nil {
+		return 0, r.terminalErr
+	}
 	if r.eof {
 		return 0, io.EOF
 	}
@@ -478,7 +482,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 				r.eof = true
 				return 0, io.EOF
 			}
-			return 0, fmt.Errorf("failed to read chunk length: %w", err)
+			return 0, r.fail(fmt.Errorf("failed to read chunk length: %w", err))
 		}
 
 		chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
@@ -486,20 +490,20 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 			continue
 		}
 		if chunkLen > maxResponseChunkBytes {
-			return 0, fmt.Errorf("encrypted response chunk exceeds maximum allowed size")
+			return 0, r.fail(fmt.Errorf("encrypted response chunk exceeds maximum allowed size"))
 		}
 
 		// Read encrypted chunk
 		encryptedChunk := make([]byte, chunkLen)
 		_, err = io.ReadFull(r.reader, encryptedChunk)
 		if err != nil {
-			return 0, fmt.Errorf("failed to read encrypted chunk: %w", err)
+			return 0, r.fail(fmt.Errorf("failed to read encrypted chunk: %w", err))
 		}
 
 		// Decrypt chunk (nonce is computed and sequence incremented automatically)
 		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 		if err != nil {
-			return 0, fmt.Errorf("failed to decrypt chunk: %w", err)
+			return 0, r.fail(fmt.Errorf("failed to decrypt chunk: %w", err))
 		}
 
 		// Return as much as fits, buffer the rest
@@ -510,6 +514,11 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 
 		return n, nil
 	}
+}
+
+func (r *DerivedStreamingDecryptReader) fail(err error) error {
+	r.terminalErr = err
+	return err
 }
 
 func (r *DerivedStreamingDecryptReader) Close() error {
