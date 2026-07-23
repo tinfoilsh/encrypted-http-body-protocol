@@ -307,6 +307,10 @@ func TestDecryptResponseWithTokenRejectsTruncatedLengthPrefix(t *testing.T) {
 	_, err := io.ReadAll(resp.Body)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "chunk length")
+
+	_, repeatedErr := resp.Body.Read(make([]byte, 1))
+	require.Error(t, repeatedErr)
+	assert.Equal(t, err.Error(), repeatedErr.Error())
 }
 
 func TestDecryptResponseWithTokenCloseCancelsSource(t *testing.T) {

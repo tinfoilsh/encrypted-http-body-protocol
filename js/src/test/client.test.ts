@@ -271,6 +271,31 @@ describe('Transport', () => {
     }
   });
 
+  it('should bound key mismatch problem parsing without consuming pass-through', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+    const oversizedProblem = JSON.stringify({
+      type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
+      title: 'x'.repeat(64 * 1024),
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (): Promise<Response> => {
+      return new Response(oversizedProblem, {
+        status: 422,
+        headers: { 'content-type': PROTOCOL.PROBLEM_JSON_MEDIA_TYPE },
+      });
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+      assert.strictEqual(response.status, 422);
+      assert.strictEqual(await response.text(), oversizedProblem);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should reject a nonce-less 2xx response', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
@@ -308,8 +333,152 @@ describe('Transport', () => {
 
     try {
       const response = await transport.post('https://server.test/secure', 'hello');
+      assert(transport.getSessionRecoveryToken());
       const responseText = await response.text();
       assert.strictEqual(responseText, 'processed:hello');
+      assert.throws(
+        () => transport.getSessionRecoveryToken(),
+        /No session recovery token available/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should not publish a token for a nonce-bearing null-body response', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
+      return new Response(null, {
+        status: 204,
+        headers: {
+          [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(
+            new Uint8Array(RESPONSE_NONCE_LENGTH)
+          ),
+        },
+      });
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+
+      assert.strictEqual(response.status, 204);
+      assert.strictEqual(response.body, null);
+      assert.throws(
+        () => transport.getSessionRecoveryToken(),
+        /No session recovery token available/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should reject a malformed nonce on a null-body response', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (): Promise<Response> => new Response(null, {
+      status: 204,
+      headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: '00' },
+    })) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        () => transport.post('https://server.test/secure', 'hello'),
+        /Invalid response nonce length/
+      );
+      assert.throws(
+        () => transport.getSessionRecoveryToken(),
+        /No session recovery token available/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should retain the recovery token when the consumer cancels before EOF', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      const encrypted = await buildEncryptedResponse(request, serverIdentity);
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(body.slice(0, body.length - 1));
+        },
+      }), {
+        status: encrypted.status,
+        headers: encrypted.headers,
+      });
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+      const token = transport.getSessionRecoveryToken();
+
+      await response.body!.cancel('consumer stopped');
+
+      assert.deepStrictEqual(transport.getSessionRecoveryToken(), token);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should not let older stream completion clear the latest recovery token', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let requestCount = 0;
+    let finishFirstResponse!: () => void;
+    let secondRequestEnc = '';
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      const encrypted = await buildEncryptedResponse(request, serverIdentity);
+      requestCount++;
+      if (requestCount === 2) {
+        secondRequestEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
+        return encrypted;
+      }
+
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(body);
+          finishFirstResponse = () => controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: encrypted.status,
+        headers: encrypted.headers,
+      });
+    }) as typeof fetch;
+
+    try {
+      const first = await transport.post('https://server.test/secure', 'first');
+      const second = await transport.post('https://server.test/secure', 'second');
+      assert.strictEqual(
+        bytesToHex(transport.getSessionRecoveryToken().requestEnc),
+        secondRequestEnc
+      );
+
+      const firstText = first.text();
+      finishFirstResponse();
+      assert.strictEqual(await firstText, 'processed:first');
+      assert.strictEqual(
+        bytesToHex(transport.getSessionRecoveryToken().requestEnc),
+        secondRequestEnc
+      );
+
+      await second.body!.cancel('test complete');
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -330,14 +499,24 @@ describe('Transport', () => {
     try {
       const controller = new AbortController();
       const response = await transport.post('https://server.test/secure', 'hello', {
+        cache: 'no-store',
         credentials: 'include',
+        integrity: 'sha256-test',
+        mode: 'cors',
         redirect: 'manual',
+        referrer: 'https://client.test/page',
+        referrerPolicy: 'origin',
         signal: controller.signal,
       });
       assert.strictEqual(await response.text(), 'processed:hello');
 
+      assert.strictEqual(capturedRequest.cache, 'no-store');
       assert.strictEqual(capturedRequest.credentials, 'include');
+      assert.strictEqual(capturedRequest.integrity, 'sha256-test');
+      assert.strictEqual(capturedRequest.mode, 'cors');
       assert.strictEqual(capturedRequest.redirect, 'manual');
+      assert.strictEqual(capturedRequest.referrer, 'https://client.test/page');
+      assert.strictEqual(capturedRequest.referrerPolicy, 'origin');
 
       // The outgoing request's signal must follow the caller's signal
       assert.strictEqual(capturedRequest.signal.aborted, false);
@@ -391,16 +570,62 @@ describe('Transport', () => {
       const request = new Request('https://server.test/secure', {
         method: 'POST',
         body: 'hello',
+        cache: 'reload',
         credentials: 'include',
+        integrity: 'sha256-request',
+        mode: 'cors',
         redirect: 'manual',
+        referrer: 'https://client.test/request',
+        referrerPolicy: 'strict-origin',
         duplex: 'half',
       } as RequestInit);
+      const expectedRequest = new Request(request.clone(), { credentials: 'omit' });
       const response = await transport.request(request, { credentials: 'omit' });
       assert.strictEqual(await response.text(), 'processed:hello');
 
       // init overrides the Request; unset init members fall back to it
-      assert.strictEqual(capturedRequest.credentials, 'omit');
-      assert.strictEqual(capturedRequest.redirect, 'manual');
+      assert.strictEqual(capturedRequest.cache, expectedRequest.cache);
+      assert.strictEqual(capturedRequest.credentials, expectedRequest.credentials);
+      assert.strictEqual(capturedRequest.integrity, expectedRequest.integrity);
+      assert.strictEqual(capturedRequest.mode, expectedRequest.mode);
+      assert.strictEqual(capturedRequest.redirect, expectedRequest.redirect);
+      assert.strictEqual(capturedRequest.referrer, expectedRequest.referrer);
+      assert.strictEqual(capturedRequest.referrerPolicy, expectedRequest.referrerPolicy);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should let init override Request method, headers, and body, like fetch()', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let capturedRequest!: Request;
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      capturedRequest = input as Request;
+      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
+    }) as typeof fetch;
+
+    try {
+      const request = new Request('https://server.test/secure', {
+        method: 'POST',
+        headers: { 'x-source': 'request', 'x-replaced': 'request' },
+        body: 'request body',
+        duplex: 'half',
+      } as RequestInit);
+      const response = await transport.request(request, {
+        method: 'PUT',
+        headers: { 'x-init': 'init', 'x-replaced': 'init' },
+        body: 'init body',
+      });
+
+      assert.strictEqual(await response.text(), 'processed:init body');
+      assert.strictEqual(capturedRequest.method, 'PUT');
+      assert.strictEqual(capturedRequest.headers.get('x-init'), 'init');
+      assert.strictEqual(capturedRequest.headers.get('x-replaced'), 'init');
+      assert.strictEqual(capturedRequest.headers.get('x-source'), null);
     } finally {
       globalThis.fetch = originalFetch;
     }

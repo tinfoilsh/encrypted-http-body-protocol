@@ -508,6 +508,47 @@ final class StreamingTests: XCTestCase {
         try decryptor.finish()
     }
 
+    func testPullDrivenResponseDecryptorReadsOneFramePerConsumerRequest() async throws {
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),
+            requestEnc: Data(repeating: 0xCD, count: EHBPConstants.requestEncLength),
+            responseNonce: Data(repeating: 0xEF, count: EHBPConstants.responseNonceLength)
+        )
+        let first = try framedChunk(
+            keyMaterial: keyMaterial,
+            sequence: 0,
+            plaintext: Data("first".utf8)
+        )
+        let second = try framedChunk(
+            keyMaterial: keyMaterial,
+            sequence: 1,
+            plaintext: Data("second".utf8)
+        )
+        let source = CountingByteSource(bytes: Array(first + second))
+        let decryptor = PullDrivenResponseDecryptor(
+            iterator: source.makeIterator(),
+            decryptor: ResponseDecryptor(keyMaterial: keyMaterial)
+        )
+        let stream = AsyncThrowingStream<Data, Error>(unfolding: {
+            try await decryptor.next()
+        })
+
+        XCTAssertEqual(source.bytesRead, 0)
+        var iterator = stream.makeAsyncIterator()
+        let firstPlaintext = try await iterator.next()
+        XCTAssertEqual(firstPlaintext, Data("first".utf8))
+        XCTAssertEqual(source.bytesRead, first.count)
+
+        let secondPlaintext = try await iterator.next()
+        XCTAssertEqual(secondPlaintext, Data("second".utf8))
+        XCTAssertEqual(source.bytesRead, first.count + second.count)
+
+        let end = try await iterator.next()
+        XCTAssertNil(end)
+        let repeatedEnd = try await iterator.next()
+        XCTAssertNil(repeatedEnd)
+    }
+
     func testResponseDecryptorEnforcesSizeAndSequenceLimits() throws {
         let keyMaterial = try deriveResponseKeys(
             exportedSecret: Data(repeating: 0xAB, count: EHBPConstants.exportLength),

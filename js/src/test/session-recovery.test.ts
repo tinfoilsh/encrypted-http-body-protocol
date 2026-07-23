@@ -630,6 +630,35 @@ describe('Session Recovery Token', () => {
       );
     });
 
+    it('should cancel upstream and reject downstream when the error callback throws', async () => {
+      const token: SessionRecoveryToken = {
+        exportedSecret: new Uint8Array(32),
+        requestEnc: new Uint8Array(32),
+      };
+
+      let upstreamCancelled = false;
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x00]));
+        },
+        cancel() {
+          upstreamCancelled = true;
+        },
+      });
+      const nonce = bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH));
+      const response = new Response(upstream, {
+        status: 200,
+        headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+      });
+
+      const decrypted = await decryptResponseWithToken(response, token, () => {
+        throw new Error('error callback failed');
+      });
+
+      await assert.rejects(() => decrypted.text(), /maximum allowed size/);
+      assert.strictEqual(upstreamCancelled, true);
+    });
+
     it('should fail decryption with a wrong token', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const request = new Request('https://server.test/api', {
@@ -797,7 +826,7 @@ describe('Session Recovery Token', () => {
       );
     });
 
-    it('should return a working token after a request', async () => {
+    it('should clear the token after the response is fully consumed', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const { Transport } = await import('../client.js');
       const transport = new Transport(identity, 'server.test');
@@ -814,10 +843,10 @@ describe('Session Recovery Token', () => {
         const responseText = await response.text();
         assert.strictEqual(responseText, 'via-transport');
 
-        // The token should now be available
-        const token = transport.getSessionRecoveryToken();
-        assert.strictEqual(token.exportedSecret.length, 32);
-        assert.strictEqual(token.requestEnc.length, 32);
+        assert.throws(
+          () => transport.getSessionRecoveryToken(),
+          /No session recovery token available/
+        );
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -882,6 +911,221 @@ describe('Session Recovery Token', () => {
           /No session recovery token available/,
           'Token should be cleared after bodyless request'
         );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should let only the latest request publish its token', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const { Transport } = await import('../client.js');
+      const transport = new Transport(identity, 'server.test');
+
+      const originalFetch = globalThis.fetch;
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstFetchStarted!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        firstFetchStarted = resolve;
+      });
+      let requestCount = 0;
+      let secondRequestEnc = '';
+
+      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+        const request = input instanceof Request ? input : new Request(input);
+        requestCount++;
+        if (requestCount === 1) {
+          firstFetchStarted();
+          await firstGate;
+        } else {
+          secondRequestEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER)!;
+        }
+        return buildEncryptedResponse(request, privateKey, 'ok');
+      }) as typeof fetch;
+
+      try {
+        const first = transport.post('https://server.test/api', 'request-1');
+        await firstStarted;
+        const second = transport.post('https://server.test/api', 'request-2');
+
+        await second;
+        assert.strictEqual(
+          bytesToHex(transport.getSessionRecoveryToken().requestEnc),
+          secondRequestEnc,
+        );
+
+        releaseFirst();
+        await first;
+        assert.strictEqual(
+          bytesToHex(transport.getSessionRecoveryToken().requestEnc),
+          secondRequestEnc,
+          'an older response must not replace the latest token',
+        );
+      } finally {
+        releaseFirst();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should invalidate the previous token when a newer request starts', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const { Transport } = await import('../client.js');
+      const transport = new Transport(identity, 'server.test');
+
+      const originalFetch = globalThis.fetch;
+      let releaseSecond!: () => void;
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      let secondFetchStarted!: () => void;
+      const secondStarted = new Promise<void>((resolve) => {
+        secondFetchStarted = resolve;
+      });
+      let requestCount = 0;
+
+      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+        const request = input instanceof Request ? input : new Request(input);
+        requestCount++;
+        if (requestCount === 2) {
+          secondFetchStarted();
+          await secondGate;
+        }
+        return buildEncryptedResponse(request, privateKey, 'ok');
+      }) as typeof fetch;
+
+      try {
+        await transport.post('https://server.test/api', 'request-1');
+        assert(transport.getSessionRecoveryToken());
+
+        const second = transport.post('https://server.test/api', 'request-2');
+        await secondStarted;
+        assert.throws(
+          () => transport.getSessionRecoveryToken(),
+          /No session recovery token available/,
+        );
+
+        releaseSecond();
+        await second;
+        assert(transport.getSessionRecoveryToken());
+      } finally {
+        releaseSecond();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should clear only its own token after a stream authentication failure', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const { Transport } = await import('../client.js');
+      const transport = new Transport(identity, 'server.test');
+
+      const originalFetch = globalThis.fetch;
+      let requestCount = 0;
+      let latestRequestEnc = '';
+
+      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+        const request = input instanceof Request ? input : new Request(input);
+        requestCount++;
+        const response = await buildEncryptedResponse(request, privateKey, 'ok');
+        if (requestCount === 2) {
+          latestRequestEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER)!;
+          return response;
+        }
+
+        const nonce = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!;
+        const corrupted = new Uint8Array(await response.arrayBuffer());
+        corrupted[corrupted.length - 1] ^= 1;
+        return new Response(toArrayBuffer(corrupted), {
+          headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+        });
+      }) as typeof fetch;
+
+      try {
+        const olderResponse = await transport.post('https://server.test/api', 'request-1');
+        const latestResponse = await transport.post('https://server.test/api', 'request-2');
+        await assert.rejects(() => olderResponse.text(), /Decryption failed/);
+        assert.strictEqual(
+          bytesToHex(transport.getSessionRecoveryToken().requestEnc),
+          latestRequestEnc,
+          'an older stream failure must not clear the latest token',
+        );
+        assert.strictEqual(await latestResponse.text(), 'ok');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should clear the latest token after its stream authentication failure', async () => {
+      const { identity, privateKey } = await generateTestKeys();
+      const { Transport } = await import('../client.js');
+      const transport = new Transport(identity, 'server.test');
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+        const request = input instanceof Request ? input : new Request(input);
+        const response = await buildEncryptedResponse(request, privateKey, 'ok');
+        const nonce = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER)!;
+        const corrupted = new Uint8Array(await response.arrayBuffer());
+        corrupted[corrupted.length - 1] ^= 1;
+        return new Response(toArrayBuffer(corrupted), {
+          headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+        });
+      }) as typeof fetch;
+
+      try {
+        const response = await transport.post('https://server.test/api', 'request');
+        assert(transport.getSessionRecoveryToken());
+        await assert.rejects(() => response.text(), /Decryption failed/);
+        assert.throws(
+          () => transport.getSessionRecoveryToken(),
+          /No session recovery token available/,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('should clear the latest token and cancel upstream after a read failure', async () => {
+      const { identity } = await generateTestKeys();
+      const { Transport } = await import('../client.js');
+      const transport = new Transport(identity, 'server.test');
+
+      const originalFetch = globalThis.fetch;
+      const readError = new Error('upstream read failed');
+      let rejectRead!: (error: Error) => void;
+      const readResult = new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+        rejectRead = reject;
+      });
+      let cancelReason: unknown;
+      globalThis.fetch = (async (): Promise<Response> => {
+        const source = new ReadableStream<Uint8Array>();
+        Object.defineProperty(source, 'getReader', {
+          value: () => ({
+            read: () => readResult,
+            cancel: async (reason?: unknown) => {
+              cancelReason = reason;
+            },
+          }),
+        });
+        return new Response(source, {
+          headers: {
+            [PROTOCOL.RESPONSE_NONCE_HEADER]:
+              bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH)),
+          },
+        });
+      }) as typeof fetch;
+
+      try {
+        const response = await transport.post('https://server.test/api', 'request');
+        assert(transport.getSessionRecoveryToken());
+        rejectRead(readError);
+        await assert.rejects(response.text(), (error) => error === readError);
+        assert.throws(
+          () => transport.getSessionRecoveryToken(),
+          /No session recovery token available/,
+        );
+        assert.strictEqual(cancelReason, readError);
       } finally {
         globalThis.fetch = originalFetch;
       }

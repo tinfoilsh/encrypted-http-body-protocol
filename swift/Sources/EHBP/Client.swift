@@ -7,6 +7,9 @@ public final class EHBPClient: @unchecked Sendable {
     private let session: URLSession
     private let tokenLock = NSLock()
     private var _lastSessionRecoveryToken: SessionRecoveryToken?
+    private var requestGeneration: UInt64 = 0
+
+    private static let passThroughChunkSize = 16 * 1024
 
     /// Creates a new EHBP client
     ///
@@ -64,6 +67,7 @@ public final class EHBPClient: @unchecked Sendable {
         guard let url = URL(string: urlString) else {
             throw EHBPError.invalidInput("invalid URL: \(urlString)")
         }
+        let generation = beginRequest()
 
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -85,10 +89,6 @@ public final class EHBPClient: @unchecked Sendable {
                 forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
             )
             request.httpBody = encryptedBody
-        } else {
-            tokenLock.lock()
-            _lastSessionRecoveryToken = nil
-            tokenLock.unlock()
         }
 
         let (data, response) = try await session.data(for: request)
@@ -118,9 +118,7 @@ public final class EHBPClient: @unchecked Sendable {
             encryptedData: data
         )
 
-        tokenLock.lock()
-        _lastSessionRecoveryToken = token
-        tokenLock.unlock()
+        clearToken(for: generation)
 
         return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
     }
@@ -144,6 +142,7 @@ public final class EHBPClient: @unchecked Sendable {
         guard let url = URL(string: urlString) else {
             throw EHBPError.invalidInput("invalid URL: \(urlString)")
         }
+        let generation = beginRequest()
 
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -165,10 +164,6 @@ public final class EHBPClient: @unchecked Sendable {
                 forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
             )
             request.httpBody = encryptedBody
-        } else {
-            tokenLock.lock()
-            _lastSessionRecoveryToken = nil
-            tokenLock.unlock()
         }
 
         let (asyncBytes, response) = try await session.bytes(for: request)
@@ -181,23 +176,19 @@ public final class EHBPClient: @unchecked Sendable {
             from: httpResponse,
             requestWasEncrypted: requestContext != nil
         ) else {
-            let stream = AsyncThrowingStream<Data, Error> { continuation in
-                let task = Task {
-                    do {
-                        var buffer = Data()
-                        for try await byte in asyncBytes {
-                            buffer.append(byte)
-                        }
-                        if !buffer.isEmpty {
-                            continuation.yield(buffer)
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-                continuation.onTermination = { _ in task.cancel() }
+            let chunker = PullDrivenByteChunker(
+                iterator: asyncBytes.makeAsyncIterator(),
+                chunkSize: EHBPClient.passThroughChunkSize,
+                onFailure: { self.clearToken(for: generation) },
+                onCancel: { asyncBytes.task.cancel() }
+            )
+            let lifetime = StreamCancellation {
+                asyncBytes.task.cancel()
             }
+            let stream = AsyncThrowingStream<Data, Error>(unfolding: {
+                _ = lifetime
+                return try await chunker.next()
+            })
             return (stream, httpResponse)
         }
 
@@ -209,31 +200,49 @@ public final class EHBPClient: @unchecked Sendable {
             responseNonce: responseNonce
         )
 
-        tokenLock.lock()
-        _lastSessionRecoveryToken = token
-        tokenLock.unlock()
+        publishToken(token!, for: generation)
 
-        let stream = AsyncThrowingStream<Data, Error> { continuation in
-            let task = Task {
-                do {
-                    var decryptor = responseDecryptor
-
-                    for try await byte in asyncBytes {
-                        if let plaintext = try decryptor.push(byte) {
-                            continuation.yield(plaintext)
-                        }
-                    }
-
-                    try decryptor.finish()
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
+        let decryptor = PullDrivenResponseDecryptor(
+            iterator: asyncBytes.makeAsyncIterator(),
+            decryptor: responseDecryptor,
+            onComplete: { self.clearToken(for: generation) },
+            onFailure: { self.clearToken(for: generation) },
+            onCancel: { asyncBytes.task.cancel() }
+        )
+        let lifetime = StreamCancellation {
+            asyncBytes.task.cancel()
         }
+        let stream = AsyncThrowingStream<Data, Error>(unfolding: {
+            _ = lifetime
+            return try await decryptor.next()
+        })
 
         return (stream, EHBPClient.sanitizedResponse(httpResponse))
+    }
+
+    private func beginRequest() -> UInt64 {
+        tokenLock.lock()
+        requestGeneration &+= 1
+        let generation = requestGeneration
+        _lastSessionRecoveryToken = nil
+        tokenLock.unlock()
+        return generation
+    }
+
+    private func publishToken(_ token: SessionRecoveryToken, for generation: UInt64) {
+        tokenLock.lock()
+        if requestGeneration == generation {
+            _lastSessionRecoveryToken = token
+        }
+        tokenLock.unlock()
+    }
+
+    private func clearToken(for generation: UInt64) {
+        tokenLock.lock()
+        if requestGeneration == generation {
+            _lastSessionRecoveryToken = nil
+        }
+        tokenLock.unlock()
     }
 
     private static func responseNonceHex(
@@ -275,6 +284,132 @@ public final class EHBPClient: @unchecked Sendable {
         return sanitized
     }
 
+}
+
+actor PullDrivenByteChunker<Iterator: AsyncIteratorProtocol & Sendable>
+where Iterator.Element == UInt8 {
+    private var iterator: Iterator
+    private let chunkSize: Int
+    private let onFailure: @Sendable () -> Void
+    private let onCancel: @Sendable () -> Void
+    private var isReading = false
+
+    init(
+        iterator: Iterator,
+        chunkSize: Int,
+        onFailure: @escaping @Sendable () -> Void = {},
+        onCancel: @escaping @Sendable () -> Void = {}
+    ) {
+        precondition(chunkSize > 0)
+        self.iterator = iterator
+        self.chunkSize = chunkSize
+        self.onFailure = onFailure
+        self.onCancel = onCancel
+    }
+
+    func next() async throws -> Data? {
+        guard !isReading else {
+            throw EHBPError.invalidInput("concurrent stream iteration is unsupported")
+        }
+        isReading = true
+        defer { isReading = false }
+
+        do {
+            let cancel = onCancel
+            return try await withTaskCancellationHandler {
+                var iterator = self.iterator
+                var chunk = Data(capacity: chunkSize)
+                while chunk.count < chunkSize {
+                    guard let byte = try await iterator.next() else {
+                        self.iterator = iterator
+                        return chunk.isEmpty ? nil : chunk
+                    }
+                    chunk.append(byte)
+                }
+                self.iterator = iterator
+                return chunk
+            } onCancel: {
+                cancel()
+            }
+        } catch {
+            onFailure()
+            throw error
+        }
+    }
+}
+
+actor PullDrivenResponseDecryptor<Iterator: AsyncIteratorProtocol & Sendable>
+where Iterator.Element == UInt8 {
+    private var iterator: Iterator
+    private var decryptor: ResponseDecryptor
+    private let onComplete: @Sendable () -> Void
+    private let onFailure: @Sendable () -> Void
+    private let onCancel: @Sendable () -> Void
+    private var isReading = false
+    private var isFinished = false
+
+    init(
+        iterator: Iterator,
+        decryptor: ResponseDecryptor,
+        onComplete: @escaping @Sendable () -> Void = {},
+        onFailure: @escaping @Sendable () -> Void = {},
+        onCancel: @escaping @Sendable () -> Void = {}
+    ) {
+        self.iterator = iterator
+        self.decryptor = decryptor
+        self.onComplete = onComplete
+        self.onFailure = onFailure
+        self.onCancel = onCancel
+    }
+
+    func next() async throws -> Data? {
+        guard !isFinished else { return nil }
+        guard !isReading else {
+            throw EHBPError.invalidInput("concurrent stream iteration is unsupported")
+        }
+        isReading = true
+        defer { isReading = false }
+
+        do {
+            let cancel = onCancel
+            return try await withTaskCancellationHandler {
+                var iterator = self.iterator
+                var decryptor = self.decryptor
+                while let byte = try await iterator.next() {
+                    if let plaintext = try decryptor.push(byte) {
+                        self.iterator = iterator
+                        self.decryptor = decryptor
+                        return plaintext
+                    }
+                }
+                try decryptor.finish()
+                self.iterator = iterator
+                self.decryptor = decryptor
+                self.isFinished = true
+                self.onComplete()
+                return nil
+            } onCancel: {
+                cancel()
+            }
+        } catch {
+            if !Task.isCancelled {
+                onFailure()
+            }
+            throw error
+        }
+    }
+}
+
+private final class StreamCancellation: @unchecked Sendable {
+    private let cancel: @Sendable () -> Void
+
+    init(_ cancel: @escaping @Sendable () -> Void) {
+        self.cancel = cancel
+    }
+
+    deinit {
+        cancel()
+    }
 }
 
 // MARK: - Data Extensions

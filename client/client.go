@@ -21,11 +21,36 @@ type Transport struct {
 
 	mu                       sync.Mutex
 	lastSessionRecoveryToken *identity.SessionRecoveryToken
+	requestGeneration        uint64
 }
 
 type problemDetails struct {
 	Type  string `json:"type"`
 	Title string `json:"title"`
+}
+
+const maxProblemDetailsBytes = 64 << 10
+
+type preservingReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+type tokenOwningReadCloser struct {
+	io.ReadCloser
+	onComplete func()
+	onError    func()
+	once       sync.Once
+}
+
+func (r *tokenOwningReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err == io.EOF {
+		r.once.Do(r.onComplete)
+	} else if err != nil {
+		r.once.Do(r.onError)
+	}
+	return n, err
 }
 
 var _ http.RoundTripper = (*Transport)(nil)
@@ -170,9 +195,16 @@ func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
 		return false, "", nil
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxProblemDetailsBytes+1))
 	if err != nil {
 		return false, "", fmt.Errorf("failed to read problem response: %w", err)
+	}
+	if len(bodyBytes) > maxProblemDetailsBytes {
+		resp.Body = &preservingReadCloser{
+			Reader: io.MultiReader(bytes.NewReader(bodyBytes), resp.Body),
+			Closer: resp.Body,
+		}
+		return false, "", nil
 	}
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -198,6 +230,12 @@ func (t *Transport) roundTripper() http.RoundTripper {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.requestGeneration++
+	generation := t.requestGeneration
+	t.lastSessionRecoveryToken = nil
+	t.mu.Unlock()
+
 	// Create a copy of the request to avoid modifying the original
 	newReq := req.Clone(req.Context())
 
@@ -223,13 +261,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session recovery token: %v", err)
 		}
-	}
-
-	// Clear token for bodyless requests immediately
-	if reqCtx == nil {
-		t.mu.Lock()
-		t.lastSessionRecoveryToken = nil
-		t.mu.Unlock()
 	}
 
 	// Send through a RoundTripper rather than a nested http.Client: a
@@ -267,8 +298,28 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		t.mu.Lock()
-		t.lastSessionRecoveryToken = token
+		if t.requestGeneration == generation {
+			t.lastSessionRecoveryToken = token
+		}
 		t.mu.Unlock()
+
+		resp.Body = &tokenOwningReadCloser{
+			ReadCloser: resp.Body,
+			onComplete: func() {
+				t.mu.Lock()
+				if t.requestGeneration == generation {
+					t.lastSessionRecoveryToken = nil
+				}
+				t.mu.Unlock()
+			},
+			onError: func() {
+				t.mu.Lock()
+				if t.requestGeneration == generation {
+					t.lastSessionRecoveryToken = nil
+				}
+				t.mu.Unlock()
+			},
+		}
 	}
 
 	return resp, nil
