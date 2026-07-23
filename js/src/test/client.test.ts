@@ -377,6 +377,30 @@ describe('Transport', () => {
     }
   });
 
+  it('should reject a malformed nonce on a null-body response', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (): Promise<Response> => new Response(null, {
+      status: 204,
+      headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: '00' },
+    })) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        () => transport.post('https://server.test/secure', 'hello'),
+        /Invalid response nonce length/
+      );
+      assert.throws(
+        () => transport.getSessionRecoveryToken(),
+        /No session recovery token available/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should retain the recovery token when the consumer cancels before EOF', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');

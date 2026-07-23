@@ -376,14 +376,11 @@ export async function decryptResponseWithToken(
   onStreamError?: () => void,
   onStreamComplete?: () => void,
 ): Promise<Response> {
-  if (!response.body) {
-    if (response.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER)) {
-      onStreamComplete?.();
-    }
+  const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
+  if (!response.body && !responseNonceHex) {
     return response;
   }
 
-  const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
   if (!responseNonceHex) {
     throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
@@ -391,6 +388,10 @@ export async function decryptResponseWithToken(
   const responseNonce = hexToBytes(responseNonceHex);
   if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
     throw new ProtocolError(`Invalid response nonce length`);
+  }
+  if (!response.body) {
+    onStreamComplete?.();
+    return response;
   }
 
   const km = await deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce);
