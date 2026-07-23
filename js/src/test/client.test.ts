@@ -345,6 +345,38 @@ describe('Transport', () => {
     }
   });
 
+  it('should not publish a token for a nonce-bearing null-body response', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
+      return new Response(null, {
+        status: 204,
+        headers: {
+          [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(
+            new Uint8Array(RESPONSE_NONCE_LENGTH)
+          ),
+        },
+      });
+    }) as typeof fetch;
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'hello');
+
+      assert.strictEqual(response.status, 204);
+      assert.strictEqual(response.body, null);
+      assert.throws(
+        () => transport.getSessionRecoveryToken(),
+        /No session recovery token available/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should retain the recovery token when the consumer cancels before EOF', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');

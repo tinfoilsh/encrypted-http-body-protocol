@@ -210,8 +210,8 @@ impl Client {
         &self,
         mut request: reqwest::Request,
     ) -> Result<PreparedRawRequest> {
-        let generation = self.begin_request();
         self.validate_raw_request(&request)?;
+        let generation = self.begin_request();
 
         let Some(body) = request.body_mut().take() else {
             return Ok(PreparedRawRequest {
@@ -1671,18 +1671,34 @@ mod tests {
     #[tokio::test]
     async fn raw_transport_rejects_unsafe_request_identity() {
         let (client, _) = raw_client_with_private_key();
+        let valid = reqwest::Client::new()
+            .post("https://example.com/v1/chat")
+            .body("secret")
+            .build()
+            .unwrap();
+        let prepared = client.prepare_raw_request(valid).await.unwrap();
+        let generation = prepared.generation;
+        let token = prepared.token.unwrap();
+        let assert_session_unchanged = || {
+            let state = client.session.lock().unwrap();
+            assert_eq!(state.generation, generation);
+            assert_eq!(state.token.as_ref(), Some(&token));
+        };
+
         let cross_origin = reqwest::Client::new()
             .post("https://evil.example/v1/chat")
             .body("secret")
             .build()
             .unwrap();
         assert!(client.prepare_raw_request(cross_origin).await.is_err());
+        assert_session_unchanged();
 
         let credential_url = reqwest::Request::new(
             Method::POST,
             Url::parse("https://user@example.com/v1/chat").unwrap(),
         );
         assert!(client.prepare_raw_request(credential_url).await.is_err());
+        assert_session_unchanged();
 
         let reserved_header = reqwest::Client::new()
             .post("https://example.com/v1/chat")
@@ -1691,6 +1707,7 @@ mod tests {
             .build()
             .unwrap();
         assert!(client.prepare_raw_request(reserved_header).await.is_err());
+        assert_session_unchanged();
     }
 
     #[tokio::test]

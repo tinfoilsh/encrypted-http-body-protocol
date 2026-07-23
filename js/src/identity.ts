@@ -376,7 +376,12 @@ export async function decryptResponseWithToken(
   onStreamError?: () => void,
   onStreamComplete?: () => void,
 ): Promise<Response> {
-  if (!response.body) return response;
+  if (!response.body) {
+    if (response.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER)) {
+      onStreamComplete?.();
+    }
+    return response;
+  }
 
   const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
   if (!responseNonceHex) {
@@ -430,9 +435,16 @@ function createDecryptStream(
       // so the upstream body must be cancelled explicitly; otherwise a rejected
       // (e.g. oversized) chunk leaves the underlying response downloading.
       const fail = (error: Error) => {
-        onStreamError?.();
-        controller.error(error);
-        reader.cancel(error).catch(() => {});
+        try {
+          onStreamError?.();
+        } catch {
+          // Observer failures must not interrupt stream cleanup.
+        }
+        try {
+          controller.error(error);
+        } finally {
+          reader.cancel(error).catch(() => {});
+        }
       };
 
       while (true) {

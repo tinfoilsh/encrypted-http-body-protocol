@@ -630,6 +630,35 @@ describe('Session Recovery Token', () => {
       );
     });
 
+    it('should cancel upstream and reject downstream when the error callback throws', async () => {
+      const token: SessionRecoveryToken = {
+        exportedSecret: new Uint8Array(32),
+        requestEnc: new Uint8Array(32),
+      };
+
+      let upstreamCancelled = false;
+      const upstream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x00]));
+        },
+        cancel() {
+          upstreamCancelled = true;
+        },
+      });
+      const nonce = bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH));
+      const response = new Response(upstream, {
+        status: 200,
+        headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: nonce },
+      });
+
+      const decrypted = await decryptResponseWithToken(response, token, () => {
+        throw new Error('error callback failed');
+      });
+
+      await assert.rejects(() => decrypted.text(), /maximum allowed size/);
+      assert.strictEqual(upstreamCancelled, true);
+    });
+
     it('should fail decryption with a wrong token', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const request = new Request('https://server.test/api', {
