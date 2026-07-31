@@ -393,7 +393,7 @@ type RequestContext struct {
 // See SPEC.md Section 6.4 for the security rationale.
 func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext, error) {
 	// Bodyless requests pass through unencrypted - no HPKE context needed
-	if req.Body == nil || req.Body == http.NoBody || req.ContentLength == 0 {
+	if req.Body == nil || req.Body == http.NoBody {
 		return nil, nil
 	}
 

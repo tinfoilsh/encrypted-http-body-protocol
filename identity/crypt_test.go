@@ -103,9 +103,11 @@ func TestStreamingReaderEdgeCases(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("empty request body", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/test", strings.NewReader(""))
-		_, err := serverIdentity.EncryptRequestWithContext(req)
+		req, err := http.NewRequest("POST", "/test", strings.NewReader(""))
 		require.NoError(t, err)
+		ctx, err := serverIdentity.EncryptRequestWithContext(req)
+		require.NoError(t, err)
+		assert.Nil(t, ctx)
 		assert.Equal(t, int64(0), req.ContentLength)
 	})
 
@@ -113,6 +115,27 @@ func TestStreamingReaderEdgeCases(t *testing.T) {
 		req := httptest.NewRequest("POST", "/test", nil)
 		_, err := serverIdentity.EncryptRequestWithContext(req)
 		require.NoError(t, err)
+	})
+
+	t.Run("unknown request body length", func(t *testing.T) {
+		const testData = "non-empty body"
+		req, err := http.NewRequest(
+			"POST",
+			"/test",
+			io.NopCloser(strings.NewReader(testData)),
+		)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), req.ContentLength)
+
+		ctx, err := serverIdentity.EncryptRequestWithContext(req)
+		require.NoError(t, err)
+		require.NotNil(t, ctx)
+
+		_, err = serverIdentity.DecryptRequestWithContext(req)
+		require.NoError(t, err)
+		decryptedBody, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		assert.Equal(t, testData, string(decryptedBody))
 	})
 }
 
