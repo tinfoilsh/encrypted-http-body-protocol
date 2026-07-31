@@ -160,9 +160,9 @@ export class Transport {
     // Normalize through the platform Request constructor first so RequestInit
     // overrides a Request input with the same semantics as fetch().
     const normalizedRequest = new Request(input, init);
-    const requestBody = normalizedRequest.body
-      ? await normalizedRequest.arrayBuffer()
-      : null;
+    // Firefox does not expose Request.body even when payload bytes are present.
+    const requestBodyBytes = await normalizedRequest.arrayBuffer();
+    const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
 
     const url = new URL(normalizedRequest.url);
     url.host = this.serverHost;

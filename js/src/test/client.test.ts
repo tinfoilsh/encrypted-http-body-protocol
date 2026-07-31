@@ -631,6 +631,30 @@ describe('Transport', () => {
     }
   });
 
+  it('should preserve request payload when Request.body is unavailable', async () => {
+    const transport = new Transport(serverIdentity, 'server.test');
+    const originalFetch = globalThis.fetch;
+    const originalBody = Object.getOwnPropertyDescriptor(Request.prototype, 'body');
+    assert(originalBody);
+
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input as Request;
+      return buildEncryptedResponse(request.clone(), serverIdentity);
+    }) as typeof fetch;
+    Object.defineProperty(Request.prototype, 'body', {
+      configurable: true,
+      get: () => null,
+    });
+
+    try {
+      const response = await transport.post('https://server.test/secure', 'firefox body');
+      assert.strictEqual(await response.text(), 'processed:firefox body');
+    } finally {
+      Object.defineProperty(Request.prototype, 'body', originalBody);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should preserve fetch options on bodyless passthrough requests', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
