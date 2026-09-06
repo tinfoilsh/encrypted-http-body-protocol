@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import html
 import json
 import os
 import re
@@ -405,9 +406,88 @@ def cross_equal(results):
 
 REPORT_MD = ROOT / "conformance" / "report.md"
 REPORT_JSON = ROOT / "conformance" / "report.json"
+REPORT_HTML = ROOT / "conformance" / "report.html"
+
+_HTML_CSS = """
+body{font:14px/1.45 system-ui,sans-serif;margin:24px;color:#222}
+h1{font-size:20px;margin:0 0 8px}h2{font-size:16px;margin:24px 0 8px}
+.summary{margin:0 0 16px}
+.status{display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;font-weight:600;margin-right:8px}
+.status.FAIL{background:#c62828}.status.PASS{background:#2e7d32}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}
+th{background:#f5f5f5;position:sticky;top:0}
+code{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.ok{background:#e8f5e9}.div{background:#ffebee}.na{background:#f5f5f5;color:#999}
+td.div{font-weight:600}td.na{text-align:center}td.exp{background:#e3f2fd}
+.cross{font-size:11px;color:#b26a00;margin-left:6px}
+details{margin:6px 0}summary{cursor:pointer}li{margin:2px 0}
+.sw{display:inline-block;width:12px;height:12px;border:1px solid #ccc;vertical-align:middle;margin-right:4px}
+.legend{margin-top:16px;color:#555;font-size:12px}
+"""
 
 
-def write_report(diverging, total, cells, cross_fails, skipped):
+def build_html(diverging, status, total, cells, cross_fails, skipped, runners):
+    """Fixture x runner matrix. Divergent cells carry the native error as a
+    tooltip and are repeated in full below, so nothing requires hovering."""
+    esc = html.escape
+    cols = list(runners or [])
+    if not cols:
+        for fx in diverging:
+            for r in fx["rows"]:
+                if r["language"] not in cols:
+                    cols.append(r["language"])
+    out = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        f"<title>EHBP Conformance Report</title><style>{_HTML_CSS}</style></head><body>",
+        "<h1>EHBP Conformance Report</h1>",
+        f"<p class='summary'><span class='status {status}'>{status}</span>"
+        f"{total} fixtures &middot; {cells} divergent cells &middot; "
+        f"{cross_fails} cross-diff fixtures &middot; {skipped} skipped</p>",
+    ]
+    if not diverging:
+        out.append("<p>No divergences. Every runner agrees with the spec expectation.</p>")
+    else:
+        out.append("<table><thead><tr><th>Fixture</th><th>Category</th><th>Expected</th>")
+        out.extend(f"<th>{esc(c)}</th>" for c in cols)
+        out.append("</tr></thead><tbody>")
+        for fx in diverging:
+            e = fx["expect"]
+            expected = e.get("error_code") or e.get("outcome")
+            by = {r["language"]: r for r in fx["rows"]}
+            cross = " <span class='cross' title='implementations disagree'>cross-diff</span>" if fx["cross"] else ""
+            out.append(f"<tr><td><code>{esc(fx['id'])}</code>{cross}</td>"
+                       f"<td>{esc(fx['category'])}</td>"
+                       f"<td class='exp'><code>{esc(str(expected))}</code></td>")
+            for c in cols:
+                r = by.get(c)
+                if r is None:
+                    out.append("<td class='na'>&mdash;</td>")
+                elif r["divergent"]:
+                    out.append(f"<td class='div' title='{esc(r['native'] or '')}'>"
+                               f"&#x2717; <code>{esc(str(r['actual']))}</code></td>")
+                else:
+                    out.append(f"<td class='ok'>&#x2713; <code>{esc(str(r['actual']))}</code></td>")
+            out.append("</tr>")
+        out.append("</tbody></table>")
+        out.append("<h2>Native errors</h2>")
+        for fx in diverging:
+            out.append(f"<details><summary><code>{esc(fx['id'])}</code></summary><ul>")
+            for r in fx["rows"]:
+                if not r["divergent"]:
+                    continue
+                native = r["native"] or "(no error: the library accepted the input)"
+                out.append(f"<li><b>{esc(r['language'])}</b> &rarr; "
+                           f"<code>{esc(str(r['actual']))}</code>: {esc(native)}</li>")
+            out.append("</ul></details>")
+    out.append("<p class='legend'><span class='sw ok'></span>conforms &nbsp; "
+               "<span class='sw div'></span>divergent &nbsp; "
+               "<span class='sw na'></span>skipped / not applicable</p>")
+    out.append("</body></html>")
+    return "\n".join(out) + "\n"
+
+
+def write_report(diverging, total, cells, cross_fails, skipped, runners=None):
     """Write a human report (report.md) and a machine report (report.json)."""
     status = "FAIL" if diverging else "PASS"
     lines = [
@@ -438,6 +518,7 @@ def write_report(diverging, total, cells, cross_fails, skipped):
         "cross_diff_fixtures": cross_fails, "skipped": skipped,
         "divergences": diverging,
     }, indent=2) + "\n")
+    REPORT_HTML.write_text(build_html(diverging, status, total, cells, cross_fails, skipped, runners))
 
 
 def _hashable(v):
@@ -563,9 +644,9 @@ def main():
                 oracle.kill()
                 oracle.wait(timeout=3)
 
-    write_report(diverging, total, cells, cross_fails, skipped)
+    write_report(diverging, total, cells, cross_fails, skipped, list(adapters))
     print(f"\n{total} fixtures | divergent cells {cells} | cross-diff fixtures {cross_fails} | "
-          f"skipped {skipped} | report: {REPORT_MD.relative_to(ROOT)}")
+          f"skipped {skipped} | report: {REPORT_HTML.relative_to(ROOT)} (+ .md, .json)")
     sys.exit(1 if diverging else 0)
 
 

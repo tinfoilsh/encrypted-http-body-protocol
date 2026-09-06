@@ -13,3 +13,4 @@ conformance/report.json
 conformance/.venv/
 __pycache__/
 *.pyc
+conformance/report.html

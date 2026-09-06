@@ -71,3 +71,4 @@ jobs:
           path: |
             conformance/report.md
             conformance/report.json
+            conformance/report.html
