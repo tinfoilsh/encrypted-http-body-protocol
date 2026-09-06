@@ -1,0 +1,74 @@
+name: Conformance
+
+on:
+  pull_request:
+    branches: ["**"]
+
+# The cross-language matrix must run on one machine so results can be compared in
+# a single process, and Swift needs macOS, so the whole suite runs on a macOS
+# runner. It fails on every divergence or cross-diff; no known-failure allowlist
+# can conceal a security regression.
+jobs:
+  conformance:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build JS library and browser bundle
+        working-directory: js
+        run: |
+          npm ci
+          npm run build
+          npm run build:browser
+
+      - name: Create Python venv with the ehbp package
+        run: |
+          python3 -m venv conformance/.venv
+          conformance/.venv/bin/pip install -e ./python
+
+      - name: Install Playwright browsers
+        working-directory: conformance/adapters/js-browser
+        run: |
+          npm install
+          npx playwright install chromium firefox
+
+      - name: Verify harness and generated security fixtures
+        run: |
+          python3 -m unittest discover -s conformance/harness -p 'test_*.py'
+          conformance/.venv/bin/python conformance/tools/gen_fixtures.py
+          git diff --exit-code -- test-vectors/conformance
+
+      - name: Run conformance matrix
+        run: |
+          python3 conformance/harness/run.py \
+            --adapter go --adapter python --adapter js --adapter rust --adapter swift \
+            --adapter js-chromium --adapter js-firefox
+
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          path: |
+            conformance/report.md
+            conformance/report.json
+            conformance/report.html

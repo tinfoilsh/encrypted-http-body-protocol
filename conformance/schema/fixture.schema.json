@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tinfoil.sh/ehbp/conformance/fixture.schema.json",
+  "title": "EHBP conformance fixture",
+  "description": "One language-neutral test case. The harness feeds `operation` + `inputs` (and, for e2e, `server_scenario` + `request`) to every adapter and asserts the returned normalized result matches `expect`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "category",
+    "operation",
+    "expect"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Stable unique id, kebab-case."
+    },
+    "description": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "crypto",
+        "config",
+        "e2e",
+        "shape",
+        "client-api",
+        "server"
+      ],
+      "description": "crypto/config run in-process against client APIs; e2e runs over HTTP; shape is observational; server targets an implementation-specific public server API."
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "derive_keys",
+        "decrypt_response",
+        "decrypt_response_streaming",
+        "compute_nonce",
+        "token_roundtrip",
+        "parse_config",
+        "marshal_config",
+        "request",
+        "discover",
+        "reject_reserved_header",
+        "reject_cross_origin",
+        "reject_url_credentials",
+        "decrypt_request",
+        "middleware_request"
+      ],
+      "description": "The standard operation the adapter performs. `request` is used for e2e/shape; crypto/config/server operations run in-process."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Operation inputs. Byte fields are lowercase hex. Which keys apply depends on `operation`; see conformance/spec for the per-operation contract. Examples: derive_keys -> {exportedSecret, requestEnc, responseNonce}; decrypt_response -> {..., encryptedResponse}; compute_nonce -> {nonceBase, seq}; token_roundtrip -> {json}; parse_config -> {config}; marshal_config -> {publicKey}.",
+      "additionalProperties": true
+    },
+    "chunking": {
+      "description": "For streaming decrypt fixtures: byte offsets at which to split the encrypted input before feeding it, to prove fragmentation handling. Optional.",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "server_scenario": {
+      "description": "e2e only. Named deterministic behavior on the oracle server, including malformed nonce, framing, authentication, and pass-through scenarios.",
+      "type": "string"
+    },
+    "request": {
+      "description": "e2e only. The request the adapter issues through the library's public client API.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "body_hex": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$"
+            }
+          ]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "browser": {
+      "description": "Whether this fixture is observable in browser mode. 'na' fixtures are reported skipped (with skip_reason) rather than run, per anti-concealment requirement 5.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runnable": {
+          "type": "boolean",
+          "default": true
+        },
+        "skip_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "runners": {
+      "description": "Optional applicability list for implementation-specific surfaces, such as the Go-only server API. Non-listed runners are not counted as skips.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_skips": {
+      "description": "Exact runner-to-reason map for genuinely unavailable public APIs. Any skipped result not declared here is a divergence.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "expect": {
+      "description": "The normalized result every conforming language must produce. A subset of the result schema's asserted fields; the harness compares only the keys present here plus the always-asserted outcome/error_code.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer"
+            }
+          ]
+        },
+        "body_hex": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$"
+            }
+          ]
+        },
+        "passthrough": {
+          "type": "boolean"
+        },
+        "plaintext_emitted_before_error": {
+          "type": "boolean"
+        },
+        "bytes_emitted_before_error": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_headers_absent": {
+          "description": "Header names (lowercase) that MUST NOT be present on the delivered response, e.g. content-length, transfer-encoding after decrypt.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "response_headers_present": {
+          "description": "Header names (lowercase) that MUST be present.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "outcome"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "e2e"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "server_scenario",
+          "request"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "server"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "inputs",
+          "runners"
+        ]
+      }
+    }
+  ]
+}
