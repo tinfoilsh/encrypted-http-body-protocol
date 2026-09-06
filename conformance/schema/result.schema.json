@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tinfoil.sh/ehbp/conformance/result.schema.json",
+  "title": "EHBP conformance normalized result",
+  "description": "The single JSON object an adapter emits per fixture. The harness asserts equality over the ASSERTED fields across all languages and against the fixture expectation. native_error is captured for humans and MUST NOT be asserted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fixture_id", "outcome"],
+  "properties": {
+    "fixture_id": {
+      "type": "string",
+      "description": "Echo of the fixture id this result answers."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["ok", "error", "skipped"],
+      "description": "ok = operation completed (including a spec-sanctioned pass-through). error = a protocol/crypto/input failure. skipped = this fixture is not observable in this runner (see skip_reason); NEVER used to avoid a hard case."
+    },
+    "error_code": {
+      "description": "ASSERTED. Canonical code from conformance/spec/errors.md. Required when outcome=error, must be null otherwise.",
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "enum": [
+          "OK",
+          "INVALID_KEY_CONFIG",
+          "UNSUPPORTED_SUITE",
+          "INVALID_ENCAPSULATED_KEY",
+          "HPKE_SETUP_FAILED",
+          "MISSING_RESPONSE_NONCE",
+          "INVALID_RESPONSE_NONCE",
+          "DUPLICATE_RESPONSE_NONCE",
+          "KEY_CONFIG_MISMATCH",
+          "FRAMING_TRUNCATED",
+          "CHUNK_TOO_LARGE",
+          "AEAD_DECRYPT_FAILED",
+          "SEQUENCE_OVERFLOW",
+          "INVALID_TOKEN",
+          "INVALID_INPUT"
+        ]}
+      ]
+    },
+    "status": {
+      "description": "ASSERTED when present. HTTP status for e2e fixtures; null for in-process crypto/config fixtures.",
+      "oneOf": [{"type": "null"}, {"type": "integer", "minimum": 100, "maximum": 599}]
+    },
+    "response_headers": {
+      "description": "ASSERTED (normalized subset only, see harness). Lowercased header names the harness cares about after any client-side header stripping: ehbp-response-nonce, content-length, transfer-encoding, content-type. Presence/absence matters; content-length and transfer-encoding MUST be absent on a decrypted response body.",
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
+    "body_hex": {
+      "description": "ASSERTED. Lowercase hex of the bytes delivered to the caller: the decrypted plaintext on success, or the pass-through body on a sanctioned pass-through. null when there is no body or the operation is not body-producing.",
+      "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]*$"}]
+    },
+    "passthrough": {
+      "description": "ASSERTED. true when the body is an unauthenticated pass-through (non-2xx, no nonce), NOT decrypted application data. Distinguishes a sanctioned plaintext error from a real decrypted body so the two can never be conflated.",
+      "type": "boolean",
+      "default": false
+    },
+    "plaintext_emitted_before_error": {
+      "description": "ASSERTED. Fail-closed check: did ANY authenticated plaintext reach the consumer before this result errored? MUST be false on error fixtures unless the fixture explicitly expects otherwise.",
+      "type": "boolean",
+      "default": false
+    },
+    "bytes_emitted_before_error": {
+      "description": "ASSERTED. Count of plaintext bytes delivered before the error. MUST be 0 on error fixtures unless explicitly expected.",
+      "type": "integer",
+      "minimum": 0,
+      "default": 0
+    },
+    "skip_reason": {
+      "description": "Required when outcome=skipped. Machine-readable reason, e.g. 'browser-coalesces-duplicate-headers' or 'no-randomness-hook'.",
+      "type": "string"
+    },
+    "native_error": {
+      "description": "NOT ASSERTED. The raw native error type and message, for human audit and the mapping table.",
+      "oneOf": [{"type": "null"}, {"type": "string"}]
+    },
+    "runner": {
+      "description": "NOT ASSERTED. Which adapter produced this (e.g. 'rust', 'js-browser:firefox'). For the report only.",
+      "type": "string"
+    }
+  }
+}

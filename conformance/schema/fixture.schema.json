@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tinfoil.sh/ehbp/conformance/fixture.schema.json",
+  "title": "EHBP conformance fixture",
+  "description": "One language-neutral test case. The harness feeds `operation` + `inputs` (and, for e2e, `server_scenario` + `request`) to every adapter and asserts the returned normalized result matches `expect`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "category",
+    "operation",
+    "expect"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Stable unique id, kebab-case."
+    },
+    "description": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "crypto",
+        "config",
+        "e2e",
+        "client-api"
+      ],
+      "description": "crypto/config run in-process against the library API; e2e runs over HTTP against the oracle server."
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "derive_keys",
+        "decrypt_response",
+        "decrypt_response_streaming",
+        "compute_nonce",
+        "token_roundtrip",
+        "token_parse",
+        "parse_config",
+        "marshal_config",
+        "request",
+        "discover",
+        "reject_reserved_header",
+        "reject_cross_origin",
+        "reject_url_credentials"
+      ],
+      "description": "The standard operation the adapter performs. `request` is the only e2e operation; the rest are in-process."
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Operation inputs. Byte fields are lowercase hex. Which keys apply depends on `operation`; see conformance/spec for the per-operation contract. Examples: derive_keys -> {exportedSecret, requestEnc, responseNonce}; decrypt_response -> {..., encryptedResponse}; compute_nonce -> {nonceBase, seq}; token_parse -> {json}; parse_config -> {config}; marshal_config -> {publicKey}.",
+      "additionalProperties": true
+    },
+    "chunking": {
+      "description": "For streaming decrypt fixtures: byte offsets at which to split the encrypted input before feeding it, to prove fragmentation handling. Optional.",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "server_scenario": {
+      "description": "e2e only. Named route/behavior on the oracle server, e.g. 'echo', 'drop_nonce_200', 'drop_nonce_502', 'invalid_nonce_len', 'duplicate_nonce', 'key_config_mismatch_422', 'truncate_final_frame', 'oversized_chunk', 'tamper_tag', 'plaintext_passthrough'.",
+      "type": "string"
+    },
+    "request": {
+      "description": "e2e only. The request the adapter issues through the library's public client API.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "body_hex": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$"
+            }
+          ]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "browser": {
+      "description": "Whether this fixture is observable in browser mode. 'na' fixtures are reported skipped (with skip_reason) rather than run, per anti-concealment requirement 5.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runnable": {
+          "type": "boolean",
+          "default": true
+        },
+        "skip_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "expect": {
+      "description": "The normalized result every conforming language must produce. A subset of the result schema's asserted fields; the harness compares only the keys present here plus the always-asserted outcome/error_code.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer"
+            }
+          ]
+        },
+        "body_hex": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]*$"
+            }
+          ]
+        },
+        "passthrough": {
+          "type": "boolean"
+        },
+        "plaintext_emitted_before_error": {
+          "type": "boolean"
+        },
+        "bytes_emitted_before_error": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "response_headers_absent": {
+          "description": "Header names (lowercase) that MUST NOT be present on the delivered response, e.g. content-length, transfer-encoding after decrypt.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "response_headers_present": {
+          "description": "Header names (lowercase) that MUST be present.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "outcome"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "e2e"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "server_scenario",
+          "request"
+        ]
+      }
+    }
+  ]
+}
