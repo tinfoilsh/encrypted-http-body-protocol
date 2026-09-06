@@ -12,7 +12,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -397,9 +396,6 @@ func mapErr(op string, err error) string {
 	case op == "derive_keys" && contains(msg, "must be"):
 		return "INVALID_INPUT"
 	default:
-		if errors.As(err, new(identity.ClientError)) {
-			return "INVALID_INPUT"
-		}
 		return "INVALID_INPUT"
 	}
 }

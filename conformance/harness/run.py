@@ -64,7 +64,7 @@ RESULT_FIELDS = {
 FIXTURE_CATEGORIES = {"crypto", "config", "e2e", "shape", "client-api", "server"}
 FIXTURE_OPERATIONS = {
     "derive_keys", "decrypt_response", "decrypt_response_streaming",
-    "compute_nonce", "token_roundtrip", "token_parse", "parse_config",
+    "compute_nonce", "token_roundtrip", "parse_config",
     "marshal_config", "request", "discover", "reject_reserved_header",
     "reject_cross_origin", "reject_url_credentials", "decrypt_request",
     "middleware_request",
