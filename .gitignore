@@ -4,3 +4,10 @@
 Package.resolved
 *identity.json
 EHBP.xcframework/
+conformance/.bin/
+conformance/adapters/rust/target/
+conformance/adapters/js-browser/node_modules/
+conformance/adapters/swift/.build/
+conformance/report.md
+conformance/report.json
+conformance/.venv/
