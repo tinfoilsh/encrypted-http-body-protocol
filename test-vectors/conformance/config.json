@@ -1,0 +1,107 @@
+[
+  {
+    "id": "parse-config-valid",
+    "description": "Parse a well-formed single key config.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000200707070707070707070707070707070707070707070707070707070707070707000400010002"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  },
+  {
+    "id": "marshal-config",
+    "description": "Marshal a config and compare bytes.",
+    "category": "config",
+    "operation": "marshal_config",
+    "inputs": {
+      "publicKey": "0707070707070707070707070707070707070707070707070707070707070707",
+      "keyId": 0
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "0000200707070707070707070707070707070707070707070707070707070707070707000400010002"
+    }
+  },
+  {
+    "id": "parse-config-multiple-takes-first",
+    "description": "Two configs concatenated; the first public key wins.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "00002007070707070707070707070707070707070707070707070707070707070707070004000100020000200808080808080808080808080808080808080808080808080808080808080808000400010002"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    }
+  },
+  {
+    "id": "parse-config-truncated-pubkey",
+    "description": "Public key cut to 16 bytes.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "00002007070707070707070707070707070707"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    }
+  },
+  {
+    "id": "parse-config-no-suites",
+    "description": "Cipher suites length is zero.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "00002007070707070707070707070707070707070707070707070707070707070707070000"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    }
+  },
+  {
+    "id": "parse-config-suites-len-not-multiple-of-4",
+    "description": "Cipher suites length is 3.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "00002007070707070707070707070707070707070707070707070707070707070707070003000100"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    }
+  },
+  {
+    "id": "parse-config-unsupported-kem",
+    "description": "KEM id is P-256, not X25519.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000100707070707070707070707070707070707070707070707070707070707070707000400010002"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNSUPPORTED_SUITE"
+    }
+  },
+  {
+    "id": "parse-config-unsupported-aead",
+    "description": "AEAD id is ChaCha20-Poly1305, not AES-256-GCM.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000200707070707070707070707070707070707070707070707070707070707070707000400010003"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNSUPPORTED_SUITE"
+    }
+  }
+]

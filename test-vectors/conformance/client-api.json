@@ -1,0 +1,81 @@
+[
+  {
+    "id": "discover-bad-content-type",
+    "description": "Discovery rejects a key config served under the wrong content type.",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "bad_ct"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    }
+  },
+  {
+    "id": "discover-non-200",
+    "description": "Discovery rejects a non-200 key-config response.",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "non200"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    }
+  },
+  {
+    "id": "harden-reserved-header",
+    "description": "Client rejects a caller setting a reserved protocol header.",
+    "category": "client-api",
+    "operation": "reject_reserved_header",
+    "inputs": {},
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  },
+  {
+    "id": "harden-cross-origin",
+    "description": "Client rejects a request to a different origin.",
+    "category": "client-api",
+    "operation": "reject_cross_origin",
+    "inputs": {},
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  },
+  {
+    "id": "harden-url-credentials",
+    "description": "Client rejects credentials embedded in the URL.",
+    "category": "client-api",
+    "operation": "reject_url_credentials",
+    "inputs": {},
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  }
+]

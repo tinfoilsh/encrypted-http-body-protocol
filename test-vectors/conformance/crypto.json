@@ -1,0 +1,277 @@
+[
+  {
+    "id": "derive-keys-vector",
+    "description": "Derive response key material from the shared vector.",
+    "category": "crypto",
+    "operation": "derive_keys",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "40ec528847cd4e928449f2ed1a70a7d1e8ee317d5e900424fc1dd5b0475b97f7f8b0ce9466f27aa6243c65f9"
+    }
+  },
+  {
+    "id": "derive-keys-bad-secret-length",
+    "description": "Exported secret is not 32 bytes.",
+    "category": "crypto",
+    "operation": "derive_keys",
+    "inputs": {
+      "exportedSecret": "00000000000000000000000000000000",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  },
+  {
+    "id": "decrypt-response-vector",
+    "description": "Decrypt the single-frame response from the shared vector.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000002647e74d9a561b60ff42ac7ffbb4caf6b6d5ad0bb7621e41840d2ab7de7208ff7a59d0a2a482cc"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "68656c6c6f2066726f6d207465737420766563746f72"
+    }
+  },
+  {
+    "id": "decrypt-response-streaming-fragmented",
+    "description": "Same body fed in 3-byte fragments across the frame boundary.",
+    "category": "crypto",
+    "operation": "decrypt_response_streaming",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000002647e74d9a561b60ff42ac7ffbb4caf6b6d5ad0bb7621e41840d2ab7de7208ff7a59d0a2a482cc"
+    },
+    "chunking": [
+      3,
+      6,
+      20
+    ],
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "68656c6c6f2066726f6d207465737420766563746f72"
+    }
+  },
+  {
+    "id": "decrypt-response-tampered-tag",
+    "description": "Final ciphertext byte flipped; AEAD auth must fail closed.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000002647e74d9a561b60ff42ac7ffbb4caf6b6d5ad0bb7621e41840d2ab7de7208ff7a59d0a2a482cd"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "AEAD_DECRYPT_FAILED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "decrypt-response-truncated-frame",
+    "description": "Frame ciphertext one byte short of its length prefix.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000002647e74d9a561b60ff42ac7ffbb4caf6b6d5ad0bb7621e41840d2ab7de7208ff7a59d0a2a482"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "decrypt-response-oversized-chunk",
+    "description": "Length prefix 0xffffffff exceeds the 64 MiB cap.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "ffffffff00000000000000000000000000000000"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "CHUNK_TOO_LARGE",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "decrypt-response-multiframe",
+    "description": "Three valid frames; sequence advances across frames.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000001340ec44d12c444bc9dd4c9065bd70601249f60900000013d45408abbff98ad579cf340d35c575d02107a60000001525273c814b6670b2645cd60de697580e3a02597bb1"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "6f6e6574776f7468726565"
+    }
+  },
+  {
+    "id": "decrypt-response-multiframe-streaming",
+    "description": "Three frames fed in fragments that cross frame boundaries.",
+    "category": "crypto",
+    "operation": "decrypt_response_streaming",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000001340ec44d12c444bc9dd4c9065bd70601249f60900000013d45408abbff98ad579cf340d35c575d02107a60000001525273c814b6670b2645cd60de697580e3a02597bb1"
+    },
+    "chunking": [
+      10,
+      30,
+      50
+    ],
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "6f6e6574776f7468726565"
+    }
+  },
+  {
+    "id": "decrypt-response-partial-then-fail",
+    "description": "Frame 0 authenticates and is emitted; frame 1's tag is bad.",
+    "category": "crypto",
+    "operation": "decrypt_response_streaming",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "0000001549eb53854d723fe4c4924b02b86aee7221e019331200000016d34604d538661d5148b5095a3917e62b6c62a8391b32"
+    },
+    "chunking": [
+      25
+    ],
+    "expect": {
+      "outcome": "error",
+      "error_code": "AEAD_DECRYPT_FAILED",
+      "plaintext_emitted_before_error": true,
+      "bytes_emitted_before_error": 5
+    }
+  },
+  {
+    "id": "decrypt-response-zero-length-frame",
+    "description": "A zero-length frame between two frames is ignored; sequence does not advance.",
+    "category": "crypto",
+    "operation": "decrypt_response",
+    "inputs": {
+      "exportedSecret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "requestEnc": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "responseNonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "encryptedResponse": "000000164de747994b5e42a3c41f9291aeb038109dc559e7941f0000000000000015c14513df240e6ffecea81fb7716b56f480908b890d"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "6265666f72656166746572"
+    }
+  },
+  {
+    "id": "compute-nonce-seq-1",
+    "description": "Base of zeros XOR sequence 1.",
+    "category": "crypto",
+    "operation": "compute_nonce",
+    "inputs": {
+      "nonceBase": "000000000000000000000000",
+      "seqHex": "0000000000000001"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "000000000000000000000001"
+    }
+  },
+  {
+    "id": "compute-nonce-seq-large",
+    "description": "Sequence above 2^32 to expose 32-bit-only clients.",
+    "category": "crypto",
+    "operation": "compute_nonce",
+    "inputs": {
+      "nonceBase": "000000000000000000000000",
+      "seqHex": "0102030405060708"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "000000000102030405060708"
+    }
+  },
+  {
+    "id": "token-roundtrip-vector",
+    "description": "Decode the shared session recovery token.",
+    "category": "crypto",
+    "operation": "token_roundtrip",
+    "inputs": {
+      "json": "{\"exportedSecret\": \"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2\", \"requestEnc\": \"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\"}"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b21234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+    }
+  },
+  {
+    "id": "token-bad-hex",
+    "description": "Token field contains non-hex characters.",
+    "category": "crypto",
+    "operation": "token_roundtrip",
+    "inputs": {
+      "json": "{\"exportedSecret\": \"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\", \"requestEnc\": \"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\"}"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_TOKEN"
+    }
+  },
+  {
+    "id": "token-missing-field",
+    "description": "Token is missing requestEnc.",
+    "category": "crypto",
+    "operation": "token_roundtrip",
+    "inputs": {
+      "json": "{\"exportedSecret\": \"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2\"}"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_TOKEN"
+    }
+  },
+  {
+    "id": "token-wrong-length",
+    "description": "exportedSecret decodes to 16 bytes, not 32.",
+    "category": "crypto",
+    "operation": "token_roundtrip",
+    "inputs": {
+      "json": "{\"exportedSecret\": \"00000000000000000000000000000000\", \"requestEnc\": \"1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef\"}"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_TOKEN"
+    }
+  }
+]
