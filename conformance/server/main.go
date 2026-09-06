@@ -246,6 +246,12 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			writeEncrypted(w, "", framed, http.StatusOK)
 		case "invalid_nonce_len":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 16)), framed, http.StatusOK)
+		case "invalid_nonce_hex":
+			writeEncrypted(w, strings.Repeat("z", 64), framed, http.StatusOK)
+		case "invalid_nonce_odd_hex":
+			writeEncrypted(w, strings.Repeat("0", 63), framed, http.StatusOK)
+		case "invalid_nonce_too_long":
+			writeEncrypted(w, hex.EncodeToString(make([]byte, 33)), framed, http.StatusOK)
 		case "duplicate_nonce":
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
@@ -257,6 +263,24 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			bad := append([]byte(nil), framed...)
 			bad[len(bad)-1] ^= 0x01
 			writeEncrypted(w, nonce, bad, http.StatusOK)
+		case "wrong_nonce":
+			badNonce, _ := hex.DecodeString(nonce)
+			badNonce[0] ^= 1
+			writeEncrypted(w, hex.EncodeToString(badNonce), framed, http.StatusOK)
+		case "partial_prefix_1":
+			writeEncrypted(w, nonce, []byte{0}, http.StatusOK)
+		case "partial_prefix_2":
+			writeEncrypted(w, nonce, []byte{0, 0}, http.StatusOK)
+		case "partial_prefix_3":
+			writeEncrypted(w, nonce, []byte{0, 0, 0}, http.StatusOK)
+		case "ciphertext_shorter_than_tag":
+			short := append([]byte{0, 0, 0, 15}, make([]byte, 15)...)
+			writeEncrypted(w, nonce, short, http.StatusOK)
+		case "zero_frame_flood":
+			flooded := append(bytes.Repeat([]byte{0}, 4*4096), framed...)
+			writeEncrypted(w, nonce, flooded, http.StatusOK)
+		case "encrypted_error_500":
+			writeEncrypted(w, nonce, framed, http.StatusInternalServerError)
 		case "oversized_chunk":
 			oversized := append([]byte{0xff, 0xff, 0xff, 0xff}, make([]byte, 16)...)
 			writeEncrypted(w, nonce, oversized, http.StatusOK)

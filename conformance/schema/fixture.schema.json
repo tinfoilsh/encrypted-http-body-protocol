@@ -26,9 +26,11 @@
         "crypto",
         "config",
         "e2e",
-        "client-api"
+        "shape",
+        "client-api",
+        "server"
       ],
-      "description": "crypto/config run in-process against the library API; e2e runs over HTTP against the oracle server."
+      "description": "crypto/config run in-process against client APIs; e2e runs over HTTP; shape is observational; server targets an implementation-specific public server API."
     },
     "operation": {
       "type": "string",
@@ -45,9 +47,11 @@
         "discover",
         "reject_reserved_header",
         "reject_cross_origin",
-        "reject_url_credentials"
+        "reject_url_credentials",
+        "decrypt_request",
+        "middleware_request"
       ],
-      "description": "The standard operation the adapter performs. `request` is the only e2e operation; the rest are in-process."
+      "description": "The standard operation the adapter performs. `request` is used for e2e/shape; crypto/config/server operations run in-process."
     },
     "inputs": {
       "type": "object",
@@ -63,7 +67,7 @@
       }
     },
     "server_scenario": {
-      "description": "e2e only. Named route/behavior on the oracle server, e.g. 'echo', 'drop_nonce_200', 'drop_nonce_502', 'invalid_nonce_len', 'duplicate_nonce', 'key_config_mismatch_422', 'truncate_final_frame', 'oversized_chunk', 'tamper_tag', 'plaintext_passthrough'.",
+      "description": "e2e only. Named deterministic behavior on the oracle server, including malformed nonce, framing, authentication, and pass-through scenarios.",
       "type": "string"
     },
     "request": {
@@ -108,6 +112,23 @@
         "skip_reason": {
           "type": "string"
         }
+      }
+    },
+    "runners": {
+      "description": "Optional applicability list for implementation-specific surfaces, such as the Go-only server API. Non-listed runners are not counted as skips.",
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_skips": {
+      "description": "Exact runner-to-reason map for genuinely unavailable public APIs. Any skipped result not declared here is a divergence.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
       }
     },
     "expect": {
@@ -192,6 +213,21 @@
         "required": [
           "server_scenario",
           "request"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "category": {
+            "const": "server"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "inputs",
+          "runners"
         ]
       }
     }

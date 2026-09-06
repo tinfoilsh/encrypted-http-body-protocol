@@ -34,18 +34,23 @@ python3 conformance/harness/run.py \
 The harness builds each adapter, starts the oracle for e2e/shape fixtures, and
 exits non-zero if any runner diverges from the spec expectation or the runners
 disagree. Every divergence is written to `report.md` and `report.json`. A genuine
-`skipped` (operation a library does not implement) is the only exemption. CI runs
+`skipped` is exempt only when the fixture authorizes that runner and exact
+reason. CI runs
 the full matrix on macOS and uploads the report (see
 `.github/workflows/conformance.yml`).
 
 ## Scope
 
-The suite splits the protocol in two.
+The suite splits the protocol into three surfaces.
 
 - **Crypto.** Key derivation, response decryption, config parse/marshal, token
   JSON. Deterministic. Run in-process against golden vectors. No HTTP.
 - **Transport.** Headers, pass-through, 422 recovery, streaming, truncation,
-  oversized chunks. Run end-to-end against the oracle server.
+  replay/reordering, malformed nonces, undersized/oversized chunks. Run
+  end-to-end against the oracle server.
+- **Server boundary.** Duplicate encapsulation headers, hostile request frame
+  lengths, empty-frame bursts, and trailing-frame authentication. Run through
+  the Go server's public API in an isolated adapter process.
 
 ## Layout
 
@@ -92,6 +97,13 @@ Normative. A change that weakens one MUST be rejected.
    report (`report.md` / `report.json`). Known divergences are not suppressed or
    allow-listed; only a genuine `skipped` (operation unsupported by a library)
    is exempt.
+9. Every requested adapter MUST be present. Adapter timeout, crash, malformed
+   JSON, duplicate/missing result, wrong fixture id, and invalid result schema
+   MUST fail closed as `ADAPTER_CRASH`; the harness may not silently reduce the
+   matrix.
+10. A runner may return `skipped` only when the fixture's `allowed_skips` map
+    names that runner and exact reason. Implementation-specific surfaces use
+    `runners`; non-applicable runners are not treated as passes or skips.
 
 ## Known blind spots
 
@@ -100,3 +112,7 @@ Normative. A change that weakens one MUST be rejected.
 - Browsers coalesce duplicate headers. The duplicate-nonce fixture is `skipped` in
   browser mode and covered by native adapters.
 - Only Go has a server. The suite tests five clients against one reference server.
+- Because framing has no authenticated end marker, truncation exactly on a
+  valid frame boundary is indistinguishable from a complete shorter message.
+  This protocol-level limitation is documented in `SECURITY-AUDIT.md` rather
+  than disguised as a test a conforming implementation could pass.

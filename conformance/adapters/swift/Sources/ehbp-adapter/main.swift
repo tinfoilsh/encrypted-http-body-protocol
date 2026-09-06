@@ -10,6 +10,25 @@ import EHBP
 
 let headerSubset = ["ehbp-response-nonce", "content-length", "transfer-encoding", "content-type"]
 
+// A local URLProtocol sink makes origin/header probes deterministic and ensures
+// an unguarded request never reaches the network.
+final class GuardProbeURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 502, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "text/plain"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("probe".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 let inputData = FileHandle.standardInput.readDataToEndOfFile()
 let fx = (try? JSONSerialization.jsonObject(with: inputData)) as? [String: Any] ?? [:]
 let op = fx["operation"] as? String ?? ""
@@ -46,14 +65,40 @@ func run() async throws {
     case "parse_config", "marshal_config":
         res["outcome"] = "skipped"
         res["skip_reason"] = "swift-client-has-no-public-key-accessor-or-config-marshal"
-    case "discover", "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
+    case "discover":
         res["outcome"] = "skipped"
         res["skip_reason"] = "swift-client-has-no-discovery-or-request-guards"
+    case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
+        try await hardeningOp(op)
     case "request":
         try await requestOp()
     default:
         throw EHBPError.invalidInput("unknown operation \(op)")
     }
+}
+
+func hardeningOp(_ operation: String) async throws {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [GuardProbeURLProtocol.self]
+    let session = URLSession(configuration: configuration)
+    let publicKey = Data(repeating: 7, count: 32)
+
+    var base = "http://configured.example"
+    var path = "/probe"
+    var headers = [String: String]()
+    if operation == "reject_cross_origin" {
+        // String concatenation turns this into
+        // http://configured.example@attacker.invalid/probe.
+        path = "@attacker.invalid/probe"
+    } else if operation == "reject_url_credentials" {
+        base = "http://user:pass@configured.example"
+    } else {
+        headers[EHBPProtocol.responseNonceHeader] = String(repeating: "0", count: 64)
+    }
+
+    let client = try EHBPClient(baseURL: base, publicKey: publicKey, session: session)
+    _ = try await client.request(
+        method: "POST", path: path, headers: headers, body: Data([1]))
 }
 
 func decryptOp(_ ins: [String: Any]) throws {

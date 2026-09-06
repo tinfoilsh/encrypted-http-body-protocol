@@ -18,6 +18,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
+import re
+import socket
 import subprocess
 import sys
 import time
@@ -40,9 +43,46 @@ _HOST, _PORT = ORACLE_ADDR.split(":")
 ORACLE_BAD_CT_URL = f"http://{_HOST}:{int(_PORT) + 1}"
 ORACLE_NON200_URL = f"http://{_HOST}:{int(_PORT) + 2}"
 
+ADAPTER_TIMEOUT_SECONDS = 30
+BATCH_TIMEOUT_SECONDS = 180
+
+CANONICAL_ERROR_CODES = {
+    "INVALID_KEY_CONFIG", "UNSUPPORTED_SUITE",
+    "INVALID_ENCAPSULATED_KEY", "HPKE_SETUP_FAILED",
+    "MISSING_RESPONSE_NONCE", "INVALID_RESPONSE_NONCE",
+    "DUPLICATE_RESPONSE_NONCE", "KEY_CONFIG_MISMATCH",
+    "FRAMING_TRUNCATED", "CHUNK_TOO_LARGE", "AEAD_DECRYPT_FAILED",
+    "SEQUENCE_OVERFLOW", "INVALID_TOKEN", "INVALID_INPUT",
+}
+
+RESULT_FIELDS = {
+    "fixture_id", "outcome", "error_code", "status", "response_headers",
+    "body_hex", "passthrough", "plaintext_emitted_before_error",
+    "bytes_emitted_before_error", "skip_reason", "native_error", "runner",
+}
+
+FIXTURE_CATEGORIES = {"crypto", "config", "e2e", "shape", "client-api", "server"}
+FIXTURE_OPERATIONS = {
+    "derive_keys", "decrypt_response", "decrypt_response_streaming",
+    "compute_nonce", "token_roundtrip", "token_parse", "parse_config",
+    "marshal_config", "request", "discover", "reject_reserved_header",
+    "reject_cross_origin", "reject_url_credentials", "decrypt_request",
+    "middleware_request",
+}
+
+FIXTURE_FIELDS = {
+    "id", "description", "category", "operation", "inputs", "chunking",
+    "server_scenario", "request", "browser", "runners", "allowed_skips",
+    "expect",
+}
+EXPECT_FIELDS = {
+    "outcome", "error_code", "status", "body_hex", "passthrough",
+    "plaintext_emitted_before_error", "bytes_emitted_before_error",
+    "response_headers_absent", "response_headers_present",
+}
+
 
 def adapter_env():
-    import os
     return {**os.environ, "ORACLE_URL": ORACLE_URL,
             "ORACLE_BAD_CT_URL": ORACLE_BAD_CT_URL,
             "ORACLE_NON200_URL": ORACLE_NON200_URL}
@@ -98,51 +138,191 @@ def build_adapters(names):
     return adapters
 
 
-def run_batch(argv, fixtures):
+def adapter_failure(fixture_id, message):
+    return {
+        "fixture_id": fixture_id, "outcome": "error",
+        "error_code": "ADAPTER_CRASH", "native_error": message[:500],
+        "status": None, "body_hex": None, "passthrough": False,
+        "plaintext_emitted_before_error": False,
+        "bytes_emitted_before_error": 0,
+    }
+
+
+def validate_result(result, fixture_id):
+    """Return None for a schema-shaped adapter result, otherwise a reason."""
+    if not isinstance(result, dict):
+        return "result is not a JSON object"
+    unknown = set(result) - RESULT_FIELDS
+    if unknown:
+        return f"result has unknown fields: {', '.join(sorted(unknown))}"
+    if result.get("fixture_id") != fixture_id:
+        return f"fixture_id {result.get('fixture_id')!r} != {fixture_id!r}"
+    outcome = result.get("outcome")
+    if outcome not in {"ok", "error", "skipped"}:
+        return f"invalid outcome {outcome!r}"
+    code = result.get("error_code")
+    if outcome == "error" and code not in CANONICAL_ERROR_CODES:
+        return f"error result has invalid error_code {code!r}"
+    if outcome != "error" and code is not None:
+        return f"{outcome} result must not carry error_code {code!r}"
+    if outcome == "skipped" and (not isinstance(result.get("skip_reason"), str)
+                                 or not result["skip_reason"]):
+        return "skipped result lacks skip_reason"
+    body_hex = result.get("body_hex")
+    if body_hex is not None and (not isinstance(body_hex, str)
+                                 or re.fullmatch(r"[0-9a-f]*", body_hex) is None):
+        return "body_hex is not lowercase hex"
+    status = result.get("status")
+    if status is not None and (type(status) is not int or not 100 <= status <= 599):
+        return f"invalid HTTP status {status!r}"
+    for field in ("passthrough", "plaintext_emitted_before_error"):
+        if field in result and type(result[field]) is not bool:
+            return f"{field} is not boolean"
+    emitted = result.get("bytes_emitted_before_error")
+    if emitted is not None and (type(emitted) is not int or emitted < 0):
+        return "bytes_emitted_before_error is not a non-negative integer"
+    headers = result.get("response_headers")
+    if headers is not None and (not isinstance(headers, dict)
+                                or any(not isinstance(k, str) or not isinstance(v, str)
+                                       for k, v in headers.items())):
+        return "response_headers is not a string map"
+    return None
+
+
+def run_batch(argv, fixtures, timeout=BATCH_TIMEOUT_SECONDS):
     """Run a batch adapter once over all fixtures; return {fixture_id: result}."""
-    import os
     payload = "\n".join(json.dumps(fx) for fx in fixtures)
-    proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
-                          env=adapter_env())
+    fixture_ids = [fx["id"] for fx in fixtures]
+    try:
+        proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
+                              env=adapter_env(), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {fid: adapter_failure(fid, f"batch adapter timed out after {timeout}s")
+                for fid in fixture_ids}
+    if proc.returncode != 0:
+        message = f"batch adapter exited {proc.returncode}: {(proc.stderr or '').strip()}"
+        return {fid: adapter_failure(fid, message) for fid in fixture_ids}
     results = {}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if line:
             try:
                 r = json.loads(line)
-                results[r["fixture_id"]] = r
-            except json.JSONDecodeError:
-                pass
-    if not results and proc.returncode != 0:
-        print(f"batch adapter crashed: {(proc.stderr or '').strip()[:500]}", file=sys.stderr)
+            except json.JSONDecodeError as err:
+                message = f"batch adapter emitted malformed JSON: {err}"
+                return {fid: adapter_failure(fid, message) for fid in fixture_ids}
+            fid = r.get("fixture_id") if isinstance(r, dict) else None
+            if fid not in fixture_ids:
+                message = f"batch adapter emitted unknown fixture_id {fid!r}"
+                return {expected: adapter_failure(expected, message) for expected in fixture_ids}
+            if fid in results:
+                message = f"batch adapter emitted duplicate result for {fid}"
+                return {expected: adapter_failure(expected, message) for expected in fixture_ids}
+            invalid = validate_result(r, fid)
+            results[fid] = adapter_failure(fid, invalid) if invalid else r
+    for fid in fixture_ids:
+        results.setdefault(fid, adapter_failure(fid, "batch adapter emitted no result"))
     return results
 
 
 def load_fixtures():
     fixtures = []
+    ids = set()
     for f in sorted(FIXTURE_DIR.glob("*.json")):
-        fixtures.extend(json.loads(f.read_text()))
+        loaded = json.loads(f.read_text())
+        if not isinstance(loaded, list):
+            raise ValueError(f"{f}: fixture file must contain a JSON array")
+        for index, fixture in enumerate(loaded):
+            validate_fixture(fixture, f, index)
+            if fixture["id"] in ids:
+                raise ValueError(f"duplicate fixture id: {fixture['id']}")
+            ids.add(fixture["id"])
+            fixtures.append(fixture)
     return fixtures
+
+
+def validate_fixture(fixture, source="fixture", index=0):
+    """Minimal dependency-free validation of the normative fixture schema."""
+    where = f"{source}[{index}]"
+    if not isinstance(fixture, dict):
+        raise ValueError(f"{where}: fixture must be an object")
+    unknown = set(fixture) - FIXTURE_FIELDS
+    if unknown:
+        raise ValueError(f"{where}: unknown fields: {', '.join(sorted(unknown))}")
+    for field in ("id", "category", "operation", "expect"):
+        if field not in fixture:
+            raise ValueError(f"{where}: missing {field}")
+    if not isinstance(fixture["id"], str) or not re.fullmatch(r"[a-z0-9-]+", fixture["id"]):
+        raise ValueError(f"{where}: invalid fixture id")
+    if fixture["category"] not in FIXTURE_CATEGORIES:
+        raise ValueError(f"{where}: invalid category {fixture['category']!r}")
+    if fixture["operation"] not in FIXTURE_OPERATIONS:
+        raise ValueError(f"{where}: invalid operation {fixture['operation']!r}")
+    expect = fixture["expect"]
+    if not isinstance(expect, dict) or expect.get("outcome") not in {"ok", "error"}:
+        raise ValueError(f"{where}: invalid expectation")
+    unknown_expect = set(expect) - EXPECT_FIELDS
+    if unknown_expect:
+        raise ValueError(f"{where}: unknown expectation fields: {', '.join(sorted(unknown_expect))}")
+    if expect["outcome"] == "error" and expect.get("error_code") not in CANONICAL_ERROR_CODES:
+        raise ValueError(f"{where}: error expectation needs a canonical error_code")
+    if expect["outcome"] == "ok" and expect.get("error_code") is not None:
+        raise ValueError(f"{where}: ok expectation cannot carry an error code")
+    body_hex = expect.get("body_hex")
+    if body_hex is not None and (not isinstance(body_hex, str)
+                                 or re.fullmatch(r"[0-9a-f]*", body_hex) is None):
+        raise ValueError(f"{where}: expected body_hex is not lowercase hex")
+    if "inputs" in fixture and not isinstance(fixture["inputs"], dict):
+        raise ValueError(f"{where}: inputs must be an object")
+    if "chunking" in fixture and (not isinstance(fixture["chunking"], list)
+                                  or any(type(v) is not int or v < 1
+                                         for v in fixture["chunking"])):
+        raise ValueError(f"{where}: chunking must contain positive integers")
+    runners = fixture.get("runners")
+    if runners is not None and (not isinstance(runners, list) or not runners
+                                or any(not isinstance(v, str) for v in runners)
+                                or len(set(runners)) != len(runners)):
+        raise ValueError(f"{where}: runners must be a non-empty unique string list")
+    skips = fixture.get("allowed_skips", {})
+    if not isinstance(skips, dict) or any(not isinstance(k, str) or not isinstance(v, str) or not v
+                                          for k, v in skips.items()):
+        raise ValueError(f"{where}: allowed_skips must map runners to non-empty reasons")
+    if fixture["category"] == "e2e" and not all(k in fixture for k in ("server_scenario", "request")):
+        raise ValueError(f"{where}: e2e fixture lacks server_scenario/request")
+
+
+def configure_oracle_addresses():
+    """Choose three consecutive loopback ports without killing other processes."""
+    global ORACLE_ADDR, ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL
+    for _ in range(100):
+        sockets = []
+        try:
+            first = socket.socket()
+            first.bind(("127.0.0.1", 0))
+            sockets.append(first)
+            port = first.getsockname()[1]
+            if port > 65533:
+                continue
+            for candidate in (port + 1, port + 2):
+                probe = socket.socket()
+                probe.bind(("127.0.0.1", candidate))
+                sockets.append(probe)
+            ORACLE_ADDR = f"127.0.0.1:{port}"
+            ORACLE_URL = f"http://{ORACLE_ADDR}"
+            ORACLE_BAD_CT_URL = f"http://127.0.0.1:{port + 1}"
+            ORACLE_NON200_URL = f"http://127.0.0.1:{port + 2}"
+            return
+        except OSError:
+            pass
+        finally:
+            for bound in sockets:
+                bound.close()
+    raise RuntimeError("could not reserve three consecutive loopback ports")
 
 
 def start_oracle():
     out = ROOT / "conformance" / ".bin" / "oracle"
     subprocess.run(["go", "build", "-o", str(out), "./conformance/server"], cwd=ROOT, check=True)
-    # Free the main and both auxiliary ports from any leaked server so a stale
-    # binary cannot shadow this run.
-    base_port = int(ORACLE_ADDR.split(":")[1])
-    freed = False
-    for port in (base_port, base_port + 1, base_port + 2):
-        try:
-            pids = subprocess.run(["lsof", "-ti", f"tcp:{port}"],
-                                  capture_output=True, text=True).stdout.split()
-            for pid in pids:
-                subprocess.run(["kill", "-9", pid], check=False)
-                freed = True
-        except FileNotFoundError:
-            pass
-    if freed:
-        time.sleep(0.3)
     proc = subprocess.Popen([str(out), "-l", ORACLE_ADDR], cwd=ROOT,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(50):
@@ -155,14 +335,22 @@ def start_oracle():
     raise RuntimeError("oracle server did not become ready")
 
 
-def run_adapter(argv, fixture):
-    import os
-    proc = subprocess.run(argv, input=json.dumps(fixture), capture_output=True,
-                          text=True, env=adapter_env())
+def run_adapter(argv, fixture, timeout=ADAPTER_TIMEOUT_SECONDS):
+    try:
+        proc = subprocess.run(argv, input=json.dumps(fixture), capture_output=True,
+                              text=True, env=adapter_env(), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return adapter_failure(fixture["id"], f"adapter timed out after {timeout}s")
     if proc.returncode != 0 or not proc.stdout.strip():
-        return {"outcome": "error", "error_code": "ADAPTER_CRASH",
-                "native_error": (proc.stderr or "no output").strip()[:500]}
-    return json.loads(proc.stdout)
+        return adapter_failure(
+            fixture["id"],
+            f"adapter exited {proc.returncode}: {(proc.stderr or 'no output').strip()}")
+    try:
+        result = json.loads(proc.stdout)
+    except json.JSONDecodeError as err:
+        return adapter_failure(fixture["id"], f"adapter emitted malformed JSON: {err}")
+    invalid = validate_result(result, fixture["id"])
+    return adapter_failure(fixture["id"], invalid) if invalid else result
 
 
 def check_expect(result, expect):
@@ -192,6 +380,12 @@ def check_expect(result, expect):
                 "bytes_emitted_before_error", 0):
             fails.append("bytes_emitted_before_error mismatch")
     return fails
+
+
+def is_allowed_skip(fixture, runner, result):
+    reason = fixture.get("allowed_skips", {}).get(runner)
+    return bool(reason and result.get("outcome") == "skipped"
+                and result.get("skip_reason") == reason)
 
 
 # On an error outcome, only these fields are meaningful. Pre-auth status, body,
@@ -277,20 +471,24 @@ def main():
     adapters = build_adapters(names)
     missing = [n for n in names if n not in adapters]
     if missing:
-        print(f"adapters not available yet: {', '.join(missing)}", file=sys.stderr)
+        print(f"requested adapters unavailable: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(2)
 
     fixtures = load_fixtures()
     needs_oracle = any(fx["category"] in ("e2e", "shape", "client-api") for fx in fixtures)
+    if needs_oracle:
+        configure_oracle_addresses()
     oracle = start_oracle() if needs_oracle else None
 
     batch_names = [n for n in adapters if n in BATCH_ADAPTERS]
     per_fixture = {n: a for n, a in adapters.items() if n not in BATCH_ADAPTERS}
     batch_results = {}
     if batch_names:
-        runnable = [fx for fx in fixtures
-                    if fx["category"] in ("crypto", "config", "e2e")
-                    and fx.get("browser", {}).get("runnable", True)]
         for n in batch_names:
+            runnable = [fx for fx in fixtures
+                        if fx["category"] in ("crypto", "config", "e2e")
+                        and (not fx.get("runners") or n in fx["runners"])
+                        and fx.get("browser", {}).get("runnable", True)]
             batch_results[n] = run_batch(adapters[n], runnable)
 
     total = cells = cross_fails = skipped = 0
@@ -300,24 +498,31 @@ def main():
             if fx["category"] == "shape":
                 observe(fx, per_fixture)  # batch adapters do not produce observations
                 continue
+            if fx.get("runners") and not any(name in fx["runners"] for name in adapters):
+                print(f"[n/a ] {fx['id']:<38} no selected applicable runner")
+                continue
             total += 1
             results = {}
             for name, argv in per_fixture.items():
+                if fx.get("runners") and name not in fx["runners"]:
+                    continue
                 results[name] = run_adapter(argv, fx)
             for name in batch_names:
+                if fx.get("runners") and name not in fx["runners"]:
+                    continue
                 if not fx.get("browser", {}).get("runnable", True):
                     skipped += 1
                     continue
-                results[name] = batch_results.get(name, {}).get(fx["id"], {
-                    "outcome": "error", "error_code": "ADAPTER_CRASH",
-                    "native_error": "no batch result"})
+                results[name] = batch_results.get(name, {}).get(
+                    fx["id"], adapter_failure(fx["id"], "no batch result"))
 
             # A skipped result (operation unsupported by that library) is counted
             # and excluded from comparison; never folded into pass or divergence.
             for name in list(results):
                 if results[name].get("outcome") == "skipped":
-                    skipped += 1
-                    del results[name]
+                    if is_allowed_skip(fx, name, results[name]):
+                        skipped += 1
+                        del results[name]
 
             # Strict: every divergence from the spec expectation fails and is
             # reported. Only genuine skips (operation unsupported by a library) skip.
@@ -352,6 +557,11 @@ def main():
     finally:
         if oracle:
             oracle.terminate()
+            try:
+                oracle.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                oracle.kill()
+                oracle.wait(timeout=3)
 
     write_report(diverging, total, cells, cross_fails, skipped)
     print(f"\n{total} fixtures | divergent cells {cells} | cross-diff fixtures {cross_fails} | "

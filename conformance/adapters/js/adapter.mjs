@@ -77,12 +77,27 @@ async function run(fx, res) {
     case 'reject_reserved_header':
     case 'reject_cross_origin':
     case 'reject_url_credentials':
-      res.outcome = 'skipped';
-      res.skip_reason = 'js-transport-has-no-request-guards';
-      return;
+      return hardening(fx.operation);
     default:
       throw new Error(`unknown operation ${fx.operation}`);
   }
+}
+
+// The alternate origin is another loopback oracle port, so this remains
+// network-safe even if host-rewrite behavior changes.
+async function hardening(op) {
+  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const transport = await createTransport(base);
+  let target = `${base}/s/echo`;
+  const init = { method: 'POST', body: 'x', headers: {} };
+  if (op === 'reject_cross_origin') target = `${process.env.ORACLE_BAD_CT_URL}/s/echo`;
+  if (op === 'reject_url_credentials') {
+    target = base.replace('://', '://user:pass@') + '/s/echo';
+  }
+  if (op === 'reject_reserved_header') {
+    init.headers[RESPONSE_NONCE_HEADER] = '00'.repeat(32);
+  }
+  await transport.request(target, init);
 }
 
 function discoverTarget(ins) {
@@ -128,6 +143,7 @@ function mapError(op, err) {
   if (err instanceof KeyConfigMismatchError) return 'KEY_CONFIG_MISMATCH';
   if (err instanceof DecryptionError) return 'AEAD_DECRYPT_FAILED';
   const msg = (err?.message || String(err)).toLowerCase();
+  if (op.startsWith('reject_')) return 'INVALID_INPUT';
   if (err instanceof ProtocolError) {
     if (msg.includes('missing') && msg.includes('nonce')) return 'MISSING_RESPONSE_NONCE';
     if (msg.includes('nonce')) return 'INVALID_RESPONSE_NONCE';

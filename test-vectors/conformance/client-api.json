@@ -14,6 +14,9 @@
     "expect": {
       "outcome": "error",
       "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
     }
   },
   {
@@ -31,6 +34,9 @@
     "expect": {
       "outcome": "error",
       "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
     }
   },
   {

@@ -76,6 +76,57 @@
     }
   },
   {
+    "id": "e2e-invalid-nonce-hex",
+    "description": "Nonce has the correct encoded length but contains non-hex characters.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "invalid_nonce_hex",
+    "request": {
+      "method": "POST",
+      "path": "/s/invalid_nonce_hex",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    }
+  },
+  {
+    "id": "e2e-invalid-nonce-odd-hex",
+    "description": "Nonce contains an odd number of hex characters.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "invalid_nonce_odd_hex",
+    "request": {
+      "method": "POST",
+      "path": "/s/invalid_nonce_odd_hex",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    }
+  },
+  {
+    "id": "e2e-invalid-nonce-too-long",
+    "description": "Nonce is valid hex but 33 bytes rather than 32.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "invalid_nonce_too_long",
+    "request": {
+      "method": "POST",
+      "path": "/s/invalid_nonce_too_long",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    }
+  },
+  {
     "id": "e2e-duplicate-nonce",
     "description": "Two nonce headers MUST fail closed.",
     "category": "e2e",
@@ -116,6 +167,82 @@
     }
   },
   {
+    "id": "e2e-wrong-valid-length-nonce",
+    "description": "A valid-length nonce other than the sealing nonce must fail authentication.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "wrong_nonce",
+    "request": {
+      "method": "POST",
+      "path": "/s/wrong_nonce",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "AEAD_DECRYPT_FAILED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-partial-length-prefix-1",
+    "description": "Response ends after one byte of a frame-length prefix.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "partial_prefix_1",
+    "request": {
+      "method": "POST",
+      "path": "/s/partial_prefix_1",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-partial-length-prefix-2",
+    "description": "Response ends after two bytes of a frame-length prefix.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "partial_prefix_2",
+    "request": {
+      "method": "POST",
+      "path": "/s/partial_prefix_2",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-partial-length-prefix-3",
+    "description": "Response ends after three bytes of a frame-length prefix.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "partial_prefix_3",
+    "request": {
+      "method": "POST",
+      "path": "/s/partial_prefix_3",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
     "id": "e2e-truncated-frame",
     "description": "Response ends mid-frame.",
     "category": "e2e",
@@ -132,6 +259,43 @@
       "error_code": "FRAMING_TRUNCATED",
       "plaintext_emitted_before_error": false,
       "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-ciphertext-shorter-than-tag",
+    "description": "A complete 15-byte frame is too short to contain an AES-GCM tag.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "ciphertext_shorter_than_tag",
+    "request": {
+      "method": "POST",
+      "path": "/s/ciphertext_shorter_than_tag",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "AEAD_DECRYPT_FAILED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-zero-frame-flood",
+    "description": "4096 legal empty frames must not hang or crash the response parser.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "zero_frame_flood",
+    "request": {
+      "method": "POST",
+      "path": "/s/zero_frame_flood",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "68656c6c6f"
     }
   },
   {
@@ -187,6 +351,24 @@
       "status": 502,
       "passthrough": true,
       "body_hex": "757073747265616d20756e617661696c61626c65"
+    }
+  },
+  {
+    "id": "e2e-encrypted-error-500",
+    "description": "A non-2xx response carrying a nonce is authenticated ciphertext and must decrypt.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "encrypted_error_500",
+    "request": {
+      "method": "POST",
+      "path": "/s/encrypted_error_500",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 500,
+      "body_hex": "68656c6c6f"
     }
   },
   {

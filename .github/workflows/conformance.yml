@@ -6,8 +6,8 @@ on:
 
 # The cross-language matrix must run on one machine so results can be compared in
 # a single process, and Swift needs macOS, so the whole suite runs on a macOS
-# runner. It fails on any new divergence or cross-diff; known divergences are
-# tracked in conformance/allowlist.json and any change to them also fails.
+# runner. It fails on every divergence or cross-diff; no known-failure allowlist
+# can conceal a security regression.
 jobs:
   conformance:
     runs-on: macos-14
@@ -50,6 +50,12 @@ jobs:
         run: |
           npm install
           npx playwright install chromium firefox
+
+      - name: Verify harness and generated security fixtures
+        run: |
+          python3 -m unittest discover -s conformance/harness -p 'test_*.py'
+          conformance/.venv/bin/python conformance/tools/gen_fixtures.py
+          git diff --exit-code -- test-vectors/conformance
 
       - name: Run conformance matrix
         run: |

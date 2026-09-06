@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the crypto and config conformance fixtures.
+"""Generate the deterministic conformance and security fixtures.
 
 Derived values (config bytes, concatenations, malformed variants) are computed
 here so the committed fixtures cannot drift from a typo. Run from anywhere:
@@ -7,8 +7,8 @@ here so the committed fixtures cannot drift from a typo. Run from anywhere:
     python3 conformance/tools/gen_fixtures.py
 
 It reads the three existing golden vectors under test-vectors/ and writes
-test-vectors/conformance/crypto.json and config.json. The written files are the
-source of truth the harness consumes; this script is the reproducible authoring aid.
+all JSON files under test-vectors/conformance. The written files are the source
+of truth the harness consumes; this script is the reproducible authoring aid.
 """
 
 import json
@@ -56,7 +56,10 @@ def main() -> None:
     def frame(seq, pt):
         return frame_chunk(encrypt_chunk(km, seq, pt))
 
-    mf = frame(0, b"one") + frame(1, b"two") + frame(2, b"three")   # 3 valid frames
+    mf0 = frame(0, b"one")
+    mf1 = frame(1, b"two")
+    mf2 = frame(2, b"three")
+    mf = mf0 + mf1 + mf2                                             # 3 valid frames
     mf_hex = mf.hex()
     f0 = frame(0, b"first")
     f1 = bytearray(frame(1, b"second"))
@@ -67,6 +70,23 @@ def main() -> None:
     # A zero-length frame (bare 0x00000000 prefix) must be ignored without
     # advancing the sequence number (SPEC 4.3).
     zero_frame_hex = (frame(0, b"before") + bytes(4) + frame(1, b"after")).hex()
+    zero_frame_flood_hex = (bytes(4 * 4096) + frame(0, b"after-flood")).hex()
+
+    # Security mutations deliberately preserve every input except the property
+    # named by the fixture. This keeps an authentication failure attributable to
+    # one cause rather than to malformed authoring data.
+    partial_prefixes = [bytes.fromhex("00" * n).hex() for n in (1, 2, 3)]
+    authenticated_then_partial = frame(0, b"authenticated") + b"\x00\x00\x00"
+    short_ciphertext_1 = (1).to_bytes(4, "big") + b"\x00"
+    short_ciphertext_15 = (15).to_bytes(4, "big") + bytes(15)
+    duplicate_frame = mf0 + mf0  # second copy is replayed under sequence 1
+    reordered_frames = mf1 + mf0  # first ciphertext was sealed for sequence 1
+    wrong_nonce = bytearray.fromhex(resp["responseNonce"])
+    wrong_nonce[0] ^= 0x01
+    wrong_secret = bytearray.fromhex(resp["exportedSecret"])
+    wrong_secret[0] ^= 0x01
+    wrong_request_enc = bytearray.fromhex(resp["requestEnc"])
+    wrong_request_enc[0] ^= 0x01
 
     valid_pubkey = "07" * 32
     token_json = json.dumps({"exportedSecret": token["exportedSecret"],
@@ -194,6 +214,114 @@ def main() -> None:
             "expect": {"outcome": "ok", "body_hex": b"beforeafter".hex()},
         },
         {
+            "id": "decrypt-response-zero-frame-flood",
+            "description": "4096 legal empty frames precede one authenticated frame; parser must not hang or crash.",
+            "category": "crypto", "operation": "decrypt_response_streaming",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": zero_frame_flood_hex},
+            "chunking": [1, 3, 4, 4096, 8192, 16384],
+            "expect": {"outcome": "ok", "body_hex": b"after-flood".hex()},
+        },
+        *[
+            {
+                "id": f"decrypt-response-partial-prefix-{n}",
+                "description": f"Entity body ends after {n} of 4 frame-length bytes.",
+                "category": "crypto", "operation": "decrypt_response_streaming",
+                "inputs": {"exportedSecret": resp["exportedSecret"],
+                           "requestEnc": resp["requestEnc"],
+                           "responseNonce": resp["responseNonce"],
+                           "encryptedResponse": partial_prefixes[n - 1]},
+                "chunking": [1],
+                "expect": {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
+                           "plaintext_emitted_before_error": False,
+                           "bytes_emitted_before_error": 0},
+            }
+            for n in (1, 2, 3)
+        ],
+        {
+            "id": "decrypt-response-authenticated-then-partial-prefix",
+            "description": "A valid frame is delivered before a trailing partial length prefix is detected.",
+            "category": "crypto", "operation": "decrypt_response_streaming",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": authenticated_then_partial.hex()},
+            "chunking": [len(authenticated_then_partial) - 3],
+            "expect": {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
+                       "plaintext_emitted_before_error": True,
+                       "bytes_emitted_before_error": len(b"authenticated")},
+        },
+        {
+            "id": "decrypt-response-ciphertext-shorter-than-tag-1",
+            "description": "A one-byte ciphertext cannot contain an AES-GCM tag.",
+            "category": "crypto", "operation": "decrypt_response",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": short_ciphertext_1.hex()},
+            "expect": {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+                       "plaintext_emitted_before_error": False,
+                       "bytes_emitted_before_error": 0},
+        },
+        {
+            "id": "decrypt-response-ciphertext-shorter-than-tag-15",
+            "description": "A 15-byte ciphertext is one byte shorter than an AES-GCM tag.",
+            "category": "crypto", "operation": "decrypt_response",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": short_ciphertext_15.hex()},
+            "expect": {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+                       "plaintext_emitted_before_error": False,
+                       "bytes_emitted_before_error": 0},
+        },
+        {
+            "id": "decrypt-response-reordered-frames",
+            "description": "Reordering valid frames changes their sequence nonces and must fail authentication.",
+            "category": "crypto", "operation": "decrypt_response",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": reordered_frames.hex()},
+            "expect": {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+                       "plaintext_emitted_before_error": False,
+                       "bytes_emitted_before_error": 0},
+        },
+        {
+            "id": "decrypt-response-replayed-frame",
+            "description": "Replaying frame 0 as frame 1 emits only the first authenticated plaintext, then fails.",
+            "category": "crypto", "operation": "decrypt_response_streaming",
+            "inputs": {"exportedSecret": resp["exportedSecret"],
+                       "requestEnc": resp["requestEnc"],
+                       "responseNonce": resp["responseNonce"],
+                       "encryptedResponse": duplicate_frame.hex()},
+            "chunking": [len(mf0)],
+            "expect": {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+                       "plaintext_emitted_before_error": True,
+                       "bytes_emitted_before_error": len(b"one")},
+        },
+        *[
+            {
+                "id": f"decrypt-response-wrong-{name}",
+                "description": description,
+                "category": "crypto", "operation": "decrypt_response",
+                "inputs": {"exportedSecret": secret.hex() if name == "exported-secret" else resp["exportedSecret"],
+                           "requestEnc": request_enc.hex() if name == "request-enc" else resp["requestEnc"],
+                           "responseNonce": nonce.hex() if name == "nonce" else resp["responseNonce"],
+                           "encryptedResponse": enc},
+                "expect": {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+                           "plaintext_emitted_before_error": False,
+                           "bytes_emitted_before_error": 0},
+            }
+            for name, description, secret, request_enc, nonce in [
+                ("exported-secret", "A one-bit change to the exported secret breaks response binding.", wrong_secret, wrong_request_enc, wrong_nonce),
+                ("request-enc", "A one-bit change to requestEnc breaks response-to-request binding.", wrong_secret, wrong_request_enc, wrong_nonce),
+                ("nonce", "A valid-length but incorrect response nonce breaks authentication.", wrong_secret, wrong_request_enc, wrong_nonce),
+            ]
+        ],
+        {
             "id": "compute-nonce-seq-1",
             "description": "Base of zeros XOR sequence 1.",
             "category": "crypto", "operation": "compute_nonce",
@@ -238,6 +366,51 @@ def main() -> None:
                                            "requestEnc": token["requestEnc"]})},
             "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
         },
+        {
+            "id": "token-request-enc-wrong-length",
+            "description": "requestEnc decodes to 31 bytes, not 32.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": json.dumps({"exportedSecret": token["exportedSecret"],
+                                           "requestEnc": "00" * 31})},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
+        {
+            "id": "token-odd-length-hex",
+            "description": "Hex fields must contain complete byte pairs.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": json.dumps({"exportedSecret": token["exportedSecret"] + "0",
+                                           "requestEnc": token["requestEnc"]})},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
+        {
+            "id": "token-null",
+            "description": "The token must be an object, not JSON null.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": "null"},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
+        {
+            "id": "token-array",
+            "description": "The token must be an object, not an array.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": "[]"},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
+        {
+            "id": "token-non-string-field",
+            "description": "Token byte fields must be hex strings.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": json.dumps({"exportedSecret": 7,
+                                           "requestEnc": token["requestEnc"]})},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
+        {
+            "id": "token-empty-object",
+            "description": "An object with both required fields absent is invalid.",
+            "category": "crypto", "operation": "token_roundtrip",
+            "inputs": {"json": "{}"},
+            "expect": {"outcome": "error", "error_code": "INVALID_TOKEN"},
+        },
     ]
 
     cfg = [
@@ -270,6 +443,34 @@ def main() -> None:
             "expect": {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
         },
         {
+            "id": "parse-config-empty",
+            "description": "An empty discovery body is not a key configuration.",
+            "category": "config", "operation": "parse_config",
+            "inputs": {"config": ""},
+            "expect": {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
+        },
+        {
+            "id": "parse-config-truncated-kem-id",
+            "description": "Only the key id and first KEM-id byte are present.",
+            "category": "config", "operation": "parse_config",
+            "inputs": {"config": "0000"},
+            "expect": {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
+        },
+        {
+            "id": "parse-config-truncated-suites-length",
+            "description": "The public key is complete but the suites-length field has one byte.",
+            "category": "config", "operation": "parse_config",
+            "inputs": {"config": "00" + KEM_X25519 + "07" * 32 + "00"},
+            "expect": {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
+        },
+        {
+            "id": "parse-config-declared-suites-truncated",
+            "description": "The suites length declares eight bytes but only one suite follows.",
+            "category": "config", "operation": "parse_config",
+            "inputs": {"config": "00" + KEM_X25519 + "07" * 32 + "0008" + KDF_HKDF_SHA256 + AEAD_AES_256_GCM},
+            "expect": {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
+        },
+        {
             "id": "parse-config-no-suites",
             "description": "Cipher suites length is zero.",
             "category": "config", "operation": "parse_config",
@@ -297,7 +498,22 @@ def main() -> None:
             "inputs": {"config": config(pubkey="07" * 32, aead="0003")},
             "expect": {"outcome": "error", "error_code": "UNSUPPORTED_SUITE"},
         },
+        {
+            "id": "parse-config-unsupported-kdf",
+            "description": "KDF id is HKDF-SHA384, not HKDF-SHA256.",
+            "category": "config", "operation": "parse_config",
+            "inputs": {"config": config(pubkey="07" * 32, kdf="0002")},
+            "expect": {"outcome": "error", "error_code": "UNSUPPORTED_SUITE"},
+        },
     ]
+
+    # Swift intentionally has no public config parse/marshal accessor. Skips are
+    # explicit per fixture so an adapter cannot conceal another failure by
+    # returning an arbitrary `skipped` result.
+    for fx in cfg:
+        fx["allowed_skips"] = {
+            "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+        }
 
     def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None):
         fx = {
@@ -327,6 +543,15 @@ def main() -> None:
         e2e("e2e-invalid-nonce-len", "invalid_nonce_len",
             {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
             "Nonce present but 16 bytes."),
+        e2e("e2e-invalid-nonce-hex", "invalid_nonce_hex",
+            {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
+            "Nonce has the correct encoded length but contains non-hex characters."),
+        e2e("e2e-invalid-nonce-odd-hex", "invalid_nonce_odd_hex",
+            {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
+            "Nonce contains an odd number of hex characters."),
+        e2e("e2e-invalid-nonce-too-long", "invalid_nonce_too_long",
+            {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
+            "Nonce is valid hex but 33 bytes rather than 32."),
         e2e("e2e-duplicate-nonce", "duplicate_nonce",
             {"outcome": "error", "error_code": "DUPLICATE_RESPONSE_NONCE"},
             "Two nonce headers MUST fail closed.",
@@ -335,10 +560,33 @@ def main() -> None:
             {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
             "Flipped tag byte."),
+        e2e("e2e-wrong-valid-length-nonce", "wrong_nonce",
+            {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+             "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
+            "A valid-length nonce other than the sealing nonce must fail authentication."),
+        e2e("e2e-partial-length-prefix-1", "partial_prefix_1",
+            {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
+             "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
+            "Response ends after one byte of a frame-length prefix."),
+        e2e("e2e-partial-length-prefix-2", "partial_prefix_2",
+            {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
+             "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
+            "Response ends after two bytes of a frame-length prefix."),
+        e2e("e2e-partial-length-prefix-3", "partial_prefix_3",
+            {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
+             "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
+            "Response ends after three bytes of a frame-length prefix."),
         e2e("e2e-truncated-frame", "truncate_final_frame",
             {"outcome": "error", "error_code": "FRAMING_TRUNCATED",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
             "Response ends mid-frame."),
+        e2e("e2e-ciphertext-shorter-than-tag", "ciphertext_shorter_than_tag",
+            {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
+             "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
+            "A complete 15-byte frame is too short to contain an AES-GCM tag."),
+        e2e("e2e-zero-frame-flood", "zero_frame_flood",
+            {"outcome": "ok", "status": 200, "body_hex": b"hello".hex()},
+            "4096 legal empty frames must not hang or crash the response parser."),
         e2e("e2e-oversized-chunk", "oversized_chunk",
             {"outcome": "error", "error_code": "CHUNK_TOO_LARGE",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
@@ -350,6 +598,9 @@ def main() -> None:
             {"outcome": "ok", "status": 502, "passthrough": True,
              "body_hex": b"upstream unavailable".hex()},
             "Non-2xx with no nonce MAY pass through as an unauthenticated body."),
+        e2e("e2e-encrypted-error-500", "encrypted_error_500",
+            {"outcome": "ok", "status": 500, "body_hex": b"hello".hex()},
+            "A non-2xx response carrying a nonce is authenticated ciphertext and must decrypt."),
         e2e("e2e-plaintext-200-failclosed", "plaintext_success_200",
             {"outcome": "error", "error_code": "MISSING_RESPONSE_NONCE",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
@@ -390,8 +641,8 @@ def main() -> None:
             "expect": expect,
         }
 
-    # Capability-gated: each adapter runs the ops its library implements and reports
-    # `skipped` for the rest (discovery: no Swift; hardening: Python/Rust only).
+    # Discovery is capability-gated for Swift. Request-boundary probes run on all
+    # native clients; adapter-local sinks prevent hostile URLs reaching the network.
     client_api = [
         capi("discover-bad-content-type", "discover",
              {"outcome": "error", "error_code": "INVALID_KEY_CONFIG"},
@@ -411,6 +662,49 @@ def main() -> None:
              {"outcome": "error", "error_code": "INVALID_INPUT"},
              "Client rejects credentials embedded in the URL."),
     ]
+    for fx in client_api:
+        if fx["operation"] == "discover":
+            fx["allowed_skips"] = {
+                "swift": "swift-client-has-no-discovery-or-request-guards"
+            }
+
+    def server_fx(fid, op, mutation, expect, desc, **inputs):
+        return {
+            "id": fid, "description": desc, "category": "server",
+            "operation": op, "runners": ["go"],
+            "inputs": {"mutation": mutation, **inputs}, "expect": expect,
+        }
+
+    # The repository currently has one server implementation (Go). These use
+    # its public identity/middleware APIs in an isolated adapter process.
+    server_security = [
+        server_fx(
+            "server-request-duplicate-encapsulated-key",
+            "decrypt_request", "duplicate_encapsulated_key",
+            {"outcome": "error", "error_code": "INVALID_ENCAPSULATED_KEY"},
+            "Two encapsulated-key headers are ambiguous and must be rejected."),
+        server_fx(
+            "server-request-oversized-frame",
+            "decrypt_request", "oversized_frame",
+            {"outcome": "error", "error_code": "CHUNK_TOO_LARGE"},
+            "A request frame above 64 MiB must be rejected before allocation."),
+        server_fx(
+            "server-request-partial-prefix",
+            "decrypt_request", "partial_prefix",
+            {"outcome": "error", "error_code": "FRAMING_TRUNCATED"},
+            "A request ending midway through its length prefix is truncated."),
+        server_fx(
+            "server-request-zero-frame-burst",
+            "decrypt_request", "zero_frame_burst",
+            {"outcome": "ok", "body_hex": b"after-zero-frames".hex()},
+            "Ten thousand legal empty frames must not recurse, hang, or crash.",
+            zeroFrameCount=10000),
+        server_fx(
+            "server-middleware-trailing-tamper",
+            "middleware_request", "trailing_tamper",
+            {"outcome": "error", "error_code": "KEY_CONFIG_MISMATCH"},
+            "The application handler must not run before the complete request body authenticates."),
+    ]
 
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "client-api.json").write_text(json.dumps(client_api, indent=2) + "\n")
@@ -418,8 +712,10 @@ def main() -> None:
     (OUT / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
     (OUT / "e2e.json").write_text(json.dumps(e2e_list, indent=2) + "\n")
     (OUT / "shape.json").write_text(json.dumps(shape_list, indent=2) + "\n")
+    (OUT / "server-security.json").write_text(json.dumps(server_security, indent=2) + "\n")
     print(f"wrote {len(crypto)} crypto + {len(cfg)} config + {len(e2e_list)} e2e "
-          f"+ {len(shape_list)} shape + {len(client_api)} client-api fixtures to {OUT}")
+          f"+ {len(shape_list)} shape + {len(client_api)} client-api + "
+          f"{len(server_security)} server-security fixtures to {OUT}")
 
 
 if __name__ == "__main__":

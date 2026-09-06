@@ -9,12 +9,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
@@ -51,11 +53,6 @@ type result struct {
 	Native      *string           `json:"native_error"`
 	SkipReason  *string           `json:"skip_reason,omitempty"`
 	Runner      string            `json:"runner"`
-}
-
-func skip(r *result, reason string) {
-	r.Outcome = "skipped"
-	r.SkipReason = &reason
 }
 
 func main() {
@@ -130,11 +127,161 @@ func run(fx *fixture, r *result) error {
 		_, err := client.NewTransport(discoverTarget(fx))
 		return err
 	case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
-		skip(r, "go-client-has-no-request-guards")
-		return nil
+		return hardening(fx.Operation)
+	case "decrypt_request":
+		return decryptRequest(fx, r)
+	case "middleware_request":
+		return middlewareRequest(fx)
 	default:
 		return fmt.Errorf("unknown operation %q", fx.Operation)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// hardening exercises request-boundary validation without contacting the URL
+// under test. A recording RoundTripper returns a plaintext 502 if the request
+// escapes validation; that successful pass-through is the divergent result.
+func hardening(op string) error {
+	serverID, err := identity.NewIdentity()
+	if err != nil {
+		return err
+	}
+	cfg, err := serverID.MarshalConfig()
+	if err != nil {
+		return err
+	}
+	recorder := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("probe")),
+			Request:    req,
+		}, nil
+	})
+	base := "http://configured.example"
+	tr, err := client.NewTransportWithConfig(base, cfg,
+		client.WithHTTPClient(&http.Client{Transport: recorder}))
+	if err != nil {
+		return err
+	}
+	target := base + "/probe"
+	if op == "reject_cross_origin" {
+		target = "http://attacker.invalid/probe"
+	} else if op == "reject_url_credentials" {
+		target = "http://user:pass@configured.example/probe"
+	}
+	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader("x"))
+	if err != nil {
+		return err
+	}
+	if op == "reject_reserved_header" {
+		req.Header.Set(protocol.ResponseNonceHeader, strings.Repeat("0", 64))
+	}
+	resp, err := tr.RoundTrip(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	return err
+}
+
+func encryptedRequest(id *identity.Identity, plaintext []byte) (*http.Request, []byte, error) {
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(plaintext))
+	if _, err := id.EncryptRequestWithContext(req); err != nil {
+		return nil, nil, err
+	}
+	framed, err := io.ReadAll(req.Body)
+	return req, framed, err
+}
+
+// decryptRequest drives the public server-side request API with structural
+// mutations. The 64 MiB+1 case runs in this disposable adapter process so a
+// vulnerable allocation cannot take down the harness itself.
+func decryptRequest(fx *fixture, r *result) error {
+	id, err := identity.NewIdentity()
+	if err != nil {
+		return err
+	}
+	plaintext := []byte("after-zero-frames")
+	template, framed, err := encryptedRequest(id, plaintext)
+	if err != nil {
+		return err
+	}
+
+	mutation := strIn(fx, "mutation")
+	body := framed
+	if mutation == "oversized_frame" {
+		body = make([]byte, 4)
+		binary.BigEndian.PutUint32(body, (64<<20)+1)
+	} else if mutation == "partial_prefix" {
+		body = []byte{0, 0, 0}
+	} else if mutation == "zero_frame_burst" {
+		count := 10000
+		if v, ok := fx.Inputs["zeroFrameCount"].(float64); ok {
+			count = int(v)
+		}
+		body = append(make([]byte, count*4), framed...)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(body))
+	for _, value := range template.Header.Values(protocol.EncapsulatedKeyHeader) {
+		req.Header.Add(protocol.EncapsulatedKeyHeader, value)
+	}
+	if mutation == "duplicate_encapsulated_key" {
+		req.Header.Add(protocol.EncapsulatedKeyHeader, strings.Repeat("0", 64))
+	}
+	if _, err := id.DecryptRequestWithContext(req); err != nil {
+		return err
+	}
+	plain, n, err := readTracked(req.Body)
+	if err != nil {
+		r.EmittedN = n
+		r.Emitted = n > 0
+		return err
+	}
+	setBody(r, plain)
+	return nil
+}
+
+// middlewareRequest proves whether a trailing authentication failure is
+// checked before application code executes. The handler deliberately consumes
+// only one byte, as real routing/auth middleware commonly does.
+func middlewareRequest(fx *fixture) error {
+	if strIn(fx, "mutation") != "trailing_tamper" {
+		return fmt.Errorf("unknown middleware mutation")
+	}
+	id, err := identity.NewIdentity()
+	if err != nil {
+		return err
+	}
+	template, framed, err := encryptedRequest(id, bytes.Repeat([]byte("x"), 20<<10))
+	if err != nil {
+		return err
+	}
+	framed[len(framed)-1] ^= 1
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(framed))
+	for _, value := range template.Header.Values(protocol.EncapsulatedKeyHeader) {
+		req.Header.Add(protocol.EncapsulatedKeyHeader, value)
+	}
+
+	handlerRan := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		handlerRan = true
+		one := make([]byte, 1)
+		_, _ = req.Body.Read(one)
+		w.WriteHeader(http.StatusOK)
+	})
+	rec := httptest.NewRecorder()
+	id.Middleware()(handler).ServeHTTP(rec, req)
+	if handlerRan {
+		return nil
+	}
+	if rec.Code == http.StatusUnprocessableEntity {
+		return identity.NewKeyConfigError(fmt.Errorf("trailing request frame failed authentication"))
+	}
+	return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
 }
 
 func discoverTarget(fx *fixture) string {
@@ -222,6 +369,8 @@ func mapErr(op string, err error) string {
 	switch {
 	case contains(msg, "missing "+protocol.ResponseNonceHeader):
 		return "MISSING_RESPONSE_NONCE"
+	case op == "decrypt_request" && contains(msg, "encapsulated key"):
+		return "INVALID_ENCAPSULATED_KEY"
 	case contains(msg, "invalid response nonce"):
 		return "INVALID_RESPONSE_NONCE"
 	case contains(msg, "exceeds maximum allowed size"):
@@ -315,8 +464,8 @@ func setBody(r *result, b []byte) {
 	r.BodyHex = &s
 }
 
-func hexIn(fx *fixture, key string) []byte  { return mustHex(strIn(fx, key)) }
-func strIn(fx *fixture, key string) string  { s, _ := fx.Inputs[key].(string); return s }
-func mustHex(s string) []byte               { b, _ := hex.DecodeString(s); return b }
-func contains(s, sub string) bool           { return strings.Contains(s, sub) }
-func fatal(err error)                       { fmt.Fprintln(os.Stderr, err); os.Exit(2) }
+func hexIn(fx *fixture, key string) []byte { return mustHex(strIn(fx, key)) }
+func strIn(fx *fixture, key string) string { s, _ := fx.Inputs[key].(string); return s }
+func mustHex(s string) []byte              { b, _ := hex.DecodeString(s); return b }
+func contains(s, sub string) bool          { return strings.Contains(s, sub) }
+func fatal(err error)                      { fmt.Fprintln(os.Stderr, err); os.Exit(2) }

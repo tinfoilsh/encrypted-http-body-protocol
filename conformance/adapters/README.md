@@ -10,12 +10,13 @@ extensible: to add a language you copy this shape and fill in the public-API cal
 - **Output:** one normalized result JSON object on stdout (see
   `../schema/result.schema.json`). Exit 0 even for `outcome: error`; reserve a
   non-zero exit and stderr for an adapter crash (a bug in the adapter itself).
-- **Environment:** `ORACLE_URL` for `operation: request`. Nothing else.
+- **Environment:** `ORACLE_URL` and the two loopback discovery endpoints
+  `ORACLE_BAD_CT_URL` / `ORACLE_NON200_URL`.
 
 ## Required shape
 
 1. Read and parse the fixture.
-2. Dispatch on `operation` (the eight in `../spec/operations.md`). Never branch on
+2. Dispatch on `operation` (listed in `../spec/operations.md`). Never branch on
    the fixture `id`.
 3. Call only the library's public API — the entrypoints the README documents.
 4. Byte outputs go to `body_hex` (lowercase hex).
@@ -26,6 +27,8 @@ extensible: to add a language you copy this shape and fill in the public-API cal
    `../spec/error-mapping.md`.
 6. Track fail-closed honestly: `plaintext_emitted_before_error` and
    `bytes_emitted_before_error` reflect bytes actually delivered before an error.
+7. Return `skipped` only when the fixture authorizes that runner and exact reason
+   in `allowed_skips`. A hard or failing case is never a capability skip.
 
 ## Operation output convention
 
@@ -38,6 +41,8 @@ extensible: to add a language you copy this shape and fill in the public-API cal
 | `parse_config` | public key (32) |
 | `marshal_config` | marshaled config bytes |
 | `request` | delivered body: decrypted plaintext, or a pass-through body |
+| `decrypt_request` | decrypted request plaintext |
+| `middleware_request` | none; success means application code ran |
 
 ## e2e result fields
 

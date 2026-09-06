@@ -10,6 +10,9 @@
     "expect": {
       "outcome": "ok",
       "body_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -24,6 +27,9 @@
     "expect": {
       "outcome": "ok",
       "body_hex": "0000200707070707070707070707070707070707070707070707070707070707070707000400010002"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -37,6 +43,9 @@
     "expect": {
       "outcome": "ok",
       "body_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -50,6 +59,73 @@
     "expect": {
       "outcome": "error",
       "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-empty",
+    "description": "An empty discovery body is not a key configuration.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": ""
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-truncated-kem-id",
+    "description": "Only the key id and first KEM-id byte are present.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-truncated-suites-length",
+    "description": "The public key is complete but the suites-length field has one byte.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "000020070707070707070707070707070707070707070707070707070707070707070700"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-declared-suites-truncated",
+    "description": "The suites length declares eight bytes but only one suite follows.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000200707070707070707070707070707070707070707070707070707070707070707000800010002"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -63,6 +139,9 @@
     "expect": {
       "outcome": "error",
       "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -76,6 +155,9 @@
     "expect": {
       "outcome": "error",
       "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -89,6 +171,9 @@
     "expect": {
       "outcome": "error",
       "error_code": "UNSUPPORTED_SUITE"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   },
   {
@@ -102,6 +187,25 @@
     "expect": {
       "outcome": "error",
       "error_code": "UNSUPPORTED_SUITE"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-unsupported-kdf",
+    "description": "KDF id is HKDF-SHA384, not HKDF-SHA256.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0000200707070707070707070707070707070707070707070707070707070707070707000400020002"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNSUPPORTED_SUITE"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
   }
 ]

@@ -21,7 +21,6 @@
       "oneOf": [
         {"type": "null"},
         {"type": "string", "enum": [
-          "OK",
           "INVALID_KEY_CONFIG",
           "UNSUPPORTED_SUITE",
           "INVALID_ENCAPSULATED_KEY",
@@ -35,7 +34,8 @@
           "AEAD_DECRYPT_FAILED",
           "SEQUENCE_OVERFLOW",
           "INVALID_TOKEN",
-          "INVALID_INPUT"
+          "INVALID_INPUT",
+          "ADAPTER_CRASH"
         ]}
       ]
     },
