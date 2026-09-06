@@ -11,3 +11,5 @@ conformance/adapters/swift/.build/
 conformance/report.md
 conformance/report.json
 conformance/.venv/
+__pycache__/
+*.pyc
