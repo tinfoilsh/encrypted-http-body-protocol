@@ -215,6 +215,9 @@ fn map_error(op: &str, err: &Error) -> String {
         Error::Json(_) if op == "token_roundtrip" => "INVALID_TOKEN",
         Error::InvalidInput(_) if op == "token_roundtrip" => "INVALID_TOKEN",
         Error::InvalidInput(_) => "INVALID_INPUT",
+        // In the request path the only hex decode is the response nonce, so a
+        // bare hex error there is a malformed nonce.
+        Error::Hex(_) if op == "request" => "INVALID_RESPONSE_NONCE",
         Error::Protocol(_) => {
             if msg.contains("content type") || msg.contains("returned status") {
                 "INVALID_KEY_CONFIG"

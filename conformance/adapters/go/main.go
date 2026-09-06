@@ -390,7 +390,9 @@ func mapErr(op string, err error) string {
 	case contains(msg, "invalid config"), contains(msg, "no cipher suites"),
 		contains(msg, "unmarshal public key"), contains(msg, "invalid public key"):
 		return "INVALID_KEY_CONFIG"
-	case op == "token_roundtrip" && (contains(msg, "hex") || contains(msg, "invalid")):
+	case op == "token_roundtrip":
+		// Any failure decoding the token JSON is a malformed token, regardless of
+		// the underlying json/hex message.
 		return "INVALID_TOKEN"
 	case op == "derive_keys" && contains(msg, "must be"):
 		return "INVALID_INPUT"

@@ -153,6 +153,9 @@ function mapError(op, err) {
     if (msg.includes('cipher suite')) return 'UNSUPPORTED_SUITE';
     return 'INVALID_KEY_CONFIG';
   }
+  // In the request path the only hex decode is the response nonce, so a bare
+  // hex error there is a malformed nonce.
+  if (op === 'request' && msg.includes('hex')) return 'INVALID_RESPONSE_NONCE';
   if (op === 'discover') return 'INVALID_KEY_CONFIG';
   if (op === 'token_roundtrip') return 'INVALID_TOKEN';
   if (op === 'compute_nonce' && msg.includes('sequence')) return 'INVALID_INPUT';
