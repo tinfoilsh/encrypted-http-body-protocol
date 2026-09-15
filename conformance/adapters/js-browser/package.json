@@ -1,0 +1,6 @@
+{
+  "name": "ehbp-conformance-js-browser",
+  "private": true,
+  "type": "module",
+  "dependencies": { "playwright": "^1.55.0" }
+}

@@ -1,0 +1,83 @@
+[
+  {
+    "id": "server-request-duplicate-encapsulated-key",
+    "description": "Two encapsulated-key headers are ambiguous and must be rejected.",
+    "category": "server",
+    "operation": "decrypt_request",
+    "runners": [
+      "go"
+    ],
+    "inputs": {
+      "mutation": "duplicate_encapsulated_key"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_ENCAPSULATED_KEY"
+    }
+  },
+  {
+    "id": "server-request-oversized-frame",
+    "description": "A request frame above 64 MiB must be rejected before allocation.",
+    "category": "server",
+    "operation": "decrypt_request",
+    "runners": [
+      "go"
+    ],
+    "inputs": {
+      "mutation": "oversized_frame"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "CHUNK_TOO_LARGE"
+    }
+  },
+  {
+    "id": "server-request-partial-prefix",
+    "description": "A request ending midway through its length prefix is truncated.",
+    "category": "server",
+    "operation": "decrypt_request",
+    "runners": [
+      "go"
+    ],
+    "inputs": {
+      "mutation": "partial_prefix"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED"
+    }
+  },
+  {
+    "id": "server-request-zero-frame-burst",
+    "description": "Ten thousand legal empty frames must not recurse, hang, or crash.",
+    "category": "server",
+    "operation": "decrypt_request",
+    "runners": [
+      "go"
+    ],
+    "inputs": {
+      "mutation": "zero_frame_burst",
+      "zeroFrameCount": 10000
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "61667465722d7a65726f2d6672616d6573"
+    }
+  },
+  {
+    "id": "server-middleware-trailing-tamper",
+    "description": "The application handler must not run before the complete request body authenticates.",
+    "category": "server",
+    "operation": "middleware_request",
+    "runners": [
+      "go"
+    ],
+    "inputs": {
+      "mutation": "trailing_tamper"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "KEY_CONFIG_MISMATCH"
+    }
+  }
+]
