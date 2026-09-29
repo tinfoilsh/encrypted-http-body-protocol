@@ -12,9 +12,7 @@ import {
   deserializeSessionRecoveryToken,
   hexToBytes,
   bytesToHex,
-  KeyConfigMismatchError,
-  ProtocolError,
-  DecryptionError,
+  codeOf,
 } from '../../../js/dist/esm/index.js';
 
 const HEADER_SUBSET = ['ehbp-response-nonce', 'content-length', 'transfer-encoding', 'content-type'];
@@ -138,29 +136,10 @@ async function doRequest(fx, res) {
   res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);
 }
 
-// mapError is the sole native-error -> canonical-code translation.
 function mapError(op, err) {
-  if (err instanceof KeyConfigMismatchError) return 'KEY_CONFIG_MISMATCH';
-  if (err instanceof DecryptionError) return 'AEAD_DECRYPT_FAILED';
-  const msg = (err?.message || String(err)).toLowerCase();
-  if (op.startsWith('reject_')) return 'INVALID_INPUT';
-  if (err instanceof ProtocolError) {
-    if (msg.includes('missing') && msg.includes('nonce')) return 'MISSING_RESPONSE_NONCE';
-    if (msg.includes('nonce')) return 'INVALID_RESPONSE_NONCE';
-    if (msg.includes('truncated')) return 'FRAMING_TRUNCATED';
-    if (msg.includes('exceeds maximum')) return 'CHUNK_TOO_LARGE';
-    if (msg.includes('no cipher suites')) return 'INVALID_KEY_CONFIG';
-    if (msg.includes('cipher suite')) return 'UNSUPPORTED_SUITE';
-    return 'INVALID_KEY_CONFIG';
-  }
-  // In the request path the only hex decode is the response nonce, so a bare
-  // hex error there is a malformed nonce.
-  if (op === 'request' && msg.includes('hex')) return 'INVALID_RESPONSE_NONCE';
-  if (op === 'discover') return 'INVALID_KEY_CONFIG';
-  if (op === 'token_roundtrip') return 'INVALID_TOKEN';
-  if (op === 'compute_nonce' && msg.includes('sequence')) return 'INVALID_INPUT';
-  if (op === 'derive_keys' && msg.includes('must be')) return 'INVALID_INPUT';
-  return 'INVALID_INPUT';
+  // Reads the canonical code the library attached (codeOf); anything uncoded is
+  // a caller/adapter input error.
+  return codeOf(err) ?? 'INVALID_INPUT';
 }
 
 // --- helpers ---

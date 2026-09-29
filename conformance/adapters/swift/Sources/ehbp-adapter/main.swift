@@ -60,7 +60,7 @@ func run() async throws {
         try decryptOp(ins)
     case "token_roundtrip":
         let json = Data(((ins["json"] as? String) ?? "").utf8)
-        let token = try JSONDecoder().decode(SessionRecoveryToken.self, from: json)
+        let token = try SessionRecoveryToken(json: json)
         setBody(token.exportedSecret + token.requestEnc)
     case "parse_config", "marshal_config":
         res["outcome"] = "skipped"
@@ -154,30 +154,10 @@ func requestOp() async throws {
     res["passthrough"] = noNonce && !(200..<300).contains(response.statusCode)
 }
 
-// mapError is the sole native-error -> canonical-code translation.
+// mapError reads the canonical code the library attached; anything uncoded is
+// a caller/adapter input error.
 func mapError(_ op: String, _ error: Error) -> String {
-    if error is DecodingError { return op == "token_roundtrip" ? "INVALID_TOKEN" : "INVALID_INPUT" }
-    // CryptoKit surfaces an AEAD tag failure as a raw error, not an EHBPError.
-    if String(describing: error).lowercased().contains("authentication") { return "AEAD_DECRYPT_FAILED" }
-    guard let e = error as? EHBPError else { return "INVALID_INPUT" }
-    switch e {
-    case .missingHeader:
-        return "MISSING_RESPONSE_NONCE"
-    case .decryptionFailed:
-        return "AEAD_DECRYPT_FAILED"
-    case .encryptionFailed:
-        return "HPKE_SETUP_FAILED"
-    case .invalidResponse(let m):
-        let s = m.lowercased()
-        if s.contains("truncated") { return "FRAMING_TRUNCATED" }
-        if s.contains("exceeds maximum") { return "CHUNK_TOO_LARGE" }
-        if s.contains("overflow") { return "SEQUENCE_OVERFLOW" }
-        return "INVALID_RESPONSE_NONCE"
-    case .invalidInput:
-        return op == "token_roundtrip" ? "INVALID_TOKEN" : "INVALID_INPUT"
-    case .networkError:
-        return "INVALID_INPUT"
-    }
+    (error as? EHBPError)?.code?.rawValue ?? "INVALID_INPUT"
 }
 
 func splitAt(_ data: Data, _ offsets: [Int]?) -> [Data] {

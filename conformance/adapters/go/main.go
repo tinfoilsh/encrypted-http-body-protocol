@@ -62,7 +62,7 @@ func main() {
 	r := result{FixtureID: fx.ID, Outcome: "ok", Runner: "go"}
 	if err := run(&fx, &r); err != nil {
 		r.Outcome = "error"
-		code := mapErr(fx.Operation, err)
+		code := mapErr(err)
 		r.ErrorCode = &code
 		r.BodyHex = nil
 		native := err.Error()
@@ -278,7 +278,7 @@ func middlewareRequest(fx *fixture) error {
 		return nil
 	}
 	if rec.Code == http.StatusUnprocessableEntity {
-		return identity.NewKeyConfigError(fmt.Errorf("trailing request frame failed authentication"))
+		return identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "trailing request frame failed authentication"))
 	}
 	return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
 }
@@ -358,46 +358,13 @@ func doRequest(fx *fixture, r *result) error {
 	return nil
 }
 
-// mapErr is the sole native-error -> canonical-code translation. Each arm names
-// the concrete condition it matches so a reviewer can confirm it is not lossy.
-func mapErr(op string, err error) string {
-	if identity.IsKeyConfigError(err) {
-		return "KEY_CONFIG_MISMATCH"
+// mapErr reads the canonical code the library attached (protocol.CodeOf).
+// Anything uncoded is a caller/adapter input error.
+func mapErr(err error) string {
+	if c := protocol.CodeOf(err); c != "" {
+		return string(c)
 	}
-	msg := err.Error()
-	switch {
-	case contains(msg, "missing "+protocol.ResponseNonceHeader):
-		return "MISSING_RESPONSE_NONCE"
-	case op == "decrypt_request" && contains(msg, "encapsulated key"):
-		return "INVALID_ENCAPSULATED_KEY"
-	case contains(msg, "invalid response nonce"):
-		return "INVALID_RESPONSE_NONCE"
-	case contains(msg, "exceeds maximum allowed size"):
-		return "CHUNK_TOO_LARGE"
-	case contains(msg, "failed to read encrypted chunk"),
-		contains(msg, "invalid chunk length framing"),
-		contains(msg, "failed to read chunk length"):
-		return "FRAMING_TRUNCATED"
-	case contains(msg, "failed to decrypt chunk"):
-		return "AEAD_DECRYPT_FAILED"
-	case contains(msg, "unsupported KEM"), contains(msg, "invalid KEM"),
-		contains(msg, "invalid KDF"), contains(msg, "invalid AEAD"):
-		return "UNSUPPORTED_SUITE"
-	case contains(msg, "invalid content type"), contains(msg, "returned status"),
-		contains(msg, "failed to sync"):
-		return "INVALID_KEY_CONFIG"
-	case contains(msg, "invalid config"), contains(msg, "no cipher suites"),
-		contains(msg, "unmarshal public key"), contains(msg, "invalid public key"):
-		return "INVALID_KEY_CONFIG"
-	case op == "token_roundtrip":
-		// Any failure decoding the token JSON is a malformed token, regardless of
-		// the underlying json/hex message.
-		return "INVALID_TOKEN"
-	case op == "derive_keys" && contains(msg, "must be"):
-		return "INVALID_INPUT"
-	default:
-		return "INVALID_INPUT"
-	}
+	return "INVALID_INPUT"
 }
 
 // --- helpers ---
@@ -465,5 +432,4 @@ func setBody(r *result, b []byte) {
 func hexIn(fx *fixture, key string) []byte { return mustHex(strIn(fx, key)) }
 func strIn(fx *fixture, key string) string { s, _ := fx.Inputs[key].(string); return s }
 func mustHex(s string) []byte              { b, _ := hex.DecodeString(s); return b }
-func contains(s, sub string) bool          { return strings.Contains(s, sub) }
 func fatal(err error)                      { fmt.Fprintln(os.Stderr, err); os.Exit(2) }

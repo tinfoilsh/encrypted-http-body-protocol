@@ -26,6 +26,20 @@ does produce; the mismatch is a fix target, not grounds to relax the fixture.
 | `INVALID_INPUT` | client | 5.1 | Caller misuse: reserved header set, cross-origin URL, credentials in URL, bad hex. |
 | `ADAPTER_CRASH` | harness | — | Synthetic harness result for timeout, crash, missing/malformed output, or invalid result schema. Adapters do not emit it themselves. |
 
+## Exposure in SDKs
+
+Every SDK attaches the code to its native error (SPEC 5.5), so the suite asserts
+the library's own classification and adapters perform no translation. Messages
+are `<CODE>: <detail>`; the detail is diagnostic and not asserted.
+
+| SDK | code type | read it with |
+| --- | --- | --- |
+| Go | `protocol.Code` | `protocol.CodeOf(err)` |
+| Python | `ehbp.Code` | `ehbp.code_of(err)` / `err.code` |
+| Rust | `tinfoil_ehbp::Code` | `err.code()` (`Option`) |
+| JavaScript | `Code` | `codeOf(err)` / `err.code` |
+| Swift | `EHBPErrorCode` | `(error as? EHBPError)?.code` |
+
 ## Fail-closed
 
 For any error code, `plaintext_emitted_before_error` MUST be `false` and

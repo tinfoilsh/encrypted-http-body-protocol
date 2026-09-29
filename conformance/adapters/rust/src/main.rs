@@ -75,8 +75,7 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         }
         "decrypt_response" | "decrypt_response_streaming" => decrypt(fx, out)?,
         "token_roundtrip" => {
-            let t: SessionRecoveryToken = serde_json::from_str(ins["json"].as_str().unwrap_or(""))
-                .map_err(Error::from)?;
+            let t = SessionRecoveryToken::from_json(ins["json"].as_str().unwrap_or(""))?;
             out.body_hex = Some(hex::encode([t.exported_secret.as_slice(), t.request_enc.as_slice()].concat()));
         }
         "parse_config" => {
@@ -198,48 +197,12 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
     Ok(())
 }
 
-/// map_error is the sole native-error -> canonical-code translation.
-fn map_error(op: &str, err: &Error) -> String {
-    let msg = format!("{err}").to_lowercase();
-    match err {
-        Error::KeyConfigMismatch(_) => "KEY_CONFIG_MISMATCH",
-        Error::Crypto(_) => "AEAD_DECRYPT_FAILED",
-        Error::Hpke(_) => "HPKE_SETUP_FAILED",
-        Error::InvalidConfig(_) => {
-            if msg.contains("unsupported") {
-                "UNSUPPORTED_SUITE"
-            } else {
-                "INVALID_KEY_CONFIG"
-            }
-        }
-        Error::Json(_) if op == "token_roundtrip" => "INVALID_TOKEN",
-        Error::InvalidInput(_) if op == "token_roundtrip" => "INVALID_TOKEN",
-        Error::InvalidInput(_) => "INVALID_INPUT",
-        // In the request path the only hex decode is the response nonce, so a
-        // bare hex error there is a malformed nonce.
-        Error::Hex(_) if op == "request" => "INVALID_RESPONSE_NONCE",
-        Error::Protocol(_) => {
-            if msg.contains("content type") || msg.contains("returned status") {
-                "INVALID_KEY_CONFIG"
-            } else if msg.contains("missing") && msg.contains("nonce") {
-                "MISSING_RESPONSE_NONCE"
-            } else if msg.contains("multiple") {
-                "DUPLICATE_RESPONSE_NONCE"
-            } else if msg.contains("nonce") {
-                "INVALID_RESPONSE_NONCE"
-            } else if msg.contains("truncated") {
-                "FRAMING_TRUNCATED"
-            } else if msg.contains("exceeds maximum") {
-                "CHUNK_TOO_LARGE"
-            } else if msg.contains("overflow") {
-                "SEQUENCE_OVERFLOW"
-            } else {
-                "INVALID_INPUT"
-            }
-        }
-        _ => "INVALID_INPUT",
-    }
-    .to_string()
+/// map_error reads the canonical code the library attached (Error::code()).
+/// Anything uncoded is a caller/adapter input error.
+fn map_error(_op: &str, err: &Error) -> String {
+    err.code()
+        .map(|c| c.as_str().to_string())
+        .unwrap_or_else(|| "INVALID_INPUT".to_string())
 }
 
 fn h(ins: &Value, key: &str) -> Vec<u8> {

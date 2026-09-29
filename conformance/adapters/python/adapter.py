@@ -15,21 +15,14 @@ import httpx
 from ehbp import (
     Client,
     EHBPTransport,
+    code_of,
     ServerIdentity,
     SessionRecoveryToken,
     compute_nonce,
     derive_response_keys,
 )
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER
-from ehbp.errors import (
-    CryptoError,
-    EHBPError,
-    HPKEError,
-    InvalidConfigError,
-    InvalidInputError,
-    KeyConfigMismatchError,
-    ProtocolError,
-)
+from ehbp.errors import EHBPError, InvalidInputError
 from ehbp.protocol import KEYS_PATH, RESPONSE_NONCE_HEADER
 
 HEADER_SUBSET = ("ehbp-response-nonce", "content-length", "transfer-encoding", "content-type")
@@ -145,36 +138,11 @@ def request(fx: dict, res: dict) -> None:
         client.close()
 
 
-# map_error is the sole native-error -> canonical-code translation.
+# map_error reads the canonical code the library attached (code_of). Anything
+# uncoded is a caller/adapter input error.
 def map_error(op: str, err: Exception) -> str:
-    msg = str(err)
-    if isinstance(err, KeyConfigMismatchError):
-        return "KEY_CONFIG_MISMATCH"
-    if isinstance(err, CryptoError):
-        return "AEAD_DECRYPT_FAILED"
-    if isinstance(err, HPKEError):
-        return "HPKE_SETUP_FAILED"
-    if isinstance(err, InvalidConfigError):
-        return "UNSUPPORTED_SUITE" if "unsupported" in msg.lower() else "INVALID_KEY_CONFIG"
-    if isinstance(err, InvalidInputError):
-        return "INVALID_TOKEN" if op == "token_roundtrip" else "INVALID_INPUT"
-    if isinstance(err, ProtocolError):
-        low = msg.lower()
-        if "content type" in low or "returned status" in low:
-            return "INVALID_KEY_CONFIG"
-        if "missing" in low and "nonce" in low:
-            return "MISSING_RESPONSE_NONCE"
-        if "multiple" in low:
-            return "DUPLICATE_RESPONSE_NONCE"
-        if "nonce" in low:
-            return "INVALID_RESPONSE_NONCE"
-        if "truncated" in low:
-            return "FRAMING_TRUNCATED"
-        if "exceeds maximum" in low:
-            return "CHUNK_TOO_LARGE"
-        if "overflow" in low:
-            return "SEQUENCE_OVERFLOW"
-    return "INVALID_INPUT"
+    code = code_of(err)
+    return code.value if code else "INVALID_INPUT"
 
 
 # --- helpers ---
