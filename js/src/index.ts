@@ -12,6 +12,8 @@ export { extractSessionRecoveryToken, decryptResponseWithToken, serializeSession
 export { Transport, createTransport } from './client.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 export {
+  Code,
+  codeOf,
   EhbpError,
   KeyConfigMismatchError,
   ProtocolError,

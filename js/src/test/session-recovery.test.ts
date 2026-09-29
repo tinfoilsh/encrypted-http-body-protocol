@@ -555,7 +555,7 @@ describe('Session Recovery Token', () => {
 
       await assert.rejects(
         () => decryptResponseWithToken(response, token),
-        /Missing Ehbp-Response-Nonce header/
+        /MISSING_RESPONSE_NONCE/
       );
     });
 
@@ -574,7 +574,7 @@ describe('Session Recovery Token', () => {
 
       await assert.rejects(
         () => decryptResponseWithToken(response, token),
-        /Invalid response nonce length/
+        /INVALID_RESPONSE_NONCE/
       );
     });
 

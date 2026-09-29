@@ -59,13 +59,13 @@ impl Client {
         let response = http_client.get(keys_url).send().await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::Protocol(format!(
+            return Err(Error::InvalidConfig(format!(
                 "server returned status {status} while fetching key configuration"
             )));
         }
         let content_type = media_type(response.headers());
         if content_type != KEYS_MEDIA_TYPE {
-            return Err(Error::Protocol(format!(
+            return Err(Error::InvalidConfig(format!(
                 "server returned invalid key content type: {content_type}"
             )));
         }
@@ -312,7 +312,7 @@ impl Client {
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             if status.is_success() {
-                return Err(Error::Protocol(format!(
+                return Err(Error::MissingResponseNonce(format!(
                     "missing {RESPONSE_NONCE_HEADER} header"
                 )));
             }
@@ -730,18 +730,19 @@ fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
     let mut values = headers.get_all(RESPONSE_NONCE_HEADER).iter();
     let nonce = values
         .next()
-        .ok_or_else(|| Error::Protocol(format!("missing {RESPONSE_NONCE_HEADER} header")))?;
+        .ok_or_else(|| Error::MissingResponseNonce(format!("missing {RESPONSE_NONCE_HEADER} header")))?;
     if values.next().is_some() {
-        return Err(Error::Protocol(format!(
+        return Err(Error::DuplicateResponseNonce(format!(
             "multiple {RESPONSE_NONCE_HEADER} headers"
         )));
     }
     let nonce = nonce
         .to_str()
-        .map_err(|err| Error::Protocol(format!("invalid response nonce header: {err}")))?;
-    let nonce = hex::decode(nonce)?;
+        .map_err(|err| Error::InvalidResponseNonce(format!("invalid response nonce header: {err}")))?;
+    let nonce = hex::decode(nonce)
+        .map_err(|err| Error::InvalidResponseNonce(format!("invalid response nonce hex: {err}")))?;
     if nonce.len() != RESPONSE_NONCE_LENGTH {
-        return Err(Error::Protocol(format!(
+        return Err(Error::InvalidResponseNonce(format!(
             "invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {}",
             nonce.len()
         )));
@@ -870,7 +871,7 @@ where
             .checked_add(chunk.len())
             .ok_or_else(|| Error::Protocol("response body size overflow".into()))?;
         if new_len > max_response_bytes {
-            return Err(Error::Protocol(
+            return Err(Error::ChunkTooLarge(
                 "response body exceeds maximum allowed size".into(),
             ));
         }
@@ -1148,7 +1149,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
+            Error::ChunkTooLarge(_)
         ));
     }
 
@@ -1200,7 +1201,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
+            Error::ChunkTooLarge(_)
         ));
     }
 
@@ -1325,7 +1326,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
+            Error::MissingResponseNonce(_)
         ));
         assert!(client.get_session_recovery_token().is_none());
     }
@@ -1345,7 +1346,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
+            Error::MissingResponseNonce(_)
         ));
         assert!(client.get_session_recovery_token().is_none());
     }
@@ -1876,7 +1877,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::Protocol(message) if message.contains("invalid key content type")
+            Error::InvalidConfig(_)
         ));
     }
 

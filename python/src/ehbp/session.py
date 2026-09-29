@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any, Union
 
 from .derive import FrameDecryptor, decrypt_framed_response, derive_response_keys
-from .errors import InvalidInputError, ProtocolError
+from .errors import Code, InvalidInputError, ProtocolError
 from .protocol import (
     EXPORT_LENGTH,
     MAX_CHUNK_LENGTH,
@@ -30,11 +30,13 @@ class SessionRecoveryToken:
     def __init__(self, exported_secret: bytes, request_enc: bytes) -> None:
         if len(exported_secret) != EXPORT_LENGTH:
             raise InvalidInputError(
-                f"exported secret must be {EXPORT_LENGTH} bytes, got {len(exported_secret)}"
+                f"exported secret must be {EXPORT_LENGTH} bytes, got {len(exported_secret)}",
+                code=Code.INVALID_TOKEN,
             )
         if len(request_enc) != REQUEST_ENC_LENGTH:
             raise InvalidInputError(
-                f"request enc must be {REQUEST_ENC_LENGTH} bytes, got {len(request_enc)}"
+                f"request enc must be {REQUEST_ENC_LENGTH} bytes, got {len(request_enc)}",
+                code=Code.INVALID_TOKEN,
             )
         self._exported_secret = bytes(exported_secret)
         self._request_enc = bytes(request_enc)
@@ -76,7 +78,7 @@ class SessionRecoveryToken:
             exported_secret = bytes.fromhex(data[_EXPORTED_SECRET_KEY])
             request_enc = bytes.fromhex(data[_REQUEST_ENC_KEY])
         except (KeyError, TypeError, ValueError) as err:
-            raise InvalidInputError(f"invalid session recovery token: {err}") from err
+            raise InvalidInputError(f"invalid session recovery token: {err}", code=Code.INVALID_TOKEN) from err
         return cls(exported_secret, request_enc)
 
     @classmethod
@@ -84,16 +86,17 @@ class SessionRecoveryToken:
         try:
             decoded = json.loads(data)
         except (TypeError, ValueError) as err:
-            raise InvalidInputError(f"invalid session recovery token JSON: {err}") from err
+            raise InvalidInputError(f"invalid session recovery token JSON: {err}", code=Code.INVALID_TOKEN) from err
         if not isinstance(decoded, Mapping):
-            raise InvalidInputError("invalid session recovery token: expected JSON object")
+            raise InvalidInputError("invalid session recovery token: expected JSON object", code=Code.INVALID_TOKEN)
         return cls.from_dict(decoded)
 
     def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
         """Decrypt a complete framed response body."""
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
             raise ProtocolError(
-                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
+                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}",
+                code=Code.INVALID_RESPONSE_NONCE,
             )
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
@@ -114,7 +117,8 @@ class SessionRecoveryToken:
         """
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
             raise ProtocolError(
-                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
+                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}",
+                code=Code.INVALID_RESPONSE_NONCE,
             )
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
