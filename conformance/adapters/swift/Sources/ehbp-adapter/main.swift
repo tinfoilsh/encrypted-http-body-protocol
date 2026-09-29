@@ -178,7 +178,7 @@ do {
     res["outcome"] = "error"
     res["error_code"] = mapError(op, error)
     res["body_hex"] = NSNull()
-    res["native_error"] = String(describing: error)
+    res["native_error"] = (error as? EHBPError)?.errorDescription ?? String(describing: error)
 }
 
 let outData = try JSONSerialization.data(withJSONObject: res)
