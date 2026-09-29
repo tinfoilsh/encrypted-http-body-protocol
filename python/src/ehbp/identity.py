@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pyhpke import AEADId, CipherSuite, KDFId, KEMId
 
 from .derive import frame_chunk
-from .errors import HPKEError, InvalidConfigError
+from .errors import Code, HPKEError, InvalidConfigError
 from .protocol import (
     AEAD_AES_256_GCM,
     EXPORT_LABEL,
@@ -86,7 +86,7 @@ class ServerIdentity:
 
         kem_id, offset = _read_u16(data, offset, "KEM id")
         if kem_id != KEM_X25519_HKDF_SHA256:
-            raise InvalidConfigError(f"unsupported KEM: 0x{kem_id:04x}")
+            raise InvalidConfigError(f"unsupported KEM: 0x{kem_id:04x}", code=Code.UNSUPPORTED_SUITE)
 
         public_key_end = offset + REQUEST_ENC_LENGTH
         if public_key_end > len(data):
@@ -106,7 +106,8 @@ class ServerIdentity:
         aead_id, offset = _read_u16(data, offset, "AEAD id")
         if kdf_id != KDF_HKDF_SHA256 or aead_id != AEAD_AES_256_GCM:
             raise InvalidConfigError(
-                f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}"
+                f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}",
+                code=Code.UNSUPPORTED_SUITE,
             )
 
         return cls(public_key, key_id)

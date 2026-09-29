@@ -32,7 +32,7 @@ from ._http import (
 from ._http import (
     single_chunk_body as _single_chunk_body,
 )
-from .errors import InvalidInputError, ProtocolError
+from .errors import Code, InvalidInputError, ProtocolError
 from .identity import ServerIdentity
 from .protocol import (
     ENCAPSULATED_KEY_HEADER,
@@ -113,11 +113,12 @@ class Client:
         response = http.get(base.join(KEYS_PATH), follow_redirects=False)
         if response.status_code // 100 != 2:
             raise ProtocolError(
-                f"server returned status {response.status_code} while fetching key configuration"
+                f"server returned status {response.status_code} while fetching key configuration",
+                code=Code.INVALID_KEY_CONFIG,
             )
         content_type = response.headers.get("content-type", "")
         if content_type != KEYS_MEDIA_TYPE:
-            raise ProtocolError(f"server returned invalid key content type: {content_type}")
+            raise ProtocolError(f"server returned invalid key content type: {content_type}", code=Code.INVALID_KEY_CONFIG)
         identity = ServerIdentity.unmarshal_public_config(response.content)
         return cls(
             base,
@@ -360,7 +361,7 @@ class Client:
         for chunk in resp.iter_bytes():
             total += len(chunk)
             if total > self._max_response_bytes:
-                raise ProtocolError("response body exceeds maximum allowed size")
+                raise ProtocolError("response body exceeds maximum allowed size", code=Code.CHUNK_TOO_LARGE)
             chunks.append(chunk)
         return b"".join(chunks)
 

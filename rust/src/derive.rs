@@ -175,7 +175,7 @@ impl ResponseDecryptor {
                 continue;
             }
             if chunk_len > self.max_chunk_length {
-                return Err(Error::Protocol(
+                return Err(Error::ChunkTooLarge(
                     "response chunk exceeds maximum allowed size".into(),
                 ));
             }
@@ -183,7 +183,7 @@ impl ResponseDecryptor {
                 return Ok(None);
             }
             if self.sequence == u64::MAX {
-                return Err(Error::Protocol("response chunk sequence overflow".into()));
+                return Err(Error::SequenceOverflow("response chunk sequence overflow".into()));
             }
 
             let frame_len = 4 + chunk_len;
@@ -203,7 +203,7 @@ impl ResponseDecryptor {
         if self.buffer.is_empty() {
             Ok(())
         } else {
-            Err(Error::Protocol("truncated encrypted response chunk".into()))
+            Err(Error::FramingTruncated("truncated encrypted response chunk".into()))
         }
     }
 }
@@ -289,7 +289,7 @@ mod tests {
             .push(&frame[..frame.len() - 1])
             .unwrap()
             .is_empty());
-        assert!(matches!(truncated.finish(), Err(Error::Protocol(_))));
+        assert!(matches!(truncated.finish(), Err(Error::FramingTruncated(_))));
 
         let mut tampered_frame = frame;
         *tampered_frame.last_mut().unwrap() ^= 1;
@@ -308,7 +308,7 @@ mod tests {
         let oversized_prefix = u32::MAX.to_be_bytes();
         assert!(matches!(
             oversized.push(&oversized_prefix),
-            Err(Error::Protocol(message)) if message.contains("maximum allowed size")
+            Err(Error::ChunkTooLarge(_))
         ));
 
         let mut exhausted = ResponseDecryptor::from_key_material(key_material());
@@ -316,7 +316,7 @@ mod tests {
         let frame = frame_chunk(&[0; 16]).unwrap();
         assert!(matches!(
             exhausted.push(&frame),
-            Err(Error::Protocol(message)) if message.contains("sequence overflow")
+            Err(Error::SequenceOverflow(_))
         ));
     }
 }

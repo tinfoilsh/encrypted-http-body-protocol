@@ -90,7 +90,7 @@ func NewTransport(server string, opts ...Option) (*Transport, error) {
 	applyOptions(t, opts)
 
 	if err := t.syncServerPublicKey(server); err != nil {
-		return nil, fmt.Errorf("failed to sync server public key: %v", err)
+		return nil, fmt.Errorf("failed to sync server public key: %w", err)
 	}
 
 	return t, nil
@@ -101,7 +101,7 @@ func NewTransport(server string, opts ...Option) (*Transport, error) {
 func NewTransportWithConfig(server string, hpkeConfig []byte, opts ...Option) (*Transport, error) {
 	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal public key config: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal public key config: %w", err)
 	}
 
 	t := &Transport{
@@ -131,32 +131,32 @@ func NewTransportWithIdentity(serverIdentity *identity.Identity, opts ...Option)
 func (t *Transport) syncServerPublicKey(server string) error {
 	keysURL, err := url.Parse(server)
 	if err != nil {
-		return fmt.Errorf("failed to parse server URL: %v", err)
+		return fmt.Errorf("failed to parse server URL: %w", err)
 	}
 	keysURL.Path = protocol.KeysPath
 
 	resp, err := t.httpClient.Get(keysURL.String())
 	if err != nil {
-		return fmt.Errorf("failed to get server public key: %v", err)
+		return fmt.Errorf("failed to get server public key: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
+		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned status %d", resp.StatusCode)
 	}
 
 	if resp.Header.Get("Content-Type") != protocol.KeysMediaType {
-		return fmt.Errorf("server returned invalid content type: %s", resp.Header.Get("Content-Type"))
+		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned invalid content type: %s", resp.Header.Get("Content-Type"))
 	}
 
 	ohttpKeys, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read response body: %v", err)
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	serverIdentity, err := identity.UnmarshalPublicConfig(ohttpKeys)
 	if err != nil {
-		return fmt.Errorf("failed to unmarshal public key: %v", err)
+		return fmt.Errorf("failed to unmarshal public key: %w", err)
 	}
 	t.serverIdentity = serverIdentity
 
@@ -252,14 +252,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
 	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt request: %v", err)
+		return nil, fmt.Errorf("failed to encrypt request: %w", err)
 	}
 
 	var token *identity.SessionRecoveryToken
 	if reqCtx != nil {
 		token, err = identity.ExtractSessionRecoveryToken(reqCtx)
 		if err != nil {
-			return nil, fmt.Errorf("failed to extract session recovery token: %v", err)
+			return nil, fmt.Errorf("failed to extract session recovery token: %w", err)
 		}
 	}
 
@@ -269,7 +269,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// (and each redirected attempt is re-encrypted for its target).
 	resp, err := t.roundTripper().RoundTrip(newReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %v", err)
+		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 
 	// Only decrypt if we encrypted the request (had a body)
@@ -284,7 +284,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if title == "" {
 				title = "key configuration mismatch"
 			}
-			return nil, identity.NewKeyConfigError(fmt.Errorf("%s", title))
+			return nil, identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "%s", title))
 		}
 
 		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
@@ -294,7 +294,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		if err := identity.DecryptResponseWithToken(resp, token); err != nil {
 			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decrypt response: %v", err)
+			return nil, fmt.Errorf("failed to decrypt response: %w", err)
 		}
 
 		t.mu.Lock()

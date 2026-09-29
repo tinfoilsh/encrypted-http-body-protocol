@@ -44,13 +44,13 @@ impl Drop for SessionRecoveryToken {
 impl SessionRecoveryToken {
     pub fn new(exported_secret: Vec<u8>, request_enc: Vec<u8>) -> Result<Self> {
         if exported_secret.len() != EXPORT_LENGTH {
-            return Err(Error::InvalidInput(format!(
+            return Err(Error::InvalidToken(format!(
                 "exported secret must be {EXPORT_LENGTH} bytes, got {}",
                 exported_secret.len()
             )));
         }
         if request_enc.len() != REQUEST_ENC_LENGTH {
-            return Err(Error::InvalidInput(format!(
+            return Err(Error::InvalidToken(format!(
                 "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
                 request_enc.len()
             )));
@@ -61,9 +61,14 @@ impl SessionRecoveryToken {
         })
     }
 
+    /// Parses the SPEC 6.1.1 JSON form; any malformation is `Error::InvalidToken`.
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(|err| Error::InvalidToken(err.to_string()))
+    }
+
     pub fn decrypt_response_body(&self, response_nonce: &[u8], body: &[u8]) -> Result<Vec<u8>> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::Protocol(format!(
+            return Err(Error::InvalidResponseNonce(format!(
                 "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
                 response_nonce.len()
             )));
@@ -79,7 +84,7 @@ impl SessionRecoveryToken {
     /// [`ResponseDecryptor::finish`] when the encrypted source reaches EOF.
     pub fn response_decryptor(&self, response_nonce: &[u8]) -> Result<ResponseDecryptor> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::Protocol(format!(
+            return Err(Error::InvalidResponseNonce(format!(
                 "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
                 response_nonce.len()
             )));

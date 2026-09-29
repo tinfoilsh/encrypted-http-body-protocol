@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
-from .errors import CryptoError, InvalidInputError, ProtocolError
+from .errors import Code, CryptoError, InvalidInputError, ProtocolError
 from .protocol import (
     AES256_KEY_LENGTH,
     AES_GCM_NONCE_LENGTH,
@@ -152,7 +152,7 @@ class FrameDecryptor:
                 del self._buffer[:LENGTH_PREFIX_SIZE]
                 continue
             if chunk_len > self._max_chunk_length:
-                raise ProtocolError("response chunk exceeds maximum allowed size")
+                raise ProtocolError("response chunk exceeds maximum allowed size", code=Code.CHUNK_TOO_LARGE)
             if len(self._buffer) < LENGTH_PREFIX_SIZE + chunk_len:
                 break
 
@@ -162,11 +162,11 @@ class FrameDecryptor:
             del self._buffer[: LENGTH_PREFIX_SIZE + chunk_len]
             chunks.append(decrypt_chunk(self._km, self._seq, ciphertext))
             if self._seq >= MAX_SEQUENCE:
-                raise ProtocolError("response chunk sequence overflow")
+                raise ProtocolError("response chunk sequence overflow", code=Code.SEQUENCE_OVERFLOW)
             self._seq += 1
 
         return chunks
 
     def finish(self) -> None:
         if self._buffer:
-            raise ProtocolError("truncated encrypted response chunk")
+            raise ProtocolError("truncated encrypted response chunk", code=Code.FRAMING_TRUNCATED)

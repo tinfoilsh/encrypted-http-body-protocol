@@ -44,7 +44,8 @@ impl ServerIdentity {
     }
 
     pub fn from_public_key_hex(public_key_hex: &str) -> Result<Self> {
-        let public_key = hex::decode(public_key_hex)?;
+        let public_key = hex::decode(public_key_hex)
+            .map_err(|err| Error::InvalidConfig(format!("invalid public key hex: {err}")))?;
         Self::from_public_key_bytes(&public_key)
     }
 
@@ -58,7 +59,7 @@ impl ServerIdentity {
 
         let kem_id = read_u16(data, &mut offset, "KEM id")?;
         if kem_id != KEM_X25519_HKDF_SHA256 {
-            return Err(Error::InvalidConfig(format!(
+            return Err(Error::UnsupportedSuite(format!(
                 "unsupported KEM: 0x{kem_id:04x}"
             )));
         }
@@ -93,7 +94,7 @@ impl ServerIdentity {
         let kdf_id = read_u16(data, &mut offset, "KDF id")?;
         let aead_id = read_u16(data, &mut offset, "AEAD id")?;
         if kdf_id != KDF_HKDF_SHA256 || aead_id != AEAD_AES_256_GCM {
-            return Err(Error::InvalidConfig(format!(
+            return Err(Error::UnsupportedSuite(format!(
                 "unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}"
             )));
         }

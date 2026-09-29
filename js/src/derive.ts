@@ -11,6 +11,7 @@
  */
 
 import { type KDF, type AEAD, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
+import { Code, EhbpError } from './errors.js';
 
 // Response bodies are decrypted chunk by chunk on the client, so the AEAD is
 // the hot path. The Web Cryptography implementations run at native speed in
@@ -61,13 +62,13 @@ export async function deriveResponseKeys(
 ): Promise<ResponseKeyMaterial> {
   // Validate inputs
   if (exportedSecret.length !== EXPORT_LENGTH) {
-    throw new Error(`exported secret must be ${EXPORT_LENGTH} bytes, got ${exportedSecret.length}`);
+    throw new EhbpError(Code.INVALID_INPUT, `exported secret must be ${EXPORT_LENGTH} bytes, got ${exportedSecret.length}`);
   }
   if (requestEnc.length !== REQUEST_ENC_LENGTH) {
-    throw new Error(`request enc must be ${REQUEST_ENC_LENGTH} bytes, got ${requestEnc.length}`);
+    throw new EhbpError(Code.INVALID_INPUT, `request enc must be ${REQUEST_ENC_LENGTH} bytes, got ${requestEnc.length}`);
   }
   if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
-    throw new Error(`response nonce must be ${RESPONSE_NONCE_LENGTH} bytes, got ${responseNonce.length}`);
+    throw new EhbpError(Code.INVALID_INPUT, `response nonce must be ${RESPONSE_NONCE_LENGTH} bytes, got ${responseNonce.length}`);
   }
 
   // salt = concat(enc, response_nonce)
@@ -93,7 +94,7 @@ export async function deriveResponseKeys(
  */
 export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   if (nonceBase.length !== AES_GCM_NONCE_LENGTH) {
-    throw new Error(`nonce base must be ${AES_GCM_NONCE_LENGTH} bytes`);
+    throw new EhbpError(Code.INVALID_INPUT, `nonce base must be ${AES_GCM_NONCE_LENGTH} bytes`);
   }
 
   // Validate seq to prevent nonce reuse from integer overflow.
@@ -101,7 +102,7 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
   // Values >= 2^32 wrap around (e.g., 2^32 >>> 0 === 0), causing nonce reuse.
   // In practice, 2^32 chunks per response is impossible (~4PB minimum), but we validate defensively.
   if (!Number.isInteger(seq) || seq < 0 || seq >= 0x100000000) {
-    throw new Error(`sequence number must be an integer in range [0, 2^32): got ${seq}`);
+    throw new EhbpError(Code.INVALID_INPUT, `sequence number must be an integer in range [0, 2^32): got ${seq}`);
   }
 
   const nonce = new Uint8Array(AES_GCM_NONCE_LENGTH);
