@@ -26,7 +26,7 @@ from ._http import (
     single_chunk_body,
 )
 from .derive import FrameDecryptor, derive_response_keys
-from .errors import ProtocolError
+from .errors import Code, ProtocolError
 from .identity import ServerIdentity
 from .protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
 from .session import SessionRecoveryToken
@@ -44,7 +44,7 @@ def _read_capped(stream: httpx.SyncByteStream, max_bytes: int) -> bytes:
     for chunk in stream:
         total += len(chunk)
         if total > max_bytes:
-            raise ProtocolError("response body exceeds maximum allowed size")
+            raise ProtocolError("response body exceeds maximum allowed size", code=Code.CHUNK_TOO_LARGE)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -55,7 +55,7 @@ async def _aread_capped(stream: httpx.AsyncByteStream, max_bytes: int) -> bytes:
     async for chunk in stream:
         total += len(chunk)
         if total > max_bytes:
-            raise ProtocolError("response body exceeds maximum allowed size")
+            raise ProtocolError("response body exceeds maximum allowed size", code=Code.CHUNK_TOO_LARGE)
         chunks.append(chunk)
     return b"".join(chunks)
 

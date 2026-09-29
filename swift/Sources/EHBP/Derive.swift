@@ -109,13 +109,16 @@ public func decryptChunk(
     let encryptedData = ciphertext.prefix(tagStart)
     let tag = ciphertext.suffix(16)
 
-    let sealedBox = try AES.GCM.SealedBox(
-        nonce: try AES.GCM.Nonce(data: nonce),
-        ciphertext: encryptedData,
-        tag: tag
-    )
-
-    return try AES.GCM.open(sealedBox, using: keyMaterial.key)
+    do {
+        let sealedBox = try AES.GCM.SealedBox(
+            nonce: try AES.GCM.Nonce(data: nonce),
+            ciphertext: encryptedData,
+            tag: tag
+        )
+        return try AES.GCM.open(sealedBox, using: keyMaterial.key)
+    } catch {
+        throw EHBPError.decryptionFailed("failed to decrypt chunk: \(error)")
+    }
 }
 
 /// Incrementally decrypts an EHBP length-prefixed response stream.
@@ -186,13 +189,13 @@ public struct ResponseDecryptor {
                 continue
             }
             if chunkLength > maxChunkLength {
-                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+                throw EHBPError.chunkTooLarge("response chunk exceeds maximum allowed size")
             }
             guard buffer.count - ciphertextStart >= chunkLength else {
                 return nil
             }
             guard sequence < UInt64.max else {
-                throw EHBPError.invalidResponse("response chunk sequence overflow")
+                throw EHBPError.sequenceOverflow
             }
 
             let frameEnd = ciphertextStart + chunkLength
@@ -219,28 +222,83 @@ public struct ResponseDecryptor {
     /// Validates that source EOF occurred on a frame boundary.
     public func finish() throws {
         guard buffer.count == readOffset else {
-            throw EHBPError.invalidResponse("truncated encrypted response chunk")
+            throw EHBPError.framingTruncated("truncated encrypted response chunk")
         }
     }
 }
 
-/// EHBP errors
+/// Canonical, cross-SDK error class (SPEC Section 5.5). Raw values are identical
+/// in every SDK, so a caller's handling ports between languages.
+public enum EHBPErrorCode: String, Sendable {
+    case invalidKeyConfig = "INVALID_KEY_CONFIG"
+    case unsupportedSuite = "UNSUPPORTED_SUITE"
+    case invalidEncapsulatedKey = "INVALID_ENCAPSULATED_KEY"
+    case hpkeSetupFailed = "HPKE_SETUP_FAILED"
+    case missingResponseNonce = "MISSING_RESPONSE_NONCE"
+    case invalidResponseNonce = "INVALID_RESPONSE_NONCE"
+    case duplicateResponseNonce = "DUPLICATE_RESPONSE_NONCE"
+    case keyConfigMismatch = "KEY_CONFIG_MISMATCH"
+    case framingTruncated = "FRAMING_TRUNCATED"
+    case chunkTooLarge = "CHUNK_TOO_LARGE"
+    case aeadDecryptFailed = "AEAD_DECRYPT_FAILED"
+    case sequenceOverflow = "SEQUENCE_OVERFLOW"
+    case invalidToken = "INVALID_TOKEN"
+    case invalidInput = "INVALID_INPUT"
+}
+
+/// EHBP errors. Each classified case maps to one canonical code and describes
+/// itself as "<CODE>: <detail>". Codes are for the in-process caller only and are
+/// never sent on the wire (SPEC 5.4.4).
 public enum EHBPError: Error, LocalizedError {
     case invalidInput(String)
+    case invalidKeyConfig(String)
+    case unsupportedSuite(String)
+    case invalidToken(String)
     case encryptionFailed(String)
     case decryptionFailed(String)
+    case missingResponseNonce
+    case invalidResponseNonce(String)
+    case framingTruncated(String)
+    case chunkTooLarge(String)
+    case sequenceOverflow
+    case keyConfigMismatch(String)
+    /// Transport failure; carries no canonical code.
     case networkError(String)
-    case invalidResponse(String)
-    case missingHeader(String)
+
+    public var code: EHBPErrorCode? {
+        switch self {
+        case .invalidInput: return .invalidInput
+        case .invalidKeyConfig: return .invalidKeyConfig
+        case .unsupportedSuite: return .unsupportedSuite
+        case .invalidToken: return .invalidToken
+        case .encryptionFailed: return .hpkeSetupFailed
+        case .decryptionFailed: return .aeadDecryptFailed
+        case .missingResponseNonce: return .missingResponseNonce
+        case .invalidResponseNonce: return .invalidResponseNonce
+        case .framingTruncated: return .framingTruncated
+        case .chunkTooLarge: return .chunkTooLarge
+        case .sequenceOverflow: return .sequenceOverflow
+        case .keyConfigMismatch: return .keyConfigMismatch
+        case .networkError: return nil
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .invalidInput(let m), .invalidKeyConfig(let m), .unsupportedSuite(let m),
+             .invalidToken(let m), .encryptionFailed(let m), .decryptionFailed(let m),
+             .invalidResponseNonce(let m), .framingTruncated(let m), .chunkTooLarge(let m),
+             .keyConfigMismatch(let m), .networkError(let m):
+            return m
+        case .missingResponseNonce:
+            return "missing \(EHBPProtocol.responseNonceHeader) header"
+        case .sequenceOverflow:
+            return "response chunk sequence overflow"
+        }
+    }
 
     public var errorDescription: String? {
-        switch self {
-        case .invalidInput(let msg): return "Invalid input: \(msg)"
-        case .encryptionFailed(let msg): return "Encryption failed: \(msg)"
-        case .decryptionFailed(let msg): return "Decryption failed: \(msg)"
-        case .networkError(let msg): return "Network error: \(msg)"
-        case .invalidResponse(let msg): return "Invalid response: \(msg)"
-        case .missingHeader(let msg): return "Missing header: \(msg)"
-        }
+        guard let code else { return detail }
+        return "\(code.rawValue): \(detail)"
     }
 }

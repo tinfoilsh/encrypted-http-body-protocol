@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -51,13 +52,13 @@ type ResponseKeyMaterial struct {
 //	aead_nonce = Expand(prk, "nonce", Nn)
 func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*ResponseKeyMaterial, error) {
 	if len(exportedSecret) != ExportLength {
-		return nil, fmt.Errorf("exported secret must be %d bytes, got %d", ExportLength, len(exportedSecret))
+		return nil, protocol.Errorf(protocol.InvalidInput, "exported secret must be %d bytes, got %d", ExportLength, len(exportedSecret))
 	}
 	if len(requestEnc) != 32 { // X25519 enc is 32 bytes
-		return nil, fmt.Errorf("request enc must be 32 bytes, got %d", len(requestEnc))
+		return nil, protocol.Errorf(protocol.InvalidInput, "request enc must be 32 bytes, got %d", len(requestEnc))
 	}
 	if len(responseNonce) != ResponseNonceLength {
-		return nil, fmt.Errorf("response nonce must be %d bytes, got %d", ResponseNonceLength, len(responseNonce))
+		return nil, protocol.Errorf(protocol.InvalidInput, "response nonce must be %d bytes, got %d", ResponseNonceLength, len(responseNonce))
 	}
 
 	// salt = concat(enc, response_nonce)
@@ -145,7 +146,7 @@ func (r *ResponseAEAD) Seal(plaintext, aad []byte) []byte {
 // Returns an error if authentication fails.
 func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
 	if r.seq == ^uint64(0) {
-		return nil, fmt.Errorf("response chunk sequence overflow")
+		return nil, protocol.Errorf(protocol.SequenceOverflow, "response chunk sequence overflow")
 	}
 	nonce := r.computeNonce()
 	plaintext, err := r.aead.Open(nil, nonce, ciphertext, aad)

@@ -3,7 +3,7 @@ import { extractSessionRecoveryToken, decryptResponseWithToken } from './identit
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { KeyConfigMismatchError, ProtocolError } from './errors.js';
+import { Code, KeyConfigMismatchError, ProtocolError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -47,12 +47,12 @@ export class Transport {
     const response = await fetch(keysURL.toString(), init);
 
     if (!response.ok) {
-      throw new Error(`Failed to get server public key: ${response.status}`);
+      throw new ProtocolError(Code.INVALID_KEY_CONFIG, `failed to get server public key: status ${response.status}`);
     }
 
     const contentType = response.headers.get('content-type');
     if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
-      throw new Error(`Invalid content type: ${contentType}`);
+      throw new ProtocolError(Code.INVALID_KEY_CONFIG, `invalid key content type: ${contentType}`);
     }
 
     const keysData = new Uint8Array(await response.arrayBuffer());
@@ -120,7 +120,7 @@ export class Transport {
       return false;
     }
 
-    throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    throw new ProtocolError(Code.MISSING_RESPONSE_NONCE, `missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
 
   /**

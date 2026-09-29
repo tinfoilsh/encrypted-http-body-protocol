@@ -12,6 +12,7 @@ from .derive import (
     frame_chunk,
 )
 from .errors import (
+    Code,
     CryptoError,
     EHBPError,
     HPKEError,
@@ -19,6 +20,7 @@ from .errors import (
     InvalidInputError,
     KeyConfigMismatchError,
     ProtocolError,
+    code_of,
 )
 from .identity import EncryptedRequest, ServerIdentity
 from .session import SessionRecoveryToken
@@ -42,6 +44,8 @@ __all__ = [
     "encrypt_chunk",
     "decrypt_chunk",
     "frame_chunk",
+    "Code",
+    "code_of",
     "EHBPError",
     "InvalidConfigError",
     "InvalidInputError",

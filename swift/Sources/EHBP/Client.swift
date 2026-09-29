@@ -105,11 +105,11 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError.invalidResponse("invalid response nonce hex")
+            throw EHBPError.invalidResponseNonce("invalid response nonce hex")
         }
 
         guard responseNonce.count == EHBPConstants.responseNonceLength else {
-            throw EHBPError.invalidResponse("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
+            throw EHBPError.invalidResponseNonce("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
         }
 
         let decryptedData = try EHBP.decryptResponseBody(
@@ -193,7 +193,7 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError.invalidResponse("invalid response nonce hex")
+            throw EHBPError.invalidResponseNonce("invalid response nonce hex")
         }
 
         let responseDecryptor = try token!.makeResponseDecryptor(
@@ -254,7 +254,7 @@ public final class EHBPClient: @unchecked Sendable {
             return nonce
         }
         guard !(200..<300).contains(response.statusCode) else {
-            throw EHBPError.missingHeader(EHBPProtocol.responseNonceHeader)
+            throw EHBPError.missingResponseNonce
         }
         return nil
     }
