@@ -104,13 +104,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (data, httpResponse)
         }
 
-        guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
-        }
-
-        guard responseNonce.count == EHBPConstants.responseNonceLength else {
-            throw EHBPError(.invalidResponseNonce, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
-        }
+        let responseNonce = try parseResponseNonce(responseNonceHex)
 
         let decryptedData = try EHBP.decryptResponseBody(
             token: token!,
@@ -192,9 +186,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (stream, httpResponse)
         }
 
-        guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
-        }
+        let responseNonce = try parseResponseNonce(responseNonceHex)
 
         let responseDecryptor = try token!.makeResponseDecryptor(
             responseNonce: responseNonce
@@ -435,4 +427,15 @@ public extension Data {
     var hexString: String {
         map { String(format: "%02x", $0) }.joined()
     }
+}
+
+/// Decodes the `Ehbp-Response-Nonce` header value; both request paths share it.
+func parseResponseNonce(_ hex: String) throws -> Data {
+    guard let nonce = Data(hexString: hex) else {
+        throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
+    }
+    guard nonce.count == EHBPConstants.responseNonceLength else {
+        throw EHBPError(.invalidResponseNonce, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(nonce.count)")
+    }
+    return nonce
 }

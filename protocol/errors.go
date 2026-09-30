@@ -36,13 +36,18 @@ type Error struct {
 	Err  error
 }
 
-func (e *Error) Error() string { return string(e.Code) + ": " + e.Err.Error() }
+func (e *Error) Error() string {
+	if e.Err == nil {
+		return string(e.Code)
+	}
+	return string(e.Code) + ": " + e.Err.Error()
+}
 func (e *Error) Unwrap() error { return e.Err }
 
 // Is makes errors.Is(err, &protocol.Error{Code: c}) match by code.
 func (e *Error) Is(target error) bool {
 	t, ok := target.(*Error)
-	return ok && t.Code == e.Code
+	return ok && t != nil && t.Code == e.Code
 }
 
 // Errorf builds a coded error; format and args behave as fmt.Errorf (use %w to chain).

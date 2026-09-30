@@ -231,8 +231,8 @@ For DHKEM implementations, developers SHOULD follow RFC 9180 guidance on implici
 
 ### 5.5 Error Classes
 
-Every failure an implementation surfaces to its caller MUST be assigned exactly one of
-the following classes. Implementations MUST expose the class programmatically and MUST
+Every failure of a step this specification defines MUST be assigned exactly one of the
+following classes. Transport and I/O failures outside those steps carry no class. Implementations MUST expose the class programmatically and MUST
 format the human-readable message as `<CODE>: <detail>`. The class is for the
 in-process caller only: implementations MUST NOT send it on the wire. The 422
 `application/problem+json` type in Section 5.4.2 remains the only error signal a
@@ -247,8 +247,8 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | --- | --- | --- |
 | `INVALID_KEY_CONFIG` | client | Key config unparseable (truncated, bad public key, no suites) or discovery returned a non-2xx status or wrong media type |
 | `UNSUPPORTED_SUITE` | client | Key config advertises a KEM, KDF, or AEAD other than the suite in Section 3.2 |
-| `INVALID_ENCAPSULATED_KEY` | server | `Ehbp-Encapsulated-Key` missing, not hex, wrong length, or repeated |
-| `HPKE_SETUP_FAILED` | both | HPKE sender or recipient setup failed |
+| `INVALID_ENCAPSULATED_KEY` | server | `Ehbp-Encapsulated-Key` not hex, wrong length, or repeated; or absent where the server requires encryption (Section 5.2 pass-through is not a failure) |
+| `HPKE_SETUP_FAILED` | both | HPKE setup, seal, export, or response key derivation failed |
 | `MISSING_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` absent on a 2xx response to an encrypted request |
 | `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |

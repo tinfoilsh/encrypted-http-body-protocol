@@ -4,7 +4,12 @@ import pytest
 
 from ehbp import FrameDecryptor, ResponseKeyMaterial, SessionRecoveryToken, compute_nonce
 from ehbp.derive import decrypt_framed_response, derive_response_keys, encrypt_chunk, frame_chunk
-from ehbp.errors import AEADDecryptFailedError, ChunkTooLargeError, FramingTruncatedError, SequenceOverflowError
+from ehbp.errors import (
+    AEADDecryptFailedError,
+    ChunkTooLargeError,
+    FramingTruncatedError,
+    SequenceOverflowError,
+)
 from ehbp.protocol import AES_GCM_NONCE_LENGTH, MAX_SEQUENCE, RESPONSE_NONCE_LENGTH
 
 

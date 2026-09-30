@@ -23,7 +23,13 @@ from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
-from .errors import AEADDecryptFailedError, ChunkTooLargeError, FramingTruncatedError, InvalidInputError, SequenceOverflowError
+from .errors import (
+    AEADDecryptFailedError,
+    ChunkTooLargeError,
+    FramingTruncatedError,
+    InvalidInputError,
+    SequenceOverflowError,
+)
 from .protocol import (
     AES256_KEY_LENGTH,
     AES_GCM_NONCE_LENGTH,
@@ -98,7 +104,7 @@ def encrypt_chunk(km: ResponseKeyMaterial, seq: int, plaintext: bytes) -> bytes:
     try:
         return AESGCM(km.key).encrypt(nonce, bytes(plaintext), b"")
     except Exception as err:  # noqa: BLE001 - normalize to a stable error shape
-        raise AEADDecryptFailedError("failed to encrypt chunk") from err
+        raise InvalidInputError("failed to encrypt chunk") from err
 
 
 def decrypt_chunk(km: ResponseKeyMaterial, seq: int, ciphertext: bytes) -> bytes:

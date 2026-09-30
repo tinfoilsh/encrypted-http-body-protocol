@@ -105,7 +105,9 @@ class ServerIdentity:
         kdf_id, offset = _read_u16(data, offset, "KDF id")
         aead_id, offset = _read_u16(data, offset, "AEAD id")
         if kdf_id != KDF_HKDF_SHA256 or aead_id != AEAD_AES_256_GCM:
-            raise UnsupportedSuiteError(f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}")
+            raise UnsupportedSuiteError(
+                f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}"
+            )
 
         return cls(public_key, key_id)
 
