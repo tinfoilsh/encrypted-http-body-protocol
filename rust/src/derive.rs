@@ -72,9 +72,9 @@ pub fn derive_response_keys(
     let mut key = [0u8; AES256_KEY_LENGTH];
     let mut nonce_base = [0u8; AES_GCM_NONCE_LENGTH];
     hk.expand(RESPONSE_KEY_LABEL, &mut key)
-        .map_err(|err| Error::Crypto(format!("failed to derive response key: {err}")))?;
+        .map_err(|err| Error::AeadDecryptFailed(format!("failed to derive response key: {err}")))?;
     hk.expand(RESPONSE_NONCE_LABEL, &mut nonce_base)
-        .map_err(|err| Error::Crypto(format!("failed to derive response nonce: {err}")))?;
+        .map_err(|err| Error::AeadDecryptFailed(format!("failed to derive response nonce: {err}")))?;
 
     Ok(ResponseKeyMaterial { key, nonce_base })
 }
@@ -96,7 +96,7 @@ pub(crate) fn decrypt_chunk(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(&key_material.key)
-        .map_err(|err| Error::Crypto(format!("failed to create AES-GCM cipher: {err}")))?;
+        .map_err(|err| Error::AeadDecryptFailed(format!("failed to create AES-GCM cipher: {err}")))?;
     let nonce = compute_nonce(&key_material.nonce_base, seq);
     cipher
         .decrypt(
@@ -106,7 +106,7 @@ pub(crate) fn decrypt_chunk(
                 aad: &[],
             },
         )
-        .map_err(|err| Error::Crypto(format!("failed to decrypt chunk: {err}")))
+        .map_err(|err| Error::AeadDecryptFailed(format!("failed to decrypt chunk: {err}")))
 }
 
 pub(crate) fn decrypt_framed_response(
@@ -296,7 +296,7 @@ mod tests {
         let mut tampered = ResponseDecryptor::from_key_material(key_material);
         assert!(matches!(
             tampered.push(&tampered_frame),
-            Err(Error::Crypto(_))
+            Err(Error::AeadDecryptFailed(_))
         ));
         assert_eq!(tampered.sequence, 0);
         assert_eq!(&tampered.buffer[..], tampered_frame);

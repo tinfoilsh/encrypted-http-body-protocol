@@ -4,7 +4,7 @@ import pytest
 
 from ehbp import FrameDecryptor, ResponseKeyMaterial, SessionRecoveryToken, compute_nonce
 from ehbp.derive import decrypt_framed_response, derive_response_keys, encrypt_chunk, frame_chunk
-from ehbp.errors import CryptoError, ProtocolError
+from ehbp.errors import AEADDecryptFailedError, ChunkTooLargeError, FramingTruncatedError, SequenceOverflowError
 from ehbp.protocol import AES_GCM_NONCE_LENGTH, MAX_SEQUENCE, RESPONSE_NONCE_LENGTH
 
 
@@ -54,7 +54,7 @@ def test_zero_length_frames_are_skipped_without_consuming_sequence():
 def test_truncated_trailing_chunk_is_rejected():
     km = _key_material()
     framed = frame_chunk(encrypt_chunk(km, 0, b"data"))
-    with pytest.raises(ProtocolError):
+    with pytest.raises(FramingTruncatedError):
         decrypt_framed_response(km, framed[:-1])
 
 
@@ -79,7 +79,7 @@ def test_streaming_decryptor_rejects_oversized_chunk_length():
     # A length prefix declaring a 1 MiB chunk must be rejected before buffering
     # the (unauthenticated) chunk body, even if no body bytes have arrived yet.
     oversized_prefix = (1 << 20).to_bytes(4, "big")
-    with pytest.raises(ProtocolError):
+    with pytest.raises(ChunkTooLargeError):
         decryptor.push(oversized_prefix)
 
 
@@ -129,7 +129,7 @@ def test_token_decryptor_rejects_authentication_failure_before_emitting():
 
     decryptor = token.create_response_decryptor(response_nonce)
 
-    with pytest.raises(CryptoError):
+    with pytest.raises(AEADDecryptFailedError):
         decryptor.push(bytes(framed))
 
 
@@ -139,7 +139,7 @@ def test_streaming_decryptor_rejects_truncated_eof():
     decryptor = FrameDecryptor(km)
 
     assert decryptor.push(framed[:-1]) == []
-    with pytest.raises(ProtocolError):
+    with pytest.raises(FramingTruncatedError):
         decryptor.finish()
 
 
@@ -149,5 +149,5 @@ def test_streaming_decryptor_rejects_sequence_overflow():
     decryptor = FrameDecryptor(km)
     decryptor._seq = MAX_SEQUENCE
 
-    with pytest.raises(ProtocolError, match="sequence overflow"):
+    with pytest.raises(SequenceOverflowError):
         decryptor.push(framed)

@@ -1,14 +1,14 @@
 """Exception hierarchy for the EHBP client.
 
-Every error carries a canonical, cross-SDK ``Code`` (SPEC Section 5.5) so a caller
-switches on one key in any language. ``str(err)`` is ``"<CODE>: <detail>"``. Codes
-are for the in-process caller only and are never sent on the wire (SPEC 5.4.4).
+One subclass per canonical, cross-SDK error class (SPEC Section 5.5), named after
+its code. ``str(err)`` is ``"<CODE>: <detail>"``. Codes are for the in-process
+caller only and are never sent on the wire (SPEC 5.4.4).
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import ClassVar, Optional
 
 
 class Code(str, Enum):
@@ -29,60 +29,74 @@ class Code(str, Enum):
 
 
 class EHBPError(Exception):
-    """Base class for all EHBP errors.
+    """Base class; catch this for any EHBP failure. Raise only a subclass."""
 
-    Subclasses set a default ``code``; raise sites whose class covers several
-    codes pass ``code=`` explicitly.
-    """
+    code: ClassVar[Code]
 
-    code: Code = Code.INVALID_INPUT
-
-    def __init__(self, message: str, code: Optional[Code] = None) -> None:
+    def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
-        if code is not None:
-            self.code = code
 
     def __str__(self) -> str:
         return f"{self.code.value}: {self.message}"
 
 
-class InvalidConfigError(EHBPError):
-    """The server key configuration could not be parsed or is unsupported."""
-
+class InvalidKeyConfigError(EHBPError):
     code = Code.INVALID_KEY_CONFIG
 
 
-class InvalidInputError(EHBPError):
-    """Caller-supplied input is invalid (bad URL, reserved header, ...)."""
-
-    code = Code.INVALID_INPUT
+class UnsupportedSuiteError(EHBPError):
+    code = Code.UNSUPPORTED_SUITE
 
 
-class ProtocolError(EHBPError):
-    """The peer violated the EHBP framing or header contract; ``code`` says how."""
+class InvalidEncapsulatedKeyError(EHBPError):
+    code = Code.INVALID_ENCAPSULATED_KEY
+
+
+class HPKESetupFailedError(EHBPError):
+    code = Code.HPKE_SETUP_FAILED
+
+
+class MissingResponseNonceError(EHBPError):
+    code = Code.MISSING_RESPONSE_NONCE
+
+
+class InvalidResponseNonceError(EHBPError):
+    code = Code.INVALID_RESPONSE_NONCE
+
+
+class DuplicateResponseNonceError(EHBPError):
+    code = Code.DUPLICATE_RESPONSE_NONCE
 
 
 class KeyConfigMismatchError(EHBPError):
-    """The server reported a key-configuration mismatch (HTTP 422).
-
-    The request was rejected before application processing completed, so it is
-    safe to refresh the server key configuration and retry (SPEC Section 5.4.3).
-    """
+    """HTTP 422 key-configuration problem: refresh the key config and retry (SPEC 5.4.3)."""
 
     code = Code.KEY_CONFIG_MISMATCH
 
 
-class HPKEError(EHBPError):
-    """An HPKE setup, seal, or export operation failed."""
-
-    code = Code.HPKE_SETUP_FAILED
+class FramingTruncatedError(EHBPError):
+    code = Code.FRAMING_TRUNCATED
 
 
-class CryptoError(EHBPError):
-    """An AEAD or key-derivation operation failed."""
+class ChunkTooLargeError(EHBPError):
+    code = Code.CHUNK_TOO_LARGE
 
+
+class AEADDecryptFailedError(EHBPError):
     code = Code.AEAD_DECRYPT_FAILED
+
+
+class SequenceOverflowError(EHBPError):
+    code = Code.SEQUENCE_OVERFLOW
+
+
+class InvalidTokenError(EHBPError):
+    code = Code.INVALID_TOKEN
+
+
+class InvalidInputError(EHBPError):
+    code = Code.INVALID_INPUT
 
 
 def code_of(err: BaseException) -> Optional[Code]:

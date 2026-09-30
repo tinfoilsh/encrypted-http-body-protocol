@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
-from .errors import Code, CryptoError, InvalidInputError, ProtocolError
+from .errors import AEADDecryptFailedError, ChunkTooLargeError, FramingTruncatedError, InvalidInputError, SequenceOverflowError
 from .protocol import (
     AES256_KEY_LENGTH,
     AES_GCM_NONCE_LENGTH,
@@ -86,7 +86,7 @@ def compute_nonce(nonce_base: bytes, seq: int) -> bytes:
     if len(nonce_base) != AES_GCM_NONCE_LENGTH:
         raise InvalidInputError(f"nonce base must be {AES_GCM_NONCE_LENGTH} bytes")
     if seq < 0 or seq > MAX_SEQUENCE:
-        raise ProtocolError("response chunk sequence out of range")
+        raise InvalidInputError("response chunk sequence out of range")
     nonce = bytearray(nonce_base)
     for i in range(8):
         nonce[AES_GCM_NONCE_LENGTH - 1 - i] ^= (seq >> (i * 8)) & 0xFF
@@ -98,7 +98,7 @@ def encrypt_chunk(km: ResponseKeyMaterial, seq: int, plaintext: bytes) -> bytes:
     try:
         return AESGCM(km.key).encrypt(nonce, bytes(plaintext), b"")
     except Exception as err:  # noqa: BLE001 - normalize to a stable error shape
-        raise CryptoError("failed to encrypt chunk") from err
+        raise AEADDecryptFailedError("failed to encrypt chunk") from err
 
 
 def decrypt_chunk(km: ResponseKeyMaterial, seq: int, ciphertext: bytes) -> bytes:
@@ -106,7 +106,7 @@ def decrypt_chunk(km: ResponseKeyMaterial, seq: int, ciphertext: bytes) -> bytes
     try:
         return AESGCM(km.key).decrypt(nonce, bytes(ciphertext), b"")
     except Exception as err:  # noqa: BLE001 - do not leak the failing crypto stage
-        raise CryptoError("failed to decrypt chunk") from err
+        raise AEADDecryptFailedError("failed to decrypt chunk") from err
 
 
 def frame_chunk(ciphertext: bytes) -> bytes:
@@ -152,7 +152,7 @@ class FrameDecryptor:
                 del self._buffer[:LENGTH_PREFIX_SIZE]
                 continue
             if chunk_len > self._max_chunk_length:
-                raise ProtocolError("response chunk exceeds maximum allowed size", code=Code.CHUNK_TOO_LARGE)
+                raise ChunkTooLargeError("response chunk exceeds maximum allowed size")
             if len(self._buffer) < LENGTH_PREFIX_SIZE + chunk_len:
                 break
 
@@ -162,11 +162,11 @@ class FrameDecryptor:
             del self._buffer[: LENGTH_PREFIX_SIZE + chunk_len]
             chunks.append(decrypt_chunk(self._km, self._seq, ciphertext))
             if self._seq >= MAX_SEQUENCE:
-                raise ProtocolError("response chunk sequence overflow", code=Code.SEQUENCE_OVERFLOW)
+                raise SequenceOverflowError("response chunk sequence overflow")
             self._seq += 1
 
         return chunks
 
     def finish(self) -> None:
         if self._buffer:
-            raise ProtocolError("truncated encrypted response chunk", code=Code.FRAMING_TRUNCATED)
+            raise FramingTruncatedError("truncated encrypted response chunk")

@@ -15,9 +15,20 @@ export {
   Code,
   codeOf,
   EhbpError,
+  InvalidKeyConfigError,
+  UnsupportedSuiteError,
+  InvalidEncapsulatedKeyError,
+  HpkeSetupFailedError,
+  MissingResponseNonceError,
+  InvalidResponseNonceError,
+  DuplicateResponseNonceError,
   KeyConfigMismatchError,
-  ProtocolError,
-  DecryptionError,
+  FramingTruncatedError,
+  ChunkTooLargeError,
+  AeadDecryptFailedError,
+  SequenceOverflowError,
+  InvalidTokenError,
+  InvalidInputError,
 } from './errors.js';
 
 // Export key derivation utilities for advanced usage
