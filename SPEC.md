@@ -238,6 +238,11 @@ in-process caller only: implementations MUST NOT send it on the wire. The 422
 `application/problem+json` type in Section 5.4.2 remains the only error signal a
 server emits. The list is append-only; existing codes are never renamed or removed.
 
+Implementations SHOULD expose one error type or variant per class, named after the
+code in the language's own casing (`UnsupportedSuiteError`, `Error::UnsupportedSuite`,
+`.unsupportedSuite`). An implementation whose idiom is a single error value carrying a
+code field (Go) satisfies this by exposing the code as a typed constant.
+
 | Code | Side | Condition |
 | --- | --- | --- |
 | `INVALID_KEY_CONFIG` | client | Key config unparseable (truncated, bad public key, no suites) or discovery returned a non-2xx status or wrong media type |

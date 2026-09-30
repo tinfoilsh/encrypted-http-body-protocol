@@ -7,7 +7,7 @@ import pytest
 
 from conftest import MockServer
 from ehbp import AsyncEHBPTransport, EHBPTransport
-from ehbp.errors import KeyConfigMismatchError, ProtocolError
+from ehbp.errors import ChunkTooLargeError, KeyConfigMismatchError, MissingResponseNonceError
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER
 
 URL = "https://server.example/v1/echo"
@@ -81,7 +81,7 @@ def test_key_config_mismatch_raises_dedicated_error(make_server):
 
 def test_missing_response_nonce_fails_closed(make_server):
     server = make_server(mode="strip_nonce")
-    with _sync_client(server) as client, pytest.raises(ProtocolError):
+    with _sync_client(server) as client, pytest.raises(MissingResponseNonceError):
         client.post(URL, content=b"payload")
 
 
@@ -115,14 +115,14 @@ def test_encrypted_non_success_response_is_decrypted(make_server):
 
 
 def test_oversized_response_chunk_is_rejected(server: MockServer):
-    with _sync_client(server, max_response_bytes=4) as client, pytest.raises(ProtocolError):
+    with _sync_client(server, max_response_bytes=4) as client, pytest.raises(ChunkTooLargeError):
         client.post(URL, content=b"this response will exceed the tiny cap")
 
 
 def test_missing_nonce_response_body_is_capped(make_server):
     server = make_server(mode="strip_nonce")
     client = _sync_client(server, max_response_bytes=4)
-    with client, pytest.raises(ProtocolError) as excinfo:
+    with client, pytest.raises(ChunkTooLargeError) as excinfo:
         client.post(URL, content=b"payload")
     assert "exceeds maximum allowed size" in str(excinfo.value)
 
@@ -215,7 +215,7 @@ def test_async_missing_nonce_response_body_is_capped(make_server):
         async with _async_client(server, max_response_bytes=4) as client:
             await client.post(URL, content=b"payload")
 
-    with pytest.raises(ProtocolError) as excinfo:
+    with pytest.raises(ChunkTooLargeError) as excinfo:
         asyncio.run(run())
     assert "exceeds maximum allowed size" in str(excinfo.value)
 

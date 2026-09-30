@@ -14,7 +14,7 @@ from typing import Optional
 
 import httpx
 
-from .errors import Code, KeyConfigMismatchError, ProtocolError
+from .errors import DuplicateResponseNonceError, InvalidResponseNonceError, KeyConfigMismatchError, MissingResponseNonceError
 from .protocol import (
     KEY_CONFIG_PROBLEM_TYPE,
     PROBLEM_JSON_MEDIA_TYPE,
@@ -58,18 +58,15 @@ def raise_for_key_config_mismatch(status: int, headers: httpx.Headers, body: byt
 def response_nonce(headers: httpx.Headers) -> bytes:
     values = headers.get_list(RESPONSE_NONCE_HEADER)
     if not values:
-        raise ProtocolError(f"missing {RESPONSE_NONCE_HEADER} header", code=Code.MISSING_RESPONSE_NONCE)
+        raise MissingResponseNonceError(f"missing {RESPONSE_NONCE_HEADER} header")
     if len(values) > 1:
-        raise ProtocolError(f"multiple {RESPONSE_NONCE_HEADER} headers", code=Code.DUPLICATE_RESPONSE_NONCE)
+        raise DuplicateResponseNonceError(f"multiple {RESPONSE_NONCE_HEADER} headers")
     try:
         nonce = bytes.fromhex(values[0].strip())
     except ValueError as err:
-        raise ProtocolError(f"invalid response nonce header: {err}", code=Code.INVALID_RESPONSE_NONCE) from err
+        raise InvalidResponseNonceError(f"invalid response nonce header: {err}") from err
     if len(nonce) != RESPONSE_NONCE_LENGTH:
-        raise ProtocolError(
-            f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}",
-            code=Code.INVALID_RESPONSE_NONCE,
-        )
+        raise InvalidResponseNonceError(f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}")
     return nonce
 
 

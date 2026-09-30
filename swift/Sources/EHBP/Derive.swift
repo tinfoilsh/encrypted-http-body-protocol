@@ -102,7 +102,7 @@ public func decryptChunk(
     let nonce = computeNonce(nonceBase: keyMaterial.nonceBase, seq: seq)
 
     guard ciphertext.count >= 16 else {
-        throw EHBPError.decryptionFailed("ciphertext too short")
+        throw EHBPError.aeadDecryptFailed("ciphertext too short")
     }
 
     let tagStart = ciphertext.count - 16
@@ -117,7 +117,7 @@ public func decryptChunk(
         )
         return try AES.GCM.open(sealedBox, using: keyMaterial.key)
     } catch {
-        throw EHBPError.decryptionFailed("failed to decrypt chunk: \(error)")
+        throw EHBPError.aeadDecryptFailed("failed to decrypt chunk: \(error)")
     }
 }
 
@@ -246,49 +246,53 @@ public enum EHBPErrorCode: String, Sendable {
     case invalidInput = "INVALID_INPUT"
 }
 
-/// EHBP errors. Each classified case maps to one canonical code and describes
-/// itself as "<CODE>: <detail>". Codes are for the in-process caller only and are
+/// EHBP errors: one case per canonical class (SPEC Section 5.5), named after its
+/// code and describing itself as "<CODE>: <detail>". Codes are for the in-process caller only and are
 /// never sent on the wire (SPEC 5.4.4).
 public enum EHBPError: Error, LocalizedError {
-    case invalidInput(String)
     case invalidKeyConfig(String)
     case unsupportedSuite(String)
-    case invalidToken(String)
-    case encryptionFailed(String)
-    case decryptionFailed(String)
+    case invalidEncapsulatedKey(String)
+    case hpkeSetupFailed(String)
     case missingResponseNonce
     case invalidResponseNonce(String)
+    case duplicateResponseNonce(String)
+    case keyConfigMismatch(String)
     case framingTruncated(String)
     case chunkTooLarge(String)
+    case aeadDecryptFailed(String)
     case sequenceOverflow
-    case keyConfigMismatch(String)
+    case invalidToken(String)
+    case invalidInput(String)
     /// Transport failure; carries no canonical code.
     case networkError(String)
 
     public var code: EHBPErrorCode? {
         switch self {
-        case .invalidInput: return .invalidInput
         case .invalidKeyConfig: return .invalidKeyConfig
         case .unsupportedSuite: return .unsupportedSuite
-        case .invalidToken: return .invalidToken
-        case .encryptionFailed: return .hpkeSetupFailed
-        case .decryptionFailed: return .aeadDecryptFailed
+        case .invalidEncapsulatedKey: return .invalidEncapsulatedKey
+        case .hpkeSetupFailed: return .hpkeSetupFailed
         case .missingResponseNonce: return .missingResponseNonce
         case .invalidResponseNonce: return .invalidResponseNonce
+        case .duplicateResponseNonce: return .duplicateResponseNonce
+        case .keyConfigMismatch: return .keyConfigMismatch
         case .framingTruncated: return .framingTruncated
         case .chunkTooLarge: return .chunkTooLarge
+        case .aeadDecryptFailed: return .aeadDecryptFailed
         case .sequenceOverflow: return .sequenceOverflow
-        case .keyConfigMismatch: return .keyConfigMismatch
+        case .invalidToken: return .invalidToken
+        case .invalidInput: return .invalidInput
         case .networkError: return nil
         }
     }
 
     var detail: String {
         switch self {
-        case .invalidInput(let m), .invalidKeyConfig(let m), .unsupportedSuite(let m),
-             .invalidToken(let m), .encryptionFailed(let m), .decryptionFailed(let m),
-             .invalidResponseNonce(let m), .framingTruncated(let m), .chunkTooLarge(let m),
-             .keyConfigMismatch(let m), .networkError(let m):
+        case .invalidKeyConfig(let m), .unsupportedSuite(let m), .invalidEncapsulatedKey(let m),
+             .hpkeSetupFailed(let m), .invalidResponseNonce(let m), .duplicateResponseNonce(let m),
+             .keyConfigMismatch(let m), .framingTruncated(let m), .chunkTooLarge(let m),
+             .aeadDecryptFailed(let m), .invalidToken(let m), .invalidInput(let m), .networkError(let m):
             return m
         case .missingResponseNonce:
             return "missing \(EHBPProtocol.responseNonceHeader) header"

@@ -8,10 +8,11 @@ import pytest
 from conftest import DEFAULT_BASE_URL, MockServer
 from ehbp import Client, ServerIdentity
 from ehbp.errors import (
-    InvalidConfigError,
+    ChunkTooLargeError,
     InvalidInputError,
+    InvalidKeyConfigError,
     KeyConfigMismatchError,
-    ProtocolError,
+    MissingResponseNonceError,
 )
 from ehbp.protocol import RESPONSE_NONCE_HEADER
 
@@ -218,7 +219,7 @@ def test_base_url_with_credentials_is_rejected(server: MockServer):
 def test_missing_response_nonce_fails_closed(make_server):
     server = make_server(mode="strip_nonce")
     client = server.make_client()
-    with pytest.raises(ProtocolError):
+    with pytest.raises(MissingResponseNonceError):
         client.post("/v1/echo", body=b"payload")
     assert client.get_session_recovery_token() is None
 
@@ -264,7 +265,7 @@ def test_key_config_mismatch_raises_dedicated_error(make_server):
 
 def test_response_size_cap_is_enforced(server: MockServer):
     client = server.make_client(max_response_bytes=4)
-    with pytest.raises(ProtocolError):
+    with pytest.raises(ChunkTooLargeError):
         client.post("/v1/echo", body=b"this response will exceed the tiny cap")
 
 
@@ -281,7 +282,7 @@ def test_discover_accepts_http_transport_by_default(server: MockServer):
 
 
 def test_server_identity_rejects_out_of_range_key_id(server: MockServer):
-    with pytest.raises(InvalidConfigError):
+    with pytest.raises(InvalidKeyConfigError):
         ServerIdentity(server.public_key_bytes, key_id=256)
 
 
