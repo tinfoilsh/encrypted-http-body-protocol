@@ -3,7 +3,7 @@ import { extractSessionRecoveryToken, decryptResponseWithToken } from './identit
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { Code, KeyConfigMismatchError, ProtocolError } from './errors.js';
+import { InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -47,12 +47,12 @@ export class Transport {
     const response = await fetch(keysURL.toString(), init);
 
     if (!response.ok) {
-      throw new ProtocolError(Code.INVALID_KEY_CONFIG, `failed to get server public key: status ${response.status}`);
+      throw new InvalidKeyConfigError(`failed to get server public key: status ${response.status}`);
     }
 
     const contentType = response.headers.get('content-type');
     if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
-      throw new ProtocolError(Code.INVALID_KEY_CONFIG, `invalid key content type: ${contentType}`);
+      throw new InvalidKeyConfigError(`invalid key content type: ${contentType}`);
     }
 
     const keysData = new Uint8Array(await response.arrayBuffer());
@@ -104,7 +104,7 @@ export class Transport {
     }
     if (problem?.type === PROTOCOL.KEY_CONFIG_PROBLEM_TYPE) {
       throw new KeyConfigMismatchError(
-        typeof problem.title === 'string' ? problem.title : undefined
+        typeof problem.title === 'string' ? problem.title : 'key configuration mismatch'
       );
     }
   }
@@ -120,7 +120,7 @@ export class Transport {
       return false;
     }
 
-    throw new ProtocolError(Code.MISSING_RESPONSE_NONCE, `missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    throw new MissingResponseNonceError(`missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
 
   /**

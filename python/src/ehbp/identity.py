@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pyhpke import AEADId, CipherSuite, KDFId, KEMId
 
 from .derive import frame_chunk
-from .errors import Code, HPKEError, InvalidConfigError
+from .errors import HPKESetupFailedError, InvalidKeyConfigError, UnsupportedSuiteError
 from .protocol import (
     AEAD_AES_256_GCM,
     EXPORT_LABEL,
@@ -40,7 +40,7 @@ class EncryptedRequest:
 
 def _read_u16(data: bytes, offset: int, field: str) -> tuple[int, int]:
     if len(data) - offset < 2:
-        raise InvalidConfigError(f"missing {field}")
+        raise InvalidKeyConfigError(f"missing {field}")
     return struct.unpack_from(">H", data, offset)[0], offset + 2
 
 
@@ -52,17 +52,17 @@ class ServerIdentity:
 
     def __init__(self, public_key: bytes, key_id: int = KEY_ID) -> None:
         if len(public_key) != REQUEST_ENC_LENGTH:
-            raise InvalidConfigError(
+            raise InvalidKeyConfigError(
                 f"public key must be {REQUEST_ENC_LENGTH} bytes, got {len(public_key)}"
             )
         self._suite = _new_suite()
         try:
             self._public_key = self._suite.kem.deserialize_public_key(bytes(public_key))
         except Exception as err:  # noqa: BLE001 - pyhpke raises library-specific errors
-            raise InvalidConfigError(f"invalid X25519 public key: {err}") from err
+            raise InvalidKeyConfigError(f"invalid X25519 public key: {err}") from err
         self._public_key_bytes = bytes(public_key)
         if not 0 <= key_id <= _MAX_KEY_ID:
-            raise InvalidConfigError(f"key id must be between 0 and {_MAX_KEY_ID}, got {key_id}")
+            raise InvalidKeyConfigError(f"key id must be between 0 and {_MAX_KEY_ID}, got {key_id}")
         self._key_id = key_id
 
     @classmethod
@@ -74,41 +74,38 @@ class ServerIdentity:
         try:
             raw = bytes.fromhex(public_key_hex)
         except ValueError as err:
-            raise InvalidConfigError(f"invalid public key hex: {err}") from err
+            raise InvalidKeyConfigError(f"invalid public key hex: {err}") from err
         return cls(raw)
 
     @classmethod
     def unmarshal_public_config(cls, data: bytes) -> ServerIdentity:
         if len(data) < 1:
-            raise InvalidConfigError("missing key id")
+            raise InvalidKeyConfigError("missing key id")
         key_id = data[0]
         offset = 1
 
         kem_id, offset = _read_u16(data, offset, "KEM id")
         if kem_id != KEM_X25519_HKDF_SHA256:
-            raise InvalidConfigError(f"unsupported KEM: 0x{kem_id:04x}", code=Code.UNSUPPORTED_SUITE)
+            raise UnsupportedSuiteError(f"unsupported KEM: 0x{kem_id:04x}")
 
         public_key_end = offset + REQUEST_ENC_LENGTH
         if public_key_end > len(data):
-            raise InvalidConfigError("truncated public key")
+            raise InvalidKeyConfigError("truncated public key")
         public_key = data[offset:public_key_end]
         offset = public_key_end
 
         suites_len, offset = _read_u16(data, offset, "cipher suites length")
         if suites_len == 0:
-            raise InvalidConfigError("no cipher suites found in config")
+            raise InvalidKeyConfigError("no cipher suites found in config")
         if suites_len % _CIPHER_SUITE_ENTRY_SIZE != 0:
-            raise InvalidConfigError("cipher suites length must be a multiple of 4")
+            raise InvalidKeyConfigError("cipher suites length must be a multiple of 4")
         if offset + suites_len > len(data):
-            raise InvalidConfigError("truncated cipher suites")
+            raise InvalidKeyConfigError("truncated cipher suites")
 
         kdf_id, offset = _read_u16(data, offset, "KDF id")
         aead_id, offset = _read_u16(data, offset, "AEAD id")
         if kdf_id != KDF_HKDF_SHA256 or aead_id != AEAD_AES_256_GCM:
-            raise InvalidConfigError(
-                f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}",
-                code=Code.UNSUPPORTED_SUITE,
-            )
+            raise UnsupportedSuiteError(f"unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}")
 
         return cls(public_key, key_id)
 
@@ -147,7 +144,7 @@ class ServerIdentity:
             ciphertext = sender.seal(bytes(plaintext), b"")
             exported_secret = sender.export(EXPORT_LABEL, EXPORT_LENGTH)
         except Exception as err:  # noqa: BLE001 - normalize HPKE library failures
-            raise HPKEError(f"failed to encrypt request body: {err}") from err
+            raise HPKESetupFailedError(f"failed to encrypt request body: {err}") from err
 
         token = SessionRecoveryToken(exported_secret, enc)
         return EncryptedRequest(

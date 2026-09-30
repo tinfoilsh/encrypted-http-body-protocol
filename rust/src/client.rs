@@ -59,13 +59,13 @@ impl Client {
         let response = http_client.get(keys_url).send().await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::InvalidConfig(format!(
+            return Err(Error::InvalidKeyConfig(format!(
                 "server returned status {status} while fetching key configuration"
             )));
         }
         let content_type = media_type(response.headers());
         if content_type != KEYS_MEDIA_TYPE {
-            return Err(Error::InvalidConfig(format!(
+            return Err(Error::InvalidKeyConfig(format!(
                 "server returned invalid key content type: {content_type}"
             )));
         }
@@ -1135,7 +1135,7 @@ mod tests {
         assert_eq!(hex::encode(first), vector.plaintext);
         assert!(matches!(
             decrypted.next().await.unwrap(),
-            Err(Error::Crypto(_))
+            Err(Error::AeadDecryptFailed(_))
         ));
     }
 
@@ -1877,7 +1877,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            Error::InvalidConfig(_)
+            Error::InvalidKeyConfig(_)
         ));
     }
 

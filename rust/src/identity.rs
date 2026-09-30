@@ -30,13 +30,13 @@ pub struct ServerIdentity {
 impl ServerIdentity {
     pub fn from_public_key_bytes(public_key: &[u8]) -> Result<Self> {
         if public_key.len() != REQUEST_ENC_LENGTH {
-            return Err(Error::InvalidConfig(format!(
+            return Err(Error::InvalidKeyConfig(format!(
                 "public key must be {REQUEST_ENC_LENGTH} bytes, got {}",
                 public_key.len()
             )));
         }
         let public_key = PublicKey::from_bytes(public_key)
-            .map_err(|err| Error::InvalidConfig(format!("invalid X25519 public key: {err:?}")))?;
+            .map_err(|err| Error::InvalidKeyConfig(format!("invalid X25519 public key: {err:?}")))?;
         Ok(Self {
             key_id: KEY_ID,
             public_key,
@@ -45,7 +45,7 @@ impl ServerIdentity {
 
     pub fn from_public_key_hex(public_key_hex: &str) -> Result<Self> {
         let public_key = hex::decode(public_key_hex)
-            .map_err(|err| Error::InvalidConfig(format!("invalid public key hex: {err}")))?;
+            .map_err(|err| Error::InvalidKeyConfig(format!("invalid public key hex: {err}")))?;
         Self::from_public_key_bytes(&public_key)
     }
 
@@ -54,7 +54,7 @@ impl ServerIdentity {
 
         let key_id = *data
             .get(offset)
-            .ok_or_else(|| Error::InvalidConfig("missing key id".into()))?;
+            .ok_or_else(|| Error::InvalidKeyConfig("missing key id".into()))?;
         offset += 1;
 
         let kem_id = read_u16(data, &mut offset, "KEM id")?;
@@ -66,29 +66,29 @@ impl ServerIdentity {
 
         let public_key_end = offset
             .checked_add(REQUEST_ENC_LENGTH)
-            .ok_or_else(|| Error::InvalidConfig("public key offset overflow".into()))?;
+            .ok_or_else(|| Error::InvalidKeyConfig("public key offset overflow".into()))?;
         if public_key_end > data.len() {
-            return Err(Error::InvalidConfig("truncated public key".into()));
+            return Err(Error::InvalidKeyConfig("truncated public key".into()));
         }
         let public_key_bytes = &data[offset..public_key_end];
         offset = public_key_end;
 
         let suites_len = read_u16(data, &mut offset, "cipher suites length")? as usize;
         if suites_len == 0 {
-            return Err(Error::InvalidConfig(
+            return Err(Error::InvalidKeyConfig(
                 "no cipher suites found in config".into(),
             ));
         }
         if !suites_len.is_multiple_of(4) {
-            return Err(Error::InvalidConfig(
+            return Err(Error::InvalidKeyConfig(
                 "cipher suites length must be a multiple of 4".into(),
             ));
         }
         let suites_end = offset
             .checked_add(suites_len)
-            .ok_or_else(|| Error::InvalidConfig("cipher suites offset overflow".into()))?;
+            .ok_or_else(|| Error::InvalidKeyConfig("cipher suites offset overflow".into()))?;
         if suites_end > data.len() {
-            return Err(Error::InvalidConfig("truncated cipher suites".into()));
+            return Err(Error::InvalidKeyConfig("truncated cipher suites".into()));
         }
 
         let kdf_id = read_u16(data, &mut offset, "KDF id")?;
@@ -150,12 +150,12 @@ impl ServerIdentity {
             HPKE_REQUEST_INFO,
             &mut csprng,
         )
-        .map_err(|err| Error::Hpke(format!("failed to set up sender: {err:?}")))?;
+        .map_err(|err| Error::HpkeSetupFailed(format!("failed to set up sender: {err:?}")))?;
 
         let mut exported_secret = vec![0u8; EXPORT_LENGTH];
         sender
             .export(EXPORT_LABEL, &mut exported_secret)
-            .map_err(|err| Error::Hpke(format!("failed to export response secret: {err:?}")))?;
+            .map_err(|err| Error::HpkeSetupFailed(format!("failed to export response secret: {err:?}")))?;
 
         let request_enc = enc.to_bytes().to_vec();
         let token = SessionRecoveryToken::new(exported_secret, request_enc.clone())?;
@@ -179,7 +179,7 @@ impl RequestEncryptor {
         let ciphertext = self
             .sender
             .seal(plaintext, &[])
-            .map_err(|err| Error::Hpke(format!("failed to seal request body: {err:?}")))?;
+            .map_err(|err| Error::HpkeSetupFailed(format!("failed to seal request body: {err:?}")))?;
         frame_chunk(&ciphertext)
     }
 }
@@ -192,7 +192,7 @@ pub(crate) struct EncryptedRequest {
 
 fn read_u16(data: &[u8], offset: &mut usize, field: &str) -> Result<u16> {
     if data.len().saturating_sub(*offset) < 2 {
-        return Err(Error::InvalidConfig(format!("missing {field}")));
+        return Err(Error::InvalidKeyConfig(format!("missing {field}")));
     }
     let value = u16::from_be_bytes([data[*offset], data[*offset + 1]]);
     *offset += 2;
