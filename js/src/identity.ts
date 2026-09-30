@@ -362,7 +362,7 @@ export function deserializeSessionRecoveryToken(json: string): SessionRecoveryTo
       requestEnc: hexToBytes(parsed.requestEnc),
     };
   } catch (error) {
-    throw new InvalidTokenError('invalid session recovery token', { cause: error });
+    throw new InvalidTokenError(`invalid session recovery token: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 
@@ -392,7 +392,7 @@ export async function decryptResponseWithToken(
   try {
     responseNonce = hexToBytes(responseNonceHex);
   } catch (error) {
-    throw new InvalidResponseNonceError('invalid response nonce hex', { cause: error });
+    throw new InvalidResponseNonceError(`invalid response nonce hex: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
   if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
     throw new InvalidResponseNonceError(`invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`);
