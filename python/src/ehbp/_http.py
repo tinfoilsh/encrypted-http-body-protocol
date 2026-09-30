@@ -14,7 +14,12 @@ from typing import Optional
 
 import httpx
 
-from .errors import DuplicateResponseNonceError, InvalidResponseNonceError, KeyConfigMismatchError, MissingResponseNonceError
+from .errors import (
+    DuplicateResponseNonceError,
+    InvalidResponseNonceError,
+    KeyConfigMismatchError,
+    MissingResponseNonceError,
+)
 from .protocol import (
     KEY_CONFIG_PROBLEM_TYPE,
     PROBLEM_JSON_MEDIA_TYPE,
@@ -66,7 +71,9 @@ def response_nonce(headers: httpx.Headers) -> bytes:
     except ValueError as err:
         raise InvalidResponseNonceError(f"invalid response nonce header: {err}") from err
     if len(nonce) != RESPONSE_NONCE_LENGTH:
-        raise InvalidResponseNonceError(f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}")
+        raise InvalidResponseNonceError(
+            f"invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {len(nonce)}"
+        )
     return nonce
 
 

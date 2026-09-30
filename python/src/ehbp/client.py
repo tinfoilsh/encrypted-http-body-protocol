@@ -112,7 +112,9 @@ class Client:
         http = http_client or _default_http_client()
         response = http.get(base.join(KEYS_PATH), follow_redirects=False)
         if response.status_code // 100 != 2:
-            raise InvalidKeyConfigError(f"server returned status {response.status_code} while fetching key configuration")
+            raise InvalidKeyConfigError(
+                f"server returned status {response.status_code} while fetching key configuration"
+            )
         content_type = response.headers.get("content-type", "")
         if content_type != KEYS_MEDIA_TYPE:
             raise InvalidKeyConfigError(f"server returned invalid key content type: {content_type}")

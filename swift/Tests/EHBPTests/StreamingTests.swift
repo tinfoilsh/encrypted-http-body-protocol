@@ -566,9 +566,10 @@ final class StreamingTests: XCTestCase {
         var frame = Data([0, 0, 0, 16])
         frame.append(Data(repeating: 0, count: 16))
         XCTAssertThrowsError(try exhausted.push(frame)) { error in
-            guard (error as? EHBPError)?.code == .sequenceOverflow else {
+            guard let ehbpError = error as? EHBPError, ehbpError.code == .sequenceOverflow else {
                 return XCTFail("expected sequenceOverflow, got \(error)")
             }
+            XCTAssertEqual(ehbpError.detail, "response chunk sequence overflow")
         }
     }
 

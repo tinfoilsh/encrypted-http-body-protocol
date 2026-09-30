@@ -29,9 +29,13 @@ class SessionRecoveryToken:
 
     def __init__(self, exported_secret: bytes, request_enc: bytes) -> None:
         if len(exported_secret) != EXPORT_LENGTH:
-            raise InvalidTokenError(f"exported secret must be {EXPORT_LENGTH} bytes, got {len(exported_secret)}")
+            raise InvalidTokenError(
+                f"exported secret must be {EXPORT_LENGTH} bytes, got {len(exported_secret)}"
+            )
         if len(request_enc) != REQUEST_ENC_LENGTH:
-            raise InvalidTokenError(f"request enc must be {REQUEST_ENC_LENGTH} bytes, got {len(request_enc)}")
+            raise InvalidTokenError(
+                f"request enc must be {REQUEST_ENC_LENGTH} bytes, got {len(request_enc)}"
+            )
         self._exported_secret = bytes(exported_secret)
         self._request_enc = bytes(request_enc)
 
@@ -88,7 +92,9 @@ class SessionRecoveryToken:
     def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
         """Decrypt a complete framed response body."""
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
-            raise InvalidResponseNonceError(f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}")
+            raise InvalidResponseNonceError(
+                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
+            )
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
         )
@@ -107,7 +113,9 @@ class SessionRecoveryToken:
         chunk has been authenticated and may be consumed before source EOF.
         """
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
-            raise InvalidResponseNonceError(f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}")
+            raise InvalidResponseNonceError(
+                f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
+            )
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
         )
