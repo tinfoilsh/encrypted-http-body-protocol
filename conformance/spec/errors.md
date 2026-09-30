@@ -32,13 +32,16 @@ Every SDK attaches the code to its native error (SPEC 5.5), so the suite asserts
 the library's own classification and adapters perform no translation. Messages
 are `<CODE>: <detail>`; the detail is diagnostic and not asserted.
 
-| SDK | code type | read it with |
-| --- | --- | --- |
-| Go | `protocol.Code` | `protocol.CodeOf(err)` |
-| Python | `ehbp.Code` | `ehbp.code_of(err)` / `err.code` |
-| Rust | `tinfoil_ehbp::Code` | `err.code()` (`Option`) |
-| JavaScript | `Code` | `codeOf(err)` / `err.code` |
-| Swift | `EHBPErrorCode` | `(error as? EHBPError)?.code` |
+| SDK | one type per class | code type | read it with |
+| --- | --- | --- | --- |
+| Go | `protocol.Code` constants (`protocol.UnsupportedSuite`) | `protocol.Code` | `protocol.CodeOf(err)` |
+| Python | `ehbp.<Class>Error` subclasses (`UnsupportedSuiteError`) | `ehbp.Code` | `ehbp.code_of(err)` / `err.code` |
+| Rust | `Error::<Class>` variants (`Error::UnsupportedSuite`) | `tinfoil_ehbp::Code` | `err.code()` (`Option`) |
+| JavaScript | `<Class>Error` subclasses (`UnsupportedSuiteError`) | `Code` | `codeOf(err)` / `err.code` |
+| Swift | `EHBPError.<class>` cases (`.unsupportedSuite`) | `EHBPErrorCode` | `(error as? EHBPError)?.code` |
+
+Class names are the code in each language's casing; acronyms follow the language
+(`HPKESetupFailedError` in Python, `HpkeSetupFailedError` in JavaScript).
 
 ## Fail-closed
 
