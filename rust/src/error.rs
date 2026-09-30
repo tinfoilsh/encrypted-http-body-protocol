@@ -47,53 +47,14 @@ impl std::fmt::Display for Code {
     }
 }
 
-/// One variant per canonical class (SPEC Section 5.5), named after its code and
-/// rendering as `<CODE>: <detail>`. Codes are for the
-/// in-process caller only and never sent on the wire (SPEC 5.4.4).
+/// Classified failures are `Error::Coded(code, detail)` and render as
+/// `<CODE>: <detail>`; match on the code as with `std::io::ErrorKind`. Codes are
+/// for the in-process caller only and never sent on the wire (SPEC 5.4.4).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("INVALID_KEY_CONFIG: {0}")]
-    InvalidKeyConfig(String),
-
-    #[error("UNSUPPORTED_SUITE: {0}")]
-    UnsupportedSuite(String),
-
-    #[error("INVALID_ENCAPSULATED_KEY: {0}")]
-    InvalidEncapsulatedKey(String),
-
-    #[error("HPKE_SETUP_FAILED: {0}")]
-    HpkeSetupFailed(String),
-
-    #[error("MISSING_RESPONSE_NONCE: {0}")]
-    MissingResponseNonce(String),
-
-    #[error("INVALID_RESPONSE_NONCE: {0}")]
-    InvalidResponseNonce(String),
-
-    #[error("DUPLICATE_RESPONSE_NONCE: {0}")]
-    DuplicateResponseNonce(String),
-
-    #[error("KEY_CONFIG_MISMATCH: {0}")]
-    KeyConfigMismatch(String),
-
-    #[error("FRAMING_TRUNCATED: {0}")]
-    FramingTruncated(String),
-
-    #[error("CHUNK_TOO_LARGE: {0}")]
-    ChunkTooLarge(String),
-
-    #[error("AEAD_DECRYPT_FAILED: {0}")]
-    AeadDecryptFailed(String),
-
-    #[error("SEQUENCE_OVERFLOW: {0}")]
-    SequenceOverflow(String),
-
-    #[error("INVALID_TOKEN: {0}")]
-    InvalidToken(String),
-
-    #[error("INVALID_INPUT: {0}")]
-    InvalidInput(String),
+    #[error("{0}: {1}")]
+    Coded(Code, String),
 
     /// Unclassified protocol or internal failure; carries no canonical code.
     #[error("protocol error: {0}")]
@@ -121,23 +82,10 @@ pub enum Error {
 impl Error {
     /// The canonical code, or `None` for transport and internal errors.
     pub fn code(&self) -> Option<Code> {
-        Some(match self {
-            Error::InvalidKeyConfig(_) => Code::InvalidKeyConfig,
-            Error::UnsupportedSuite(_) => Code::UnsupportedSuite,
-            Error::InvalidEncapsulatedKey(_) => Code::InvalidEncapsulatedKey,
-            Error::HpkeSetupFailed(_) => Code::HpkeSetupFailed,
-            Error::MissingResponseNonce(_) => Code::MissingResponseNonce,
-            Error::InvalidResponseNonce(_) => Code::InvalidResponseNonce,
-            Error::DuplicateResponseNonce(_) => Code::DuplicateResponseNonce,
-            Error::KeyConfigMismatch(_) => Code::KeyConfigMismatch,
-            Error::FramingTruncated(_) => Code::FramingTruncated,
-            Error::ChunkTooLarge(_) => Code::ChunkTooLarge,
-            Error::AeadDecryptFailed(_) => Code::AeadDecryptFailed,
-            Error::SequenceOverflow(_) => Code::SequenceOverflow,
-            Error::InvalidToken(_) => Code::InvalidToken,
-            Error::InvalidInput(_) => Code::InvalidInput,
-            _ => return None,
-        })
+        match self {
+            Error::Coded(code, _) => Some(*code),
+            _ => None,
+        }
     }
 }
 

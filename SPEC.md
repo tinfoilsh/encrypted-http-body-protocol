@@ -238,10 +238,10 @@ in-process caller only: implementations MUST NOT send it on the wire. The 422
 `application/problem+json` type in Section 5.4.2 remains the only error signal a
 server emits. The list is append-only; existing codes are never renamed or removed.
 
-Implementations SHOULD expose one error type or variant per class, named after the
-code in the language's own casing (`UnsupportedSuiteError`, `Error::UnsupportedSuite`,
-`.unsupportedSuite`). An implementation whose idiom is a single error value carrying a
-code field (Go) satisfies this by exposing the code as a typed constant.
+Implementations MUST expose the class as a typed value named after the code in the
+language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
+`.unsupportedSuite`). Where the language's idiom is one exception type per class
+(Python, JavaScript), the type is named after the code (`UnsupportedSuiteError`).
 
 | Code | Side | Condition |
 | --- | --- | --- |
