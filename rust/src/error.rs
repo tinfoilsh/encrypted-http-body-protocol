@@ -53,46 +53,46 @@ impl std::fmt::Display for Code {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("INVALID_KEY_CONFIG: {0}")]
+    #[error("{}: {0}", Code::InvalidKeyConfig)]
     InvalidKeyConfig(String),
 
-    #[error("UNSUPPORTED_SUITE: {0}")]
+    #[error("{}: {0}", Code::UnsupportedSuite)]
     UnsupportedSuite(String),
 
-    #[error("INVALID_ENCAPSULATED_KEY: {0}")]
+    #[error("{}: {0}", Code::InvalidEncapsulatedKey)]
     InvalidEncapsulatedKey(String),
 
-    #[error("HPKE_SETUP_FAILED: {0}")]
+    #[error("{}: {0}", Code::HpkeSetupFailed)]
     HpkeSetupFailed(String),
 
-    #[error("MISSING_RESPONSE_NONCE: {0}")]
+    #[error("{}: {0}", Code::MissingResponseNonce)]
     MissingResponseNonce(String),
 
-    #[error("INVALID_RESPONSE_NONCE: {0}")]
+    #[error("{}: {0}", Code::InvalidResponseNonce)]
     InvalidResponseNonce(String),
 
-    #[error("DUPLICATE_RESPONSE_NONCE: {0}")]
+    #[error("{}: {0}", Code::DuplicateResponseNonce)]
     DuplicateResponseNonce(String),
 
-    #[error("KEY_CONFIG_MISMATCH: {0}")]
+    #[error("{}: {0}", Code::KeyConfigMismatch)]
     KeyConfigMismatch(String),
 
-    #[error("FRAMING_TRUNCATED: {0}")]
+    #[error("{}: {0}", Code::FramingTruncated)]
     FramingTruncated(String),
 
-    #[error("CHUNK_TOO_LARGE: {0}")]
+    #[error("{}: {0}", Code::ChunkTooLarge)]
     ChunkTooLarge(String),
 
-    #[error("AEAD_DECRYPT_FAILED: {0}")]
+    #[error("{}: {0}", Code::AeadDecryptFailed)]
     AeadDecryptFailed(String),
 
-    #[error("SEQUENCE_OVERFLOW: {0}")]
+    #[error("{}: {0}", Code::SequenceOverflow)]
     SequenceOverflow(String),
 
-    #[error("INVALID_TOKEN: {0}")]
+    #[error("{}: {0}", Code::InvalidToken)]
     InvalidToken(String),
 
-    #[error("INVALID_INPUT: {0}")]
+    #[error("{}: {0}", Code::InvalidInput)]
     InvalidInput(String),
 
     /// Unclassified protocol or internal failure; carries no canonical code.
@@ -136,7 +136,8 @@ impl Error {
             Error::SequenceOverflow(_) => Code::SequenceOverflow,
             Error::InvalidToken(_) => Code::InvalidToken,
             Error::InvalidInput(_) => Code::InvalidInput,
-            _ => return None,
+            Error::Protocol(_) | Error::Http(_) | Error::Url(_) | Error::HeaderValue(_)
+            | Error::Json(_) | Error::Hex(_) | Error::Utf8(_) => return None,
         })
     }
 }
