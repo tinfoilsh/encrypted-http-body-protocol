@@ -39,11 +39,11 @@ def main() -> None:
         res["outcome"] = "error"
         res["error_code"] = map_error(fx["operation"], err)
         res["body_hex"] = None
-        res["native_error"] = f"{type(err).__name__}: {err}"
+        res["native_error"] = str(err)
     except Exception as err:  # non-EHBP failure is still the adapter reporting honestly
         res["outcome"] = "error"
         res["error_code"] = map_error(fx["operation"], err)
-        res["native_error"] = f"{type(err).__name__}: {err}"
+        res["native_error"] = str(err)
     json.dump(res, sys.stdout)
 
 

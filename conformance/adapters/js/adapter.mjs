@@ -31,7 +31,7 @@ async function main() {
     res.outcome = 'error';
     res.error_code = mapError(fx.operation, err);
     res.body_hex = null;
-    res.native_error = `${err?.name || 'Error'}: ${err?.message || err}`;
+    res.native_error = String(err?.message ?? err);
   }
   process.stdout.write(JSON.stringify(res));
 }
