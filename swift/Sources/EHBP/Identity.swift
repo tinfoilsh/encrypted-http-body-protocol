@@ -66,6 +66,8 @@ public struct SessionRecoveryToken: Sendable, Codable {
     public init(json: Data) throws {
         do {
             self = try JSONDecoder().decode(SessionRecoveryToken.self, from: json)
+        } catch let error as DecodingError {
+            throw EHBPError.invalidToken("invalid session recovery token: \(error.brief)")
         } catch {
             throw EHBPError.invalidToken("invalid session recovery token: \(error)")
         }
@@ -271,5 +273,22 @@ public final class Identity: Sendable {
             requestEnc: token.requestEnc,
             responseNonce: responseNonce
         )
+    }
+}
+
+private extension DecodingError {
+    /// One-line cause without Foundation's debug dump.
+    var brief: String {
+        switch self {
+        case .keyNotFound(let key, _):
+            return "missing \(key.stringValue)"
+        case .dataCorrupted(let context):
+            return context.debugDescription
+        case .typeMismatch(_, let context), .valueNotFound(_, let context):
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+            return path.isEmpty ? "expected JSON object" : "wrong type for \(path)"
+        @unknown default:
+            return String(describing: self)
+        }
     }
 }
