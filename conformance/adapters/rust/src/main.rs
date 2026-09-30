@@ -8,6 +8,7 @@ use std::io::Read;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tinfoil_ehbp::{
+    Code,
     compute_nonce, derive_response_keys, Client, Error, ServerIdentity, SessionRecoveryToken,
     RESPONSE_NONCE_HEADER,
 };
@@ -68,9 +69,9 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         "compute_nonce" => {
             let base: [u8; 12] = h(ins, "nonceBase")
                 .try_into()
-                .map_err(|_| Error::InvalidInput("nonce base must be 12 bytes".into()))?;
+                .map_err(|_| Error::Coded(Code::InvalidInput, "nonce base must be 12 bytes".into()))?;
             let seq = u64::from_str_radix(ins["seqHex"].as_str().unwrap_or(""), 16)
-                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                .map_err(|e| Error::Coded(Code::InvalidInput, e.to_string()))?;
             out.body_hex = Some(hex::encode(compute_nonce(&base, seq)));
         }
         "decrypt_response" | "decrypt_response_streaming" => decrypt(fx, out)?,
@@ -93,7 +94,7 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         "reject_reserved_header" | "reject_cross_origin" | "reject_url_credentials" => {
             harden(op).await?;
         }
-        other => return Err(Error::InvalidInput(format!("unknown operation {other}"))),
+        other => return Err(Error::Coded(Code::InvalidInput, format!("unknown operation {other}"))),
     }
     Ok(())
 }

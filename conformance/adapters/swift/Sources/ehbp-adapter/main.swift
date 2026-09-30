@@ -73,7 +73,7 @@ func run() async throws {
     case "request":
         try await requestOp()
     default:
-        throw EHBPError.invalidInput("unknown operation \(op)")
+        throw EHBPError(.invalidInput, "unknown operation \(op)")
     }
 }
 
