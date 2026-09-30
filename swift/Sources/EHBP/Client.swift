@@ -37,13 +37,13 @@ public final class EHBPClient: @unchecked Sendable {
 
     /// Returns the session recovery token from the last request with a body
     ///
-    /// - Throws: `EHBPError.invalidInput` if no token is available
+    /// - Throws: `EHBPError` with code `.invalidInput` if no token is available
     public func getSessionRecoveryToken() throws -> SessionRecoveryToken {
         tokenLock.lock()
         let token = _lastSessionRecoveryToken
         tokenLock.unlock()
         guard let token else {
-            throw EHBPError.invalidInput("no session recovery token available")
+            throw EHBPError(.invalidInput, "no session recovery token available")
         }
         return token
     }
@@ -65,7 +65,7 @@ public final class EHBPClient: @unchecked Sendable {
     ) async throws -> (data: Data, response: HTTPURLResponse) {
         let urlString = baseURL + path
         guard let url = URL(string: urlString) else {
-            throw EHBPError.invalidInput("invalid URL: \(urlString)")
+            throw EHBPError(.invalidInput, "invalid URL: \(urlString)")
         }
         let generation = beginRequest()
 
@@ -94,7 +94,7 @@ public final class EHBPClient: @unchecked Sendable {
         let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw EHBPError.networkError("expected HTTP response")
+            throw EHBPError.network("expected HTTP response")
         }
 
         guard let responseNonceHex = try EHBPClient.responseNonceHex(
@@ -105,11 +105,11 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError.invalidResponseNonce("invalid response nonce hex")
+            throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
         }
 
         guard responseNonce.count == EHBPConstants.responseNonceLength else {
-            throw EHBPError.invalidResponseNonce("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
+            throw EHBPError(.invalidResponseNonce, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
         }
 
         let decryptedData = try EHBP.decryptResponseBody(
@@ -140,7 +140,7 @@ public final class EHBPClient: @unchecked Sendable {
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
         let urlString = baseURL + path
         guard let url = URL(string: urlString) else {
-            throw EHBPError.invalidInput("invalid URL: \(urlString)")
+            throw EHBPError(.invalidInput, "invalid URL: \(urlString)")
         }
         let generation = beginRequest()
 
@@ -169,7 +169,7 @@ public final class EHBPClient: @unchecked Sendable {
         let (asyncBytes, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw EHBPError.networkError("expected HTTP response")
+            throw EHBPError.network("expected HTTP response")
         }
 
         guard let responseNonceHex = try EHBPClient.responseNonceHex(
@@ -193,7 +193,7 @@ public final class EHBPClient: @unchecked Sendable {
         }
 
         guard let responseNonce = Data(hexString: responseNonceHex) else {
-            throw EHBPError.invalidResponseNonce("invalid response nonce hex")
+            throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
         }
 
         let responseDecryptor = try token!.makeResponseDecryptor(
@@ -254,7 +254,7 @@ public final class EHBPClient: @unchecked Sendable {
             return nonce
         }
         guard !(200..<300).contains(response.statusCode) else {
-            throw EHBPError.missingResponseNonce
+            throw EHBPError(.missingResponseNonce, "missing \(EHBPProtocol.responseNonceHeader) header")
         }
         return nil
     }
@@ -309,7 +309,7 @@ where Iterator.Element == UInt8 {
 
     func next() async throws -> Data? {
         guard !isReading else {
-            throw EHBPError.invalidInput("concurrent stream iteration is unsupported")
+            throw EHBPError(.invalidInput, "concurrent stream iteration is unsupported")
         }
         isReading = true
         defer { isReading = false }
@@ -365,7 +365,7 @@ where Iterator.Element == UInt8 {
     func next() async throws -> Data? {
         guard !isFinished else { return nil }
         guard !isReading else {
-            throw EHBPError.invalidInput("concurrent stream iteration is unsupported")
+            throw EHBPError(.invalidInput, "concurrent stream iteration is unsupported")
         }
         isReading = true
         defer { isReading = false }

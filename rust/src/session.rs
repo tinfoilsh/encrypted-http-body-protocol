@@ -5,7 +5,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::{
     derive::{decrypt_framed_response, derive_response_keys, ResponseDecryptor},
     protocol::{EXPORT_LENGTH, REQUEST_ENC_LENGTH, RESPONSE_NONCE_LENGTH},
-    Error, Result,
+    Code, Error, Result,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -44,13 +44,13 @@ impl Drop for SessionRecoveryToken {
 impl SessionRecoveryToken {
     pub fn new(exported_secret: Vec<u8>, request_enc: Vec<u8>) -> Result<Self> {
         if exported_secret.len() != EXPORT_LENGTH {
-            return Err(Error::InvalidToken(format!(
+            return Err(Error::Coded(Code::InvalidToken, format!(
                 "exported secret must be {EXPORT_LENGTH} bytes, got {}",
                 exported_secret.len()
             )));
         }
         if request_enc.len() != REQUEST_ENC_LENGTH {
-            return Err(Error::InvalidToken(format!(
+            return Err(Error::Coded(Code::InvalidToken, format!(
                 "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
                 request_enc.len()
             )));
@@ -61,14 +61,14 @@ impl SessionRecoveryToken {
         })
     }
 
-    /// Parses the SPEC 6.1.1 JSON form; any malformation is `Error::InvalidToken`.
+    /// Parses the SPEC 6.1.1 JSON form; any malformation is `Error::Coded(Code::InvalidToken, _)`.
     pub fn from_json(json: &str) -> Result<Self> {
-        serde_json::from_str(json).map_err(|err| Error::InvalidToken(err.to_string()))
+        serde_json::from_str(json).map_err(|err| Error::Coded(Code::InvalidToken, err.to_string()))
     }
 
     pub fn decrypt_response_body(&self, response_nonce: &[u8], body: &[u8]) -> Result<Vec<u8>> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::InvalidResponseNonce(format!(
+            return Err(Error::Coded(Code::InvalidResponseNonce, format!(
                 "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
                 response_nonce.len()
             )));
@@ -84,7 +84,7 @@ impl SessionRecoveryToken {
     /// [`ResponseDecryptor::finish`] when the encrypted source reaches EOF.
     pub fn response_decryptor(&self, response_nonce: &[u8]) -> Result<ResponseDecryptor> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::InvalidResponseNonce(format!(
+            return Err(Error::Coded(Code::InvalidResponseNonce, format!(
                 "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
                 response_nonce.len()
             )));
