@@ -110,7 +110,7 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	// Encrypt chunk
 	encrypted, err := r.sender.Seal(nil, plaintext[:bytesRead])
 	if err != nil {
-		return 0, fmt.Errorf("failed to encrypt chunk: %w", err)
+		return 0, protocol.Errorf(protocol.HPKESetupFailed, "failed to encrypt chunk: %w", err)
 	}
 
 	// Chunk with length prefix
@@ -335,13 +335,13 @@ func (i *Identity) SetupDerivedResponseEncryption(
 	respCtx *ResponseContext,
 ) (*DerivedResponseWriter, error) {
 	if respCtx == nil {
-		return nil, fmt.Errorf("response context is nil")
+		return nil, protocol.Errorf(protocol.InvalidInput, "response context is nil")
 	}
 
 	// Export secret from the request's HPKE context
 	exportedSecret, err := respCtx.recipient.Export(ExportLabel, ExportLength)
 	if err != nil {
-		return nil, fmt.Errorf("failed to export secret: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to export secret: %w", err)
 	}
 
 	// Generate random response nonce
@@ -431,7 +431,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 //  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
 func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 	if ctx == nil {
-		return fmt.Errorf("request context is nil")
+		return protocol.Errorf(protocol.InvalidInput, "request context is nil")
 	}
 
 	token, err := ExtractSessionRecoveryToken(ctx)
@@ -503,7 +503,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		// Decrypt chunk (nonce is computed and sequence incremented automatically)
 		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 		if err != nil {
-			return 0, r.fail(protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err))
+			return 0, r.fail(err)
 		}
 
 		// Return as much as fits, buffer the rest

@@ -57,7 +57,7 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, error) {
 	exportedSecret, err := ctx.Sender.Export(ExportLabel, ExportLength)
 	if err != nil {
-		return nil, fmt.Errorf("failed to export HPKE secret: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to export HPKE secret: %w", err)
 	}
 	requestEnc := make([]byte, len(ctx.RequestEnc))
 	copy(requestEnc, ctx.RequestEnc)
@@ -73,7 +73,7 @@ func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, er
 // body reaches EOF. Closing the replacement body closes the original body.
 func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) error {
 	if token == nil {
-		return fmt.Errorf("session recovery token is nil")
+		return protocol.Errorf(protocol.InvalidInput, "session recovery token is nil")
 	}
 
 	responseNonceHex := resp.Header.Get(protocol.ResponseNonceHeader)

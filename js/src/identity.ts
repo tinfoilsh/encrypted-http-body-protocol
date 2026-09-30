@@ -226,7 +226,12 @@ export class Identity {
    * and don't need to fetch it.
    */
   static async fromPublicKeyHex(publicKeyHex: string): Promise<Identity> {
-    const publicKeyBytes = hexToBytes(publicKeyHex);
+    let publicKeyBytes: Uint8Array;
+    try {
+      publicKeyBytes = hexToBytes(publicKeyHex);
+    } catch (error) {
+      throw new InvalidKeyConfigError(`invalid public key hex: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
     if (publicKeyBytes.length !== 32) {
       throw new InvalidKeyConfigError(`invalid public key length: expected 32, got ${publicKeyBytes.length}`);
     }

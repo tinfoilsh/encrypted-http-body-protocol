@@ -117,7 +117,7 @@ func NewTransportWithConfig(server string, hpkeConfig []byte, opts ...Option) (*
 // via identity.FromPublicKeyHex. No network request is made to fetch keys.
 func NewTransportWithIdentity(serverIdentity *identity.Identity, opts ...Option) (*Transport, error) {
 	if serverIdentity == nil {
-		return nil, fmt.Errorf("server identity is required")
+		return nil, protocol.Errorf(protocol.InvalidInput, "server identity is required")
 	}
 
 	t := &Transport{
@@ -131,7 +131,7 @@ func NewTransportWithIdentity(serverIdentity *identity.Identity, opts ...Option)
 func (t *Transport) syncServerPublicKey(server string) error {
 	keysURL, err := url.Parse(server)
 	if err != nil {
-		return fmt.Errorf("failed to parse server URL: %w", err)
+		return protocol.Errorf(protocol.InvalidInput, "failed to parse server URL: %w", err)
 	}
 	keysURL.Path = protocol.KeysPath
 

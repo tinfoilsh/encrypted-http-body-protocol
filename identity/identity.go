@@ -5,7 +5,6 @@ import (
 	"crypto/hpke"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 
@@ -183,7 +182,7 @@ func kemPublicKeySize(kemID uint16) (int, error) {
 	case 0x0021: // DHKEM(X448, HKDF-SHA512)
 		return 56, nil
 	default:
-		return 0, fmt.Errorf("unknown KEM ID: 0x%04x", kemID)
+		return 0, protocol.Errorf(protocol.UnsupportedSuite, "unknown KEM ID: 0x%04x", kemID)
 	}
 }
 
@@ -288,20 +287,20 @@ func Import(identityJSONBytes []byte) (*Identity, error) {
 	}
 
 	if identityStore.KEM == 0 || identityStore.KDF == 0 || identityStore.AEAD == 0 {
-		return nil, fmt.Errorf("invalid identity HPKE configuration")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid identity HPKE configuration")
 	}
 
 	kem, err := hpke.NewKEM(identityStore.KEM)
 	if err != nil {
-		return nil, fmt.Errorf("invalid KEM: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KEM: %w", err)
 	}
 	kdf, err := hpke.NewKDF(identityStore.KDF)
 	if err != nil {
-		return nil, fmt.Errorf("invalid KDF: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KDF: %w", err)
 	}
 	aead, err := hpke.NewAEAD(identityStore.AEAD)
 	if err != nil {
-		return nil, fmt.Errorf("invalid AEAD: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid AEAD: %w", err)
 	}
 
 	var i Identity
