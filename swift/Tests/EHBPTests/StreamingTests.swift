@@ -368,7 +368,7 @@ final class StreamingTests: XCTestCase {
                 }
 
                 if chunkLength > EHBPConstants.maxResponseChunkBytes {
-                    throw EHBPError.chunkTooLarge("response chunk exceeds maximum allowed size")
+                    throw EHBPError(.chunkTooLarge, "response chunk exceeds maximum allowed size")
                 }
 
                 guard buffer.count >= 4 + chunkLength else {
@@ -379,7 +379,7 @@ final class StreamingTests: XCTestCase {
         }
 
         XCTAssertThrowsError(try parseFramedChunks()) { error in
-            guard case EHBPError.chunkTooLarge = error else {
+            guard (error as? EHBPError)?.code == .chunkTooLarge else {
                 return XCTFail("expected chunkTooLarge, got \(error)")
             }
         }
@@ -566,7 +566,7 @@ final class StreamingTests: XCTestCase {
         var frame = Data([0, 0, 0, 16])
         frame.append(Data(repeating: 0, count: 16))
         XCTAssertThrowsError(try exhausted.push(frame)) { error in
-            guard case EHBPError.sequenceOverflow = error else {
+            guard (error as? EHBPError)?.code == .sequenceOverflow else {
                 return XCTFail("expected sequenceOverflow, got \(error)")
             }
         }

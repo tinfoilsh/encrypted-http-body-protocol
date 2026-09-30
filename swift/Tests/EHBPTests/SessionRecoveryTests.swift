@@ -391,7 +391,7 @@ final class SessionRecoveryTests: XCTestCase {
         StubURLProtocol.handler = { [simulateServerResponse] request in
             guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
                   let requestEnc = Data(hexString: encHex) else {
-                throw EHBPError.invalidInput("missing encapsulated key header")
+                throw EHBPError(.invalidInput, "missing encapsulated key header")
             }
             let (responseNonce, encryptedBody) = try simulateServerResponse(
                 serverPrivateKey, requestEnc, Data("full reply".utf8), nil
@@ -444,7 +444,7 @@ final class SessionRecoveryTests: XCTestCase {
         ControlledURLProtocol.handler = { [simulateServerResponse] request, index in
             guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
                   let requestEnc = Data(hexString: encHex) else {
-                throw EHBPError.invalidInput("missing encapsulated key header")
+                throw EHBPError(.invalidInput, "missing encapsulated key header")
             }
             if index == 1 {
                 ControlledURLProtocol.setSecondRequestEnc(requestEnc)
@@ -496,7 +496,7 @@ final class SessionRecoveryTests: XCTestCase {
         StubURLProtocol.handler = { [simulateServerResponse] request in
             guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
                   let requestEnc = Data(hexString: encHex) else {
-                throw EHBPError.invalidInput("missing encapsulated key header")
+                throw EHBPError(.invalidInput, "missing encapsulated key header")
             }
             let (responseNonce, encryptedBody) = try simulateServerResponse(
                 serverPrivateKey, requestEnc, Data("ok".utf8), nil
@@ -543,7 +543,7 @@ final class SessionRecoveryTests: XCTestCase {
         StubURLProtocol.handler = { [simulateServerResponse] request in
             guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
                   let requestEnc = Data(hexString: encHex) else {
-                throw EHBPError.invalidInput("missing encapsulated key header")
+                throw EHBPError(.invalidInput, "missing encapsulated key header")
             }
             let (responseNonce, encryptedBody) = try simulateServerResponse(
                 serverPrivateKey, requestEnc, Data("ok".utf8), nil
@@ -589,7 +589,7 @@ final class SessionRecoveryTests: XCTestCase {
         DelayedFailureURLProtocol.handler = { [simulateServerResponse] request, index in
             guard let encHex = request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader),
                   let requestEnc = Data(hexString: encHex) else {
-                throw EHBPError.invalidInput("missing encapsulated key header")
+                throw EHBPError(.invalidInput, "missing encapsulated key header")
             }
             if index == 1 {
                 DelayedFailureURLProtocol.setSecondRequestEnc(requestEnc)
@@ -656,7 +656,7 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         guard let handler = StubURLProtocol.handler else {
-            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no stub handler"))
+            client?.urlProtocol(self, didFailWithError: EHBPError(.invalidInput, "no stub handler"))
             return
         }
         do {
@@ -691,7 +691,7 @@ private final class ControlledURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         guard let handler = Self.handler else {
-            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no controlled handler"))
+            client?.urlProtocol(self, didFailWithError: EHBPError(.invalidInput, "no controlled handler"))
             return
         }
         do {
@@ -767,7 +767,7 @@ private final class DelayedFailureURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         guard let handler = Self.handler else {
-            client?.urlProtocol(self, didFailWithError: EHBPError.invalidInput("no delayed handler"))
+            client?.urlProtocol(self, didFailWithError: EHBPError(.invalidInput, "no delayed handler"))
             return
         }
         do {

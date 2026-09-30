@@ -62,14 +62,14 @@ public struct SessionRecoveryToken: Sendable, Codable {
         self.requestEnc = requestEncData
     }
 
-    /// Parses the SPEC 6.1.1 JSON form; any malformation is `EHBPError.invalidToken`.
+    /// Parses the SPEC 6.1.1 JSON form; any malformation is `EHBPError` with code `.invalidToken`.
     public init(json: Data) throws {
         do {
             self = try JSONDecoder().decode(SessionRecoveryToken.self, from: json)
         } catch let error as DecodingError {
-            throw EHBPError.invalidToken("invalid session recovery token: \(error.brief)")
+            throw EHBPError(.invalidToken, "invalid session recovery token: \(error.brief)")
         } catch {
-            throw EHBPError.invalidToken("invalid session recovery token: \(error)")
+            throw EHBPError(.invalidToken, "invalid session recovery token: \(error)")
         }
     }
 
@@ -79,7 +79,7 @@ public struct SessionRecoveryToken: Sendable, Codable {
         maxChunkLength: Int = EHBPConstants.maxResponseChunkBytes
     ) throws -> ResponseDecryptor {
         guard maxChunkLength > 0 else {
-            throw EHBPError.invalidInput("maximum chunk length must be positive")
+            throw EHBPError(.invalidInput, "maximum chunk length must be positive")
         }
         let keyMaterial = try deriveResponseKeys(
             exportedSecret: exportedSecret,
@@ -132,7 +132,7 @@ public final class Identity: Sendable {
     /// - Parameter publicKeyBytes: 32-byte X25519 public key
     public init(publicKeyBytes: Data) throws {
         guard publicKeyBytes.count == 32 else {
-            throw EHBPError.invalidKeyConfig("public key must be 32 bytes, got \(publicKeyBytes.count)")
+            throw EHBPError(.invalidKeyConfig, "public key must be 32 bytes, got \(publicKeyBytes.count)")
         }
 
         self.publicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKeyBytes)
@@ -151,7 +151,7 @@ public final class Identity: Sendable {
     /// - Parameter publicKeyHex: 64-character hex string representing a 32-byte X25519 public key
     public convenience init(publicKeyHex: String) throws {
         guard let publicKeyBytes = Data(hexString: publicKeyHex) else {
-            throw EHBPError.invalidKeyConfig("invalid public key hex")
+            throw EHBPError(.invalidKeyConfig, "invalid public key hex")
         }
         try self.init(publicKeyBytes: publicKeyBytes)
     }
@@ -170,7 +170,7 @@ public final class Identity: Sendable {
     /// - Parameter config: RFC 9458 key configuration data
     public init(config: Data) throws {
         guard config.count >= 7 else {
-            throw EHBPError.invalidKeyConfig("config too short")
+            throw EHBPError(.invalidKeyConfig, "config too short")
         }
 
         var offset = 0
@@ -183,13 +183,13 @@ public final class Identity: Sendable {
         offset += 2
 
         guard kemId == HPKEConfig.kem else {
-            throw EHBPError.unsupportedSuite("unsupported KEM: 0x\(String(kemId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported KEM: 0x\(String(kemId, radix: 16))")
         }
 
         // Public Key (32 bytes for X25519)
         let publicKeySize = 32
         guard config.count >= offset + publicKeySize else {
-            throw EHBPError.invalidKeyConfig("config too short for public key")
+            throw EHBPError(.invalidKeyConfig, "config too short for public key")
         }
 
         let publicKeyBytes = config.subdata(in: offset..<(offset + publicKeySize))
@@ -197,7 +197,7 @@ public final class Identity: Sendable {
 
         // Cipher Suites Length (2 bytes)
         guard config.count >= offset + 2 else {
-            throw EHBPError.invalidKeyConfig("config too short for cipher suites length")
+            throw EHBPError(.invalidKeyConfig, "config too short for cipher suites length")
         }
 
         let cipherSuitesLength = Int(config[offset]) << 8 | Int(config[offset + 1])
@@ -205,17 +205,17 @@ public final class Identity: Sendable {
 
         // Parse first cipher suite
         guard cipherSuitesLength >= 4, config.count >= offset + 4 else {
-            throw EHBPError.invalidKeyConfig("no cipher suites in config")
+            throw EHBPError(.invalidKeyConfig, "no cipher suites in config")
         }
 
         let kdfId = UInt16(config[offset]) << 8 | UInt16(config[offset + 1])
         let aeadId = UInt16(config[offset + 2]) << 8 | UInt16(config[offset + 3])
 
         guard kdfId == HPKEConfig.kdf else {
-            throw EHBPError.unsupportedSuite("unsupported KDF: 0x\(String(kdfId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported KDF: 0x\(String(kdfId, radix: 16))")
         }
         guard aeadId == HPKEConfig.aead else {
-            throw EHBPError.unsupportedSuite("unsupported AEAD: 0x\(String(aeadId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported AEAD: 0x\(String(aeadId, radix: 16))")
         }
 
         self.publicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKeyBytes)

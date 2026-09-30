@@ -47,53 +47,14 @@ impl std::fmt::Display for Code {
     }
 }
 
-/// One variant per canonical class (SPEC Section 5.5), named after its code and
-/// rendering as `<CODE>: <detail>`. Codes are for the
-/// in-process caller only and never sent on the wire (SPEC 5.4.4).
+/// Classified failures are `Error::Coded(code, detail)` and render as
+/// `<CODE>: <detail>`; match on the code as with `std::io::ErrorKind`. Codes are
+/// for the in-process caller only and never sent on the wire (SPEC 5.4.4).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("{}: {0}", Code::InvalidKeyConfig)]
-    InvalidKeyConfig(String),
-
-    #[error("{}: {0}", Code::UnsupportedSuite)]
-    UnsupportedSuite(String),
-
-    #[error("{}: {0}", Code::InvalidEncapsulatedKey)]
-    InvalidEncapsulatedKey(String),
-
-    #[error("{}: {0}", Code::HpkeSetupFailed)]
-    HpkeSetupFailed(String),
-
-    #[error("{}: {0}", Code::MissingResponseNonce)]
-    MissingResponseNonce(String),
-
-    #[error("{}: {0}", Code::InvalidResponseNonce)]
-    InvalidResponseNonce(String),
-
-    #[error("{}: {0}", Code::DuplicateResponseNonce)]
-    DuplicateResponseNonce(String),
-
-    #[error("{}: {0}", Code::KeyConfigMismatch)]
-    KeyConfigMismatch(String),
-
-    #[error("{}: {0}", Code::FramingTruncated)]
-    FramingTruncated(String),
-
-    #[error("{}: {0}", Code::ChunkTooLarge)]
-    ChunkTooLarge(String),
-
-    #[error("{}: {0}", Code::AeadDecryptFailed)]
-    AeadDecryptFailed(String),
-
-    #[error("{}: {0}", Code::SequenceOverflow)]
-    SequenceOverflow(String),
-
-    #[error("{}: {0}", Code::InvalidToken)]
-    InvalidToken(String),
-
-    #[error("{}: {0}", Code::InvalidInput)]
-    InvalidInput(String),
+    #[error("{0}: {1}")]
+    Coded(Code, String),
 
     /// Unclassified protocol or internal failure; carries no canonical code.
     #[error("protocol error: {0}")]
@@ -121,24 +82,10 @@ pub enum Error {
 impl Error {
     /// The canonical code, or `None` for transport and internal errors.
     pub fn code(&self) -> Option<Code> {
-        Some(match self {
-            Error::InvalidKeyConfig(_) => Code::InvalidKeyConfig,
-            Error::UnsupportedSuite(_) => Code::UnsupportedSuite,
-            Error::InvalidEncapsulatedKey(_) => Code::InvalidEncapsulatedKey,
-            Error::HpkeSetupFailed(_) => Code::HpkeSetupFailed,
-            Error::MissingResponseNonce(_) => Code::MissingResponseNonce,
-            Error::InvalidResponseNonce(_) => Code::InvalidResponseNonce,
-            Error::DuplicateResponseNonce(_) => Code::DuplicateResponseNonce,
-            Error::KeyConfigMismatch(_) => Code::KeyConfigMismatch,
-            Error::FramingTruncated(_) => Code::FramingTruncated,
-            Error::ChunkTooLarge(_) => Code::ChunkTooLarge,
-            Error::AeadDecryptFailed(_) => Code::AeadDecryptFailed,
-            Error::SequenceOverflow(_) => Code::SequenceOverflow,
-            Error::InvalidToken(_) => Code::InvalidToken,
-            Error::InvalidInput(_) => Code::InvalidInput,
-            Error::Protocol(_) | Error::Http(_) | Error::Url(_) | Error::HeaderValue(_)
-            | Error::Json(_) | Error::Hex(_) | Error::Utf8(_) => return None,
-        })
+        match self {
+            Error::Coded(code, _) => Some(*code),
+            _ => None,
+        }
     }
 }
 

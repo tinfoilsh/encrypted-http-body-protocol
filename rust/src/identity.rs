@@ -13,7 +13,7 @@ use crate::{
         KEM_X25519_HKDF_SHA256, KEY_ID, REQUEST_ENC_LENGTH,
     },
     session::SessionRecoveryToken,
-    Error, Result,
+    Code, Error, Result,
 };
 
 type Aead = AesGcm256;
@@ -30,13 +30,13 @@ pub struct ServerIdentity {
 impl ServerIdentity {
     pub fn from_public_key_bytes(public_key: &[u8]) -> Result<Self> {
         if public_key.len() != REQUEST_ENC_LENGTH {
-            return Err(Error::InvalidKeyConfig(format!(
+            return Err(Error::Coded(Code::InvalidKeyConfig, format!(
                 "public key must be {REQUEST_ENC_LENGTH} bytes, got {}",
                 public_key.len()
             )));
         }
         let public_key = PublicKey::from_bytes(public_key)
-            .map_err(|err| Error::InvalidKeyConfig(format!("invalid X25519 public key: {err:?}")))?;
+            .map_err(|err| Error::Coded(Code::InvalidKeyConfig, format!("invalid X25519 public key: {err:?}")))?;
         Ok(Self {
             key_id: KEY_ID,
             public_key,
@@ -45,7 +45,7 @@ impl ServerIdentity {
 
     pub fn from_public_key_hex(public_key_hex: &str) -> Result<Self> {
         let public_key = hex::decode(public_key_hex)
-            .map_err(|err| Error::InvalidKeyConfig(format!("invalid public key hex: {err}")))?;
+            .map_err(|err| Error::Coded(Code::InvalidKeyConfig, format!("invalid public key hex: {err}")))?;
         Self::from_public_key_bytes(&public_key)
     }
 
@@ -54,47 +54,47 @@ impl ServerIdentity {
 
         let key_id = *data
             .get(offset)
-            .ok_or_else(|| Error::InvalidKeyConfig("missing key id".into()))?;
+            .ok_or_else(|| Error::Coded(Code::InvalidKeyConfig, "missing key id".into()))?;
         offset += 1;
 
         let kem_id = read_u16(data, &mut offset, "KEM id")?;
         if kem_id != KEM_X25519_HKDF_SHA256 {
-            return Err(Error::UnsupportedSuite(format!(
+            return Err(Error::Coded(Code::UnsupportedSuite, format!(
                 "unsupported KEM: 0x{kem_id:04x}"
             )));
         }
 
         let public_key_end = offset
             .checked_add(REQUEST_ENC_LENGTH)
-            .ok_or_else(|| Error::InvalidKeyConfig("public key offset overflow".into()))?;
+            .ok_or_else(|| Error::Coded(Code::InvalidKeyConfig, "public key offset overflow".into()))?;
         if public_key_end > data.len() {
-            return Err(Error::InvalidKeyConfig("truncated public key".into()));
+            return Err(Error::Coded(Code::InvalidKeyConfig, "truncated public key".into()));
         }
         let public_key_bytes = &data[offset..public_key_end];
         offset = public_key_end;
 
         let suites_len = read_u16(data, &mut offset, "cipher suites length")? as usize;
         if suites_len == 0 {
-            return Err(Error::InvalidKeyConfig(
+            return Err(Error::Coded(Code::InvalidKeyConfig, 
                 "no cipher suites found in config".into(),
             ));
         }
         if !suites_len.is_multiple_of(4) {
-            return Err(Error::InvalidKeyConfig(
+            return Err(Error::Coded(Code::InvalidKeyConfig, 
                 "cipher suites length must be a multiple of 4".into(),
             ));
         }
         let suites_end = offset
             .checked_add(suites_len)
-            .ok_or_else(|| Error::InvalidKeyConfig("cipher suites offset overflow".into()))?;
+            .ok_or_else(|| Error::Coded(Code::InvalidKeyConfig, "cipher suites offset overflow".into()))?;
         if suites_end > data.len() {
-            return Err(Error::InvalidKeyConfig("truncated cipher suites".into()));
+            return Err(Error::Coded(Code::InvalidKeyConfig, "truncated cipher suites".into()));
         }
 
         let kdf_id = read_u16(data, &mut offset, "KDF id")?;
         let aead_id = read_u16(data, &mut offset, "AEAD id")?;
         if kdf_id != KDF_HKDF_SHA256 || aead_id != AEAD_AES_256_GCM {
-            return Err(Error::UnsupportedSuite(format!(
+            return Err(Error::Coded(Code::UnsupportedSuite, format!(
                 "unsupported cipher suite: KDF=0x{kdf_id:04x}, AEAD=0x{aead_id:04x}"
             )));
         }
@@ -150,12 +150,12 @@ impl ServerIdentity {
             HPKE_REQUEST_INFO,
             &mut csprng,
         )
-        .map_err(|err| Error::HpkeSetupFailed(format!("failed to set up sender: {err:?}")))?;
+        .map_err(|err| Error::Coded(Code::HpkeSetupFailed, format!("failed to set up sender: {err:?}")))?;
 
         let mut exported_secret = vec![0u8; EXPORT_LENGTH];
         sender
             .export(EXPORT_LABEL, &mut exported_secret)
-            .map_err(|err| Error::HpkeSetupFailed(format!("failed to export response secret: {err:?}")))?;
+            .map_err(|err| Error::Coded(Code::HpkeSetupFailed, format!("failed to export response secret: {err:?}")))?;
 
         let request_enc = enc.to_bytes().to_vec();
         let token = SessionRecoveryToken::new(exported_secret, request_enc.clone())?;
@@ -179,7 +179,7 @@ impl RequestEncryptor {
         let ciphertext = self
             .sender
             .seal(plaintext, &[])
-            .map_err(|err| Error::HpkeSetupFailed(format!("failed to seal request body: {err:?}")))?;
+            .map_err(|err| Error::Coded(Code::HpkeSetupFailed, format!("failed to seal request body: {err:?}")))?;
         frame_chunk(&ciphertext)
     }
 }
@@ -192,7 +192,7 @@ pub(crate) struct EncryptedRequest {
 
 fn read_u16(data: &[u8], offset: &mut usize, field: &str) -> Result<u16> {
     if data.len().saturating_sub(*offset) < 2 {
-        return Err(Error::InvalidKeyConfig(format!("missing {field}")));
+        return Err(Error::Coded(Code::InvalidKeyConfig, format!("missing {field}")));
     }
     let value = u16::from_be_bytes([data[*offset], data[*offset + 1]]);
     *offset += 2;

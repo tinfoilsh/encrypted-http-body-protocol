@@ -13,7 +13,7 @@ use crate::{
         AES256_KEY_LENGTH, AES_GCM_NONCE_LENGTH, EXPORT_LENGTH, REQUEST_ENC_LENGTH,
         RESPONSE_KEY_LABEL, RESPONSE_NONCE_LABEL, RESPONSE_NONCE_LENGTH,
     },
-    Error, Result,
+    Code, Error, Result,
 };
 
 const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
@@ -46,19 +46,19 @@ pub fn derive_response_keys(
     response_nonce: &[u8],
 ) -> Result<ResponseKeyMaterial> {
     if exported_secret.len() != EXPORT_LENGTH {
-        return Err(Error::InvalidInput(format!(
+        return Err(Error::Coded(Code::InvalidInput, format!(
             "exported secret must be {EXPORT_LENGTH} bytes, got {}",
             exported_secret.len()
         )));
     }
     if request_enc.len() != REQUEST_ENC_LENGTH {
-        return Err(Error::InvalidInput(format!(
+        return Err(Error::Coded(Code::InvalidInput, format!(
             "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
             request_enc.len()
         )));
     }
     if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-        return Err(Error::InvalidInput(format!(
+        return Err(Error::Coded(Code::InvalidInput, format!(
             "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
             response_nonce.len()
         )));
@@ -72,9 +72,9 @@ pub fn derive_response_keys(
     let mut key = [0u8; AES256_KEY_LENGTH];
     let mut nonce_base = [0u8; AES_GCM_NONCE_LENGTH];
     hk.expand(RESPONSE_KEY_LABEL, &mut key)
-        .map_err(|err| Error::AeadDecryptFailed(format!("failed to derive response key: {err}")))?;
+        .map_err(|err| Error::Coded(Code::AeadDecryptFailed, format!("failed to derive response key: {err}")))?;
     hk.expand(RESPONSE_NONCE_LABEL, &mut nonce_base)
-        .map_err(|err| Error::AeadDecryptFailed(format!("failed to derive response nonce: {err}")))?;
+        .map_err(|err| Error::Coded(Code::AeadDecryptFailed, format!("failed to derive response nonce: {err}")))?;
 
     Ok(ResponseKeyMaterial { key, nonce_base })
 }
@@ -96,7 +96,7 @@ pub(crate) fn decrypt_chunk(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(&key_material.key)
-        .map_err(|err| Error::AeadDecryptFailed(format!("failed to create AES-GCM cipher: {err}")))?;
+        .map_err(|err| Error::Coded(Code::AeadDecryptFailed, format!("failed to create AES-GCM cipher: {err}")))?;
     let nonce = compute_nonce(&key_material.nonce_base, seq);
     cipher
         .decrypt(
@@ -106,7 +106,7 @@ pub(crate) fn decrypt_chunk(
                 aad: &[],
             },
         )
-        .map_err(|err| Error::AeadDecryptFailed(format!("failed to decrypt chunk: {err}")))
+        .map_err(|err| Error::Coded(Code::AeadDecryptFailed, format!("failed to decrypt chunk: {err}")))
 }
 
 pub(crate) fn decrypt_framed_response(
@@ -175,7 +175,7 @@ impl ResponseDecryptor {
                 continue;
             }
             if chunk_len > self.max_chunk_length {
-                return Err(Error::ChunkTooLarge(
+                return Err(Error::Coded(Code::ChunkTooLarge, 
                     "response chunk exceeds maximum allowed size".into(),
                 ));
             }
@@ -183,7 +183,7 @@ impl ResponseDecryptor {
                 return Ok(None);
             }
             if self.sequence == u64::MAX {
-                return Err(Error::SequenceOverflow("response chunk sequence overflow".into()));
+                return Err(Error::Coded(Code::SequenceOverflow, "response chunk sequence overflow".into()));
             }
 
             let frame_len = 4 + chunk_len;
@@ -203,14 +203,14 @@ impl ResponseDecryptor {
         if self.buffer.is_empty() {
             Ok(())
         } else {
-            Err(Error::FramingTruncated("truncated encrypted response chunk".into()))
+            Err(Error::Coded(Code::FramingTruncated, "truncated encrypted response chunk".into()))
         }
     }
 }
 
 pub(crate) fn frame_chunk(ciphertext: &[u8]) -> Result<Vec<u8>> {
     let len = u32::try_from(ciphertext.len())
-        .map_err(|_| Error::InvalidInput("ciphertext chunk is too large".into()))?;
+        .map_err(|_| Error::Coded(Code::InvalidInput, "ciphertext chunk is too large".into()))?;
     let mut framed = Vec::with_capacity(4 + ciphertext.len());
     framed.extend_from_slice(&len.to_be_bytes());
     framed.extend_from_slice(ciphertext);
@@ -289,14 +289,14 @@ mod tests {
             .push(&frame[..frame.len() - 1])
             .unwrap()
             .is_empty());
-        assert!(matches!(truncated.finish(), Err(Error::FramingTruncated(_))));
+        assert!(matches!(truncated.finish(), Err(Error::Coded(Code::FramingTruncated, _))));
 
         let mut tampered_frame = frame;
         *tampered_frame.last_mut().unwrap() ^= 1;
         let mut tampered = ResponseDecryptor::from_key_material(key_material);
         assert!(matches!(
             tampered.push(&tampered_frame),
-            Err(Error::AeadDecryptFailed(_))
+            Err(Error::Coded(Code::AeadDecryptFailed, _))
         ));
         assert_eq!(tampered.sequence, 0);
         assert_eq!(&tampered.buffer[..], tampered_frame);
@@ -308,7 +308,7 @@ mod tests {
         let oversized_prefix = u32::MAX.to_be_bytes();
         assert!(matches!(
             oversized.push(&oversized_prefix),
-            Err(Error::ChunkTooLarge(_))
+            Err(Error::Coded(Code::ChunkTooLarge, _))
         ));
 
         let mut exhausted = ResponseDecryptor::from_key_material(key_material());
@@ -316,7 +316,7 @@ mod tests {
         let frame = frame_chunk(&[0; 16]).unwrap();
         assert!(matches!(
             exhausted.push(&frame),
-            Err(Error::SequenceOverflow(_))
+            Err(Error::Coded(Code::SequenceOverflow, _))
         ));
     }
 }
