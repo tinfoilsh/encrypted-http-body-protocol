@@ -44,16 +44,22 @@ impl Drop for SessionRecoveryToken {
 impl SessionRecoveryToken {
     pub fn new(exported_secret: Vec<u8>, request_enc: Vec<u8>) -> Result<Self> {
         if exported_secret.len() != EXPORT_LENGTH {
-            return Err(Error::Coded(Code::InvalidToken, format!(
-                "exported secret must be {EXPORT_LENGTH} bytes, got {}",
-                exported_secret.len()
-            )));
+            return Err(Error::Coded(
+                Code::InvalidToken,
+                format!(
+                    "exported secret must be {EXPORT_LENGTH} bytes, got {}",
+                    exported_secret.len()
+                ),
+            ));
         }
         if request_enc.len() != REQUEST_ENC_LENGTH {
-            return Err(Error::Coded(Code::InvalidToken, format!(
-                "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
-                request_enc.len()
-            )));
+            return Err(Error::Coded(
+                Code::InvalidToken,
+                format!(
+                    "request enc must be {REQUEST_ENC_LENGTH} bytes, got {}",
+                    request_enc.len()
+                ),
+            ));
         }
         Ok(Self {
             exported_secret,
@@ -68,10 +74,13 @@ impl SessionRecoveryToken {
 
     pub fn decrypt_response_body(&self, response_nonce: &[u8], body: &[u8]) -> Result<Vec<u8>> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::Coded(Code::InvalidResponseNonce, format!(
-                "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
-                response_nonce.len()
-            )));
+            return Err(Error::Coded(
+                Code::InvalidResponseNonce,
+                format!(
+                    "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
+                    response_nonce.len()
+                ),
+            ));
         }
         let key_material =
             derive_response_keys(&self.exported_secret, &self.request_enc, response_nonce)?;
@@ -84,10 +93,13 @@ impl SessionRecoveryToken {
     /// [`ResponseDecryptor::finish`] when the encrypted source reaches EOF.
     pub fn response_decryptor(&self, response_nonce: &[u8]) -> Result<ResponseDecryptor> {
         if response_nonce.len() != RESPONSE_NONCE_LENGTH {
-            return Err(Error::Coded(Code::InvalidResponseNonce, format!(
-                "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
-                response_nonce.len()
-            )));
+            return Err(Error::Coded(
+                Code::InvalidResponseNonce,
+                format!(
+                    "response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {}",
+                    response_nonce.len()
+                ),
+            ));
         }
         let key_material =
             derive_response_keys(&self.exported_secret, &self.request_enc, response_nonce)?;
