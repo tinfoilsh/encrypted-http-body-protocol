@@ -38,7 +38,8 @@ class EHBPError(Exception):
         self.message = message
 
     def __str__(self) -> str:
-        return f"{self.code.value}: {self.message}"
+        code = getattr(self, "code", None)
+        return f"{code.value}: {self.message}" if code else self.message
 
 
 class InvalidKeyConfigError(EHBPError):

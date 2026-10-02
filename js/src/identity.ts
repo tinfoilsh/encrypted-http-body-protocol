@@ -12,7 +12,16 @@ import {
   RESPONSE_NONCE_LENGTH,
   ResponseKeyMaterial,
 } from './derive.js';
-import { AeadDecryptFailedError, ChunkTooLargeError, FramingTruncatedError, InvalidKeyConfigError, InvalidResponseNonceError, InvalidTokenError, MissingResponseNonceError, UnsupportedSuiteError } from './errors.js';
+import {
+  AeadDecryptFailedError,
+  ChunkTooLargeError,
+  FramingTruncatedError,
+  InvalidKeyConfigError,
+  InvalidResponseNonceError,
+  InvalidTokenError,
+  MissingResponseNonceError,
+  UnsupportedSuiteError,
+} from './errors.js';
 import { forwardedRequestInit } from './request-options.js';
 
 /**
@@ -200,7 +209,8 @@ export class Identity {
 
     // Validate that we support this cipher suite
     if (firstSuite.kdfId !== HPKE_CONFIG.KDF || firstSuite.aeadId !== HPKE_CONFIG.AEAD) {
-      throw new UnsupportedSuiteError(`unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
+      throw new UnsupportedSuiteError(
+        `unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
       );
     }
 
