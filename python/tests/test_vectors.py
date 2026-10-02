@@ -10,7 +10,7 @@ from ehbp import (
     SessionRecoveryToken,
     derive_response_keys,
 )
-from ehbp.errors import InvalidInputError
+from ehbp.errors import InvalidTokenError
 from ehbp.protocol import (
     AEAD_AES_256_GCM,
     KDF_HKDF_SHA256,
@@ -56,7 +56,7 @@ def test_session_recovery_token_json_shape():
 
 
 def test_session_recovery_token_rejects_malformed_json():
-    with pytest.raises(InvalidInputError):
+    with pytest.raises(InvalidTokenError):
         SessionRecoveryToken.from_json("{")
 
 

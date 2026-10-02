@@ -12,10 +12,23 @@ export { extractSessionRecoveryToken, decryptResponseWithToken, serializeSession
 export { Transport, createTransport } from './client.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 export {
+  Code,
+  codeOf,
   EhbpError,
+  InvalidKeyConfigError,
+  UnsupportedSuiteError,
+  InvalidEncapsulatedKeyError,
+  HpkeSetupFailedError,
+  MissingResponseNonceError,
+  InvalidResponseNonceError,
+  DuplicateResponseNonceError,
   KeyConfigMismatchError,
-  ProtocolError,
-  DecryptionError,
+  FramingTruncatedError,
+  ChunkTooLargeError,
+  AeadDecryptFailedError,
+  SequenceOverflowError,
+  InvalidTokenError,
+  InvalidInputError,
 } from './errors.js';
 
 // Export key derivation utilities for advanced usage

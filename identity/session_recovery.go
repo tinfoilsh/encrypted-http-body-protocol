@@ -36,17 +36,17 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 		RequestEnc     string `json:"requestEnc"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return protocol.Errorf(protocol.InvalidToken, "invalid token: %w", err)
 	}
 
 	var err error
 	t.ExportedSecret, err = hex.DecodeString(raw.ExportedSecret)
 	if err != nil {
-		return fmt.Errorf("invalid exportedSecret hex: %w", err)
+		return protocol.Errorf(protocol.InvalidToken, "invalid exportedSecret hex: %w", err)
 	}
 	t.RequestEnc, err = hex.DecodeString(raw.RequestEnc)
 	if err != nil {
-		return fmt.Errorf("invalid requestEnc hex: %w", err)
+		return protocol.Errorf(protocol.InvalidToken, "invalid requestEnc hex: %w", err)
 	}
 	return nil
 }
@@ -57,7 +57,7 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, error) {
 	exportedSecret, err := ctx.Sender.Export(ExportLabel, ExportLength)
 	if err != nil {
-		return nil, fmt.Errorf("failed to export HPKE secret: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to export HPKE secret: %w", err)
 	}
 	requestEnc := make([]byte, len(ctx.RequestEnc))
 	copy(requestEnc, ctx.RequestEnc)
@@ -73,21 +73,21 @@ func ExtractSessionRecoveryToken(ctx *RequestContext) (*SessionRecoveryToken, er
 // body reaches EOF. Closing the replacement body closes the original body.
 func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) error {
 	if token == nil {
-		return fmt.Errorf("session recovery token is nil")
+		return protocol.Errorf(protocol.InvalidInput, "session recovery token is nil")
 	}
 
 	responseNonceHex := resp.Header.Get(protocol.ResponseNonceHeader)
 	if responseNonceHex == "" {
-		return fmt.Errorf("missing %s header", protocol.ResponseNonceHeader)
+		return protocol.Errorf(protocol.MissingResponseNonce, "missing %s header", protocol.ResponseNonceHeader)
 	}
 
 	responseNonce, err := hex.DecodeString(responseNonceHex)
 	if err != nil {
-		return fmt.Errorf("invalid response nonce: %w", err)
+		return protocol.Errorf(protocol.InvalidResponseNonce, "invalid response nonce: %w", err)
 	}
 
 	if len(responseNonce) != ResponseNonceLength {
-		return fmt.Errorf("invalid response nonce length: expected %d, got %d",
+		return protocol.Errorf(protocol.InvalidResponseNonce, "invalid response nonce length: expected %d, got %d",
 			ResponseNonceLength, len(responseNonce))
 	}
 

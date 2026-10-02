@@ -110,7 +110,7 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	// Encrypt chunk
 	encrypted, err := r.sender.Seal(nil, plaintext[:bytesRead])
 	if err != nil {
-		return 0, fmt.Errorf("failed to encrypt chunk: %w", err)
+		return 0, protocol.Errorf(protocol.HPKESetupFailed, "failed to encrypt chunk: %w", err)
 	}
 
 	// Chunk with length prefix
@@ -176,9 +176,9 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 			return 0, io.EOF
 		}
 		if err == io.ErrUnexpectedEOF {
-			return 0, NewClientError(fmt.Errorf("invalid chunk length framing: %w", err))
+			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
 		}
-		return 0, NewClientError(fmt.Errorf("failed to read chunk length: %w", err))
+		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
 	}
 
 	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
@@ -191,7 +191,7 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	encryptedChunk := make([]byte, chunkLen)
 	_, err = io.ReadFull(r.reader, encryptedChunk)
 	if err != nil {
-		return 0, NewClientError(fmt.Errorf("failed to read encrypted chunk: %w", err))
+		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 	}
 
 	// Decrypt chunk
@@ -199,7 +199,7 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		// Decryption failure at this stage typically indicates request/receiver key mismatch
 		// (for example stale client key after server key rotation).
-		return 0, NewKeyConfigError(fmt.Errorf("failed to decrypt chunk: %w", err))
+		return 0, NewKeyConfigError(protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err))
 	}
 
 	// Return as much as fits in p, buffer the rest
@@ -295,19 +295,19 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	// Get the encapsulated key header
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
 	if encapKeyHex == "" {
-		return nil, NewClientError(fmt.Errorf("missing %s header", protocol.EncapsulatedKeyHeader))
+		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "missing %s header", protocol.EncapsulatedKeyHeader))
 	}
 
 	encapKey, err := hex.DecodeString(encapKeyHex)
 	if err != nil {
-		return nil, NewClientError(fmt.Errorf("invalid encapsulated key: %w", err))
+		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "invalid encapsulated key: %w", err))
 	}
 
 	// Create recipient and setup decryption
 	// The info parameter must match the sender's info for domain separation
 	recipient, err := hpke.NewRecipient(encapKey, i.sk, i.kdf, i.aead, []byte(HPKERequestInfo))
 	if err != nil {
-		return nil, NewClientError(fmt.Errorf("failed to setup decryption: %w", err))
+		return nil, NewClientError(protocol.Errorf(protocol.HPKESetupFailed, "failed to setup decryption: %w", err))
 	}
 
 	// Wrap the body with streaming decryption
@@ -335,13 +335,13 @@ func (i *Identity) SetupDerivedResponseEncryption(
 	respCtx *ResponseContext,
 ) (*DerivedResponseWriter, error) {
 	if respCtx == nil {
-		return nil, fmt.Errorf("response context is nil")
+		return nil, protocol.Errorf(protocol.InvalidInput, "response context is nil")
 	}
 
 	// Export secret from the request's HPKE context
 	exportedSecret, err := respCtx.recipient.Export(ExportLabel, ExportLength)
 	if err != nil {
-		return nil, fmt.Errorf("failed to export secret: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to export secret: %w", err)
 	}
 
 	// Generate random response nonce
@@ -400,7 +400,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	// Set up encryption to this identity's public key
 	encapKey, sender, err := hpke.NewSender(i.pk, i.kdf, i.aead, []byte(HPKERequestInfo))
 	if err != nil {
-		return nil, fmt.Errorf("failed to setup encryption: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to setup encryption: %w", err)
 	}
 
 	// Set the request enc header
@@ -431,7 +431,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 //  3. Derive key and IV using HKDF with salt = requestEnc || responseNonce
 func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 	if ctx == nil {
-		return fmt.Errorf("request context is nil")
+		return protocol.Errorf(protocol.InvalidInput, "request context is nil")
 	}
 
 	token, err := ExtractSessionRecoveryToken(ctx)
@@ -482,7 +482,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 				r.eof = true
 				return 0, io.EOF
 			}
-			return 0, r.fail(fmt.Errorf("failed to read chunk length: %w", err))
+			return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
 		}
 
 		chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
@@ -490,20 +490,20 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 			continue
 		}
 		if chunkLen > maxResponseChunkBytes {
-			return 0, r.fail(fmt.Errorf("encrypted response chunk exceeds maximum allowed size"))
+			return 0, r.fail(protocol.Errorf(protocol.ChunkTooLarge, "encrypted response chunk exceeds maximum allowed size"))
 		}
 
 		// Read encrypted chunk
 		encryptedChunk := make([]byte, chunkLen)
 		_, err = io.ReadFull(r.reader, encryptedChunk)
 		if err != nil {
-			return 0, r.fail(fmt.Errorf("failed to read encrypted chunk: %w", err))
+			return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 		}
 
 		// Decrypt chunk (nonce is computed and sequence incremented automatically)
 		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 		if err != nil {
-			return 0, r.fail(fmt.Errorf("failed to decrypt chunk: %w", err))
+			return 0, r.fail(err)
 		}
 
 		// Return as much as fits, buffer the rest
