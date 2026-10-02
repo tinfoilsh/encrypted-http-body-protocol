@@ -5,9 +5,8 @@ import (
 	"fmt"
 )
 
-// Code is the canonical, cross-SDK error class. The set is normative in
-// conformance/spec/errors.md and every SDK exposes the same strings, so a
-// caller's error handling ports between languages unchanged.
+// Code is the canonical, cross-SDK error class (SPEC 5.5). Every SDK exposes
+// the same strings, so a caller's error handling ports between languages.
 type Code string
 
 const (

@@ -232,11 +232,12 @@ For DHKEM implementations, developers SHOULD follow RFC 9180 guidance on implici
 ### 5.5 Error Classes
 
 Every failure of a step this specification defines MUST be assigned exactly one of the
-following classes. Transport and I/O failures outside those steps carry no class. Implementations MUST expose the class programmatically and MUST
-format the human-readable message as `<CODE>: <detail>`. The class is for the
-in-process caller only: implementations MUST NOT send it on the wire. The 422
-`application/problem+json` type in Section 5.4.2 remains the only error signal a
-server emits. The list is append-only; existing codes are never renamed or removed.
+following classes. Transport and I/O failures outside those steps carry no class.
+Implementations MUST expose the class programmatically and MUST format the
+human-readable message as `<CODE>: <detail>`. The class is for the in-process caller
+only: implementations MUST NOT send it on the wire. The 422 `application/problem+json`
+type in Section 5.4.2 remains the only error signal a server emits. The list is
+append-only; existing codes are never renamed or removed.
 
 Implementations MUST expose the class as a typed value named after the code in the
 language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,

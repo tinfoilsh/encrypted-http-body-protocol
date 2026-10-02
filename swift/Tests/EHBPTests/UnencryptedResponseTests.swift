@@ -73,7 +73,6 @@ final class UnencryptedResponseTests: XCTestCase {
             XCTFail("Expected a missing response nonce error")
         } catch let error as EHBPError where error.code == .missingResponseNonce {
             XCTAssertEqual(error.detail, "missing \(EHBPProtocol.responseNonceHeader) header")
-            // expected
         }
     }
 

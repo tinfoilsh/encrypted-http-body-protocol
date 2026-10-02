@@ -69,10 +69,6 @@ __all__ = [
     "InvalidTokenError",
     "InvalidInputError",
     "code_of",
-    "code_of",
-    "EHBPError",
-    "InvalidInputError",
-    "KeyConfigMismatchError",
     "protocol",
     "__version__",
 ]
