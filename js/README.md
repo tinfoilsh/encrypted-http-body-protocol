@@ -16,7 +16,7 @@ npm install ehbp
 - **Bun** 1.x+
 - **Browsers** with ES2020 support
 
-All HPKE key operations use [`@noble/curves`](https://github.com/paulmillr/noble-curves) (via `@panva/hpke-noble`) instead of WebCrypto, so X25519 support in the runtime's `crypto.subtle` is **not** required.
+The X25519 key encapsulation uses [`@noble/curves`](https://github.com/paulmillr/noble-curves) (via `@panva/hpke-noble`) instead of WebCrypto, so X25519 support in the runtime's `crypto.subtle` is **not** required. HKDF and AES-256-GCM use WebCrypto (`crypto.subtle`), which browsers only expose in secure contexts (HTTPS or localhost); response decryption runs at native speed even where the JavaScript JIT is disabled.
 
 ## Quick Start
 
