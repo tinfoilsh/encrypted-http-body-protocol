@@ -69,7 +69,7 @@ public final class EHBPClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
 
-        for (key, value) in headers {
+        for (key, value) in try EHBPClient.callerHeaders(headers) {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -135,7 +135,7 @@ public final class EHBPClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
 
-        for (key, value) in headers {
+        for (key, value) in try EHBPClient.callerHeaders(headers) {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -229,6 +229,21 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError(.invalidInput, "request URL must use the configured origin: \(scheme)://\(host)")
         }
         return url
+    }
+
+    /// Headers the library or the transport owns; callers may not set them.
+    /// Same list as the Python client.
+    static let reservedRequestHeaders: Set<String> = [
+        "content-length", "transfer-encoding", "host",
+        EHBPProtocol.encapsulatedKeyHeader.lowercased(),
+        EHBPProtocol.responseNonceHeader.lowercased(),
+    ]
+
+    static func callerHeaders(_ headers: [String: String]) throws -> [String: String] {
+        for name in headers.keys where reservedRequestHeaders.contains(name.lowercased()) {
+            throw EHBPError(.invalidInput, "reserved request header cannot be set by callers: \(name)")
+        }
+        return headers
     }
 
     private func beginRequest() -> UInt64 {
