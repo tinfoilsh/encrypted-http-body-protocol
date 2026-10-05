@@ -49,16 +49,18 @@ Clients MUST parse the first `key_config` and use its public key and suite. Addi
 Clients MUST set:
 
 - `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the request encryption context. Required if and only if the request body is encrypted (i.e., a non‑empty body is present).
-- `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding. Note: In browser environments, this header cannot be set explicitly due to browser restrictions; browsers handle chunked encoding automatically when Content-Length is omitted.
+- Body framing on the wire: on HTTP/1.1, an encrypted body is sent with `Transfer-Encoding: chunked` unless the total framed length is known in advance, in which case `Content-Length` MAY be sent instead; a message MUST NOT carry both. On HTTP/2 and HTTP/3, clients MUST NOT send `Transfer-Encoding`; the framed body is carried as the message body with or without `Content-Length`. Note: In browser environments, `Transfer-Encoding` cannot be set explicitly; the browser chooses the framing.
 
 ### 4.2 Response Headers
 
 Servers MUST set for encrypted responses:
 
 - `Ehbp-Response-Nonce`: hex (lowercase, no prefix) of the random nonce used in response key derivation. This MUST be exactly 32 bytes (64 hex characters), matching OHTTP's `max(Nn, Nk)` for AES-256-GCM.
-- `Transfer-Encoding: chunked`: used when sending an encrypted body. Content-Length MUST be omitted. Implementations MUST ensure Content-Length is not set (or set to -1/unknown) to trigger automatic chunked transfer encoding.
+- Body framing on the wire: the same rules as Section 4.1 apply to encrypted responses. Receivers MUST accept either `Transfer-Encoding: chunked` or `Content-Length` on HTTP/1.1 and MUST NOT require `Transfer-Encoding` on HTTP/2 or HTTP/3.
 
 For plaintext responses corresponding to requests where `Ehbp-Encapsulated-Key` is absent, the server does NOT set any EHBP headers. The absence of `Ehbp-Response-Nonce` indicates the response is plaintext.
+
+`Ehbp-Encapsulated-Key` and `Ehbp-Response-Nonce` are single-valued. A receiver MUST reject a message carrying more than one instance of either header (`INVALID_ENCAPSULATED_KEY` on the server, `DUPLICATE_RESPONSE_NONCE` on the client). Client stacks that coalesce repeated headers into one value (for example `fetch` and `URLSession`) observe a single value that is not valid hex of the required length and MUST treat it as invalid (`INVALID_RESPONSE_NONCE`).
 
 ### 4.3 Body Framing (Both Directions)
 
@@ -138,7 +140,7 @@ This derivation ensures:
 - Key acquisition: GET `/.well-known/hpke-keys` and parse the first `key_config` with Content-Type `application/ohttp-keys`.
 - Outbound request:
 
-  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and use chunked transfer encoding without a Content-Length. Retain the HPKE sender context for response decryption.
+  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
   - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
@@ -164,7 +166,7 @@ This derivation ensures:
   - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
 - Response handling:
 
-  - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce`. Use chunked transfer encoding and omit Content-Length.
+  - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce` and carry the framed body as described in Section 4.2.
   - If no HPKE context was established (plaintext request or bodyless request), the response is sent as plaintext without any EHBP headers.
 
 ### 5.3 Mode Detection
