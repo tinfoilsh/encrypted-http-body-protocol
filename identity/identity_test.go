@@ -241,6 +241,13 @@ func TestUnmarshalPublicConfigRejectsUnpinnedSuite(t *testing.T) {
 			assert.Equal(t, protocol.UnsupportedSuite, protocol.CodeOf(err))
 		})
 	}
+	t.Run("second suite", func(t *testing.T) {
+		data := append([]byte(nil), config...)
+		data[36] = 8 // suites_len: two entries
+		data = append(data, 0x00, 0x01, 0x00, 0x02)
+		_, err := UnmarshalPublicConfig(data)
+		assert.Equal(t, protocol.UnsupportedSuite, protocol.CodeOf(err))
+	})
 }
 
 func TestFromPublicKeyHex(t *testing.T) {

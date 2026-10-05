@@ -257,6 +257,11 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 	if len(suites) == 0 {
 		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "no cipher suites found in config")
 	}
+	// SPEC 3.2 defines exactly one suite; a list of several is not a
+	// negotiation we support.
+	if len(suites) != 1 {
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "expected exactly one cipher suite, got %d", len(suites))
+	}
 	if suites[0].kdf.ID() != 0x0001 || suites[0].aead.ID() != 0x0002 {
 		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported cipher suite: KDF=0x%04x, AEAD=0x%04x",
 			suites[0].kdf.ID(), suites[0].aead.ID())
