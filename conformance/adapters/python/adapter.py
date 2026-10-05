@@ -12,18 +12,18 @@ import os
 import sys
 
 import httpx
+
 from ehbp import (
     Client,
     EHBPTransport,
-    code_of,
     ServerIdentity,
     SessionRecoveryToken,
+    code_of,
     compute_nonce,
     derive_response_keys,
 )
-from ehbp.protocol import ENCAPSULATED_KEY_HEADER
 from ehbp.errors import EHBPError, InvalidInputError
-from ehbp.protocol import KEYS_PATH, RESPONSE_NONCE_HEADER
+from ehbp.protocol import ENCAPSULATED_KEY_HEADER, KEYS_PATH, RESPONSE_NONCE_HEADER
 
 HEADER_SUBSET = ("ehbp-response-nonce", "content-length", "transfer-encoding", "content-type")
 
@@ -66,6 +66,8 @@ def run(fx: dict, res: dict) -> None:
         res["body_hex"] = ServerIdentity.from_public_key_bytes(b(ins, "publicKey")).marshal_public_config().hex()
     elif op == "request":
         request(fx, res)
+    elif op == "large_body":
+        large_body(fx, res)
     elif op == "discover":
         Client.discover(discover_target(ins))  # raises on bad content type / status
     elif op in ("reject_reserved_header", "reject_cross_origin", "reject_url_credentials"):
@@ -136,6 +138,33 @@ def request(fx: dict, res: dict) -> None:
         raise
     finally:
         client.close()
+
+
+def pattern(size: int, seed: int):
+    """1 MiB block with block[i] = (i + seed) & 0xff, repeated to size, lazily."""
+    block = bytes((i + seed) & 0xFF for i in range(1 << 20))
+    while size > 0:
+        n = min(size, len(block))
+        yield block if n == len(block) else block[:n]
+        size -= n
+
+
+def large_body(fx: dict, res: dict) -> None:
+    import resource
+    import sys as _sys
+
+    base = os.environ["ORACLE_URL"].rstrip("/")
+    identity = ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
+    ins = fx["inputs"]
+    client = httpx.Client(transport=EHBPTransport(identity), base_url=base, timeout=600)
+    try:
+        r = client.post(fx["request"]["path"], content=pattern(int(ins["size_bytes"]), int(ins["block_seed"])))
+        res["status"] = r.status_code
+        res["body_hex"] = r.content.hex()
+    finally:
+        client.close()
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    res["peak_rss_bytes"] = rss if _sys.platform == "darwin" else rss * 1024
 
 
 # map_error reads the canonical code the library attached (code_of). Anything
