@@ -209,6 +209,12 @@ export class Identity {
 
     // Read Cipher Suites Length
     const cipherSuitesLength = (data[offset++] << 8) | data[offset++];
+    if (cipherSuitesLength % 4 !== 0) {
+      throw new InvalidKeyConfigError('cipher suites length must be a multiple of 4');
+    }
+    if (offset + cipherSuitesLength > data.length) {
+      throw new InvalidKeyConfigError('truncated cipher suites');
+    }
 
     // Parse all cipher suites (each suite is 4 bytes: 2 for KDF, 2 for AEAD)
     const suites = [];

@@ -53,4 +53,12 @@ describe('Identity', () => {
     await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, 2)), InvalidKeyConfigError);
     await assert.rejects(Identity.unmarshalPublicConfig(new Uint8Array(0)), InvalidKeyConfigError);
   });
+
+  it('should reject a truncated or misaligned cipher-suites section', async () => {
+    const config = await (await Identity.generate()).marshalConfig();
+    await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, -1)), InvalidKeyConfigError);
+    const odd = new Uint8Array(config);
+    odd[36] = 3; // suites length 3: not a multiple of 4
+    await assert.rejects(Identity.unmarshalPublicConfig(odd), InvalidKeyConfigError);
+  });
 });
