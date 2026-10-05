@@ -65,6 +65,11 @@ export class Transport {
    */
   static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
     const url = new URL(serverURL);
+    // Same canonical rejection as the constructor and request(), before the
+    // key fetch can fail with an uncoded TypeError.
+    if (url.username || url.password) {
+      throw new InvalidInputError('base URL must not include credentials');
+    }
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
@@ -192,8 +197,13 @@ export class Transport {
     // Reject credential-bearing URLs with the canonical code before the
     // platform Request constructor rejects them with an uncoded TypeError,
     // so every SDK reports the same error for the same input.
+    // Resolve against the configured server so protocol-relative forms
+    // ("//user:pass@host/x") are inspected too.
     const credentialed = (() => {
-      try { const u = new URL(inputUrl); return Boolean(u.username || u.password); } catch { return false; }
+      try {
+        const u = new URL(inputUrl, this.serverOrigin ?? `http://${this.serverHost}`);
+        return Boolean(u.username || u.password);
+      } catch { return false; }
     })();
     if (credentialed) {
       throw new InvalidInputError('request URL must not include credentials');
