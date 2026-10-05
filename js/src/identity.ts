@@ -605,37 +605,73 @@ async function firstNonEmptyChunk(
  * REQUEST_FRAME_BYTES plaintext each (SPEC 4.3), one sender context for the
  * whole body, holding at most one frame of plaintext at a time.
  */
-function encryptFrames(
+/** @internal exported for tests */
+export function encryptFrames(
   ctx: SenderContext,
   reader: ReadableStreamDefaultReader<Uint8Array>,
   first: Uint8Array
 ): ReadableStream<Uint8Array> {
-  let pending = first;
+  // Cursor into the current source chunk (a view, never copied) plus one
+  // frame-sized staging buffer for a partial frame spanning chunks. Nothing
+  // allocated here is proportional to the chunk size.
+  let chunk = first;
+  let offset = 0;
+  const staging = new Uint8Array(REQUEST_FRAME_BYTES);
+  let staged = 0;
   let sourceDone = false;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      while (pending.byteLength < REQUEST_FRAME_BYTES && !sourceDone) {
+
+  // Returns the next frame's plaintext (valid until the next call) or null at EOF.
+  async function nextPlaintext(): Promise<Uint8Array | null> {
+    for (;;) {
+      if (offset >= chunk.byteLength) {
+        if (sourceDone) break;
         const { done, value } = await reader.read();
         if (done) { sourceDone = true; break; }
-        if (value.byteLength === 0) continue;
-        const joined = new Uint8Array(pending.byteLength + value.byteLength);
-        joined.set(pending, 0);
-        joined.set(value, pending.byteLength);
-        pending = joined;
+        chunk = value;
+        offset = 0;
+        continue;
       }
-      if (pending.byteLength === 0) {
-        controller.close();
-        return;
+      if (staged === 0 && chunk.byteLength - offset >= REQUEST_FRAME_BYTES) {
+        const out = chunk.subarray(offset, offset + REQUEST_FRAME_BYTES);
+        offset += REQUEST_FRAME_BYTES;
+        return out;
       }
-      const take = Math.min(pending.byteLength, REQUEST_FRAME_BYTES);
-      const plaintext = pending.slice(0, take);
-      pending = pending.subarray(take);
-      const sealed = await ctx.Seal(plaintext);
-      const frame = new Uint8Array(4 + sealed.byteLength);
-      new DataView(frame.buffer).setUint32(0, sealed.byteLength, false);
-      frame.set(sealed, 4);
-      controller.enqueue(frame);
-      if (sourceDone && pending.byteLength === 0) controller.close();
+      const n = Math.min(REQUEST_FRAME_BYTES - staged, chunk.byteLength - offset);
+      staging.set(chunk.subarray(offset, offset + n), staged);
+      staged += n;
+      offset += n;
+      if (staged === REQUEST_FRAME_BYTES) {
+        staged = 0;
+        return staging;
+      }
+    }
+    if (staged > 0) {
+      const out = staging.subarray(0, staged);
+      staged = 0;
+      return out;
+    }
+    return null;
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const plaintext = await nextPlaintext();
+        if (plaintext === null) {
+          controller.close();
+          return;
+        }
+        const sealed = await ctx.Seal(plaintext);
+        const frame = new Uint8Array(4 + sealed.byteLength);
+        new DataView(frame.buffer).setUint32(0, sealed.byteLength, false);
+        frame.set(sealed, 4);
+        controller.enqueue(frame);
+        if (sourceDone && offset >= chunk.byteLength && staged === 0) controller.close();
+      } catch (err) {
+        // Mirror createDecryptStream: a failed pull releases the source.
+        reader.cancel(err).catch(() => {});
+        throw err;
+      }
     },
     cancel(reason) {
       return reader.cancel(reason);

@@ -8,6 +8,7 @@ import {
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
+import { encryptFrames } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
@@ -740,6 +741,45 @@ describe('Transport', () => {
     } finally {
       Object.defineProperty(process, 'versions', versions);
     }
+  });
+
+  it('should frame a single huge source chunk by cursor without chunk-sized copies', async () => {
+    const chunk = new Uint8Array(1024 * 1024).map((_, i) => i & 0xff);
+    let maxInput = 0;
+    let zeroCopy = 0;
+    const ctx = {
+      async Seal(plaintext: Uint8Array) {
+        maxInput = Math.max(maxInput, plaintext.byteLength);
+        // A full frame is a view into the source chunk itself: no copy was made.
+        if (plaintext.buffer === chunk.buffer) zeroCopy++;
+        return plaintext.slice();
+      },
+    } as unknown as Parameters<typeof encryptFrames>[0];
+    const reader = new ReadableStream<Uint8Array>({ start(c) { c.close(); } }).getReader();
+    const stream = encryptFrames(ctx, reader, chunk);
+    let frames = 0;
+    for (const r = stream.getReader(); ;) {
+      const { done, value } = await r.read();
+      if (done) break;
+      frames++;
+      assert.strictEqual(value.byteLength, 4 + 65536);
+    }
+    assert.strictEqual(frames, 16);
+    assert.strictEqual(maxInput, 65536, 'Seal never sees more than one frame');
+    assert.strictEqual(zeroCopy, 16, 'every full frame was served from the source chunk by offset');
+  });
+
+  it('should cancel the source when sealing fails', async () => {
+    let cancelled: unknown = undefined;
+    const source = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(new Uint8Array(10)); },
+      cancel(reason) { cancelled = reason; },
+    }, { highWaterMark: 0 });
+    const boom = new Error('seal failed');
+    const ctx = { async Seal() { throw boom; } } as unknown as Parameters<typeof encryptFrames>[0];
+    const stream = encryptFrames(ctx, source.getReader(), new Uint8Array(5));
+    await assert.rejects(stream.getReader().read(), boom);
+    assert.strictEqual(cancelled, boom);
   });
 
   it('should pull a stream body incrementally rather than buffering it', async () => {
