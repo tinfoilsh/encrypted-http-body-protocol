@@ -70,8 +70,11 @@ Encrypted bodies are framed as a sequence of chunks:
 - `CIPHERTEXT` is produced by AEAD sealing under the single HPKE context for the message direction (AAD is empty). The sealer/opener pair is established once per body and reused for every chunk.
 - A chunk length of zero MAY appear when the application performs an empty write; receivers ignore such chunks and continue parsing.
 - End of message is indicated by the end of the HTTP entity body; no special sentinel chunk is used.
+- The maximum chunk length is 64 MiB (67,108,864 bytes of ciphertext). Senders MUST NOT emit a larger chunk; receivers MUST reject a length prefix above this maximum (`CHUNK_TOO_LARGE`) before allocating or reading the chunk.
 
-Receivers MUST read a 4‑byte length, then exactly that many ciphertext bytes, then open with the appropriate opener (HPKE for requests, derived AEAD for responses).
+Senders MUST produce the body as a stream: plaintext is sealed and emitted chunk by chunk as it is read, so that memory use is bounded by the chunk size rather than the body size, and a body of any length (including one whose length is not known in advance) can be sent. Senders SHOULD use chunks between 8 KiB and 64 KiB of plaintext; a sender MUST NOT buffer an entire body in order to seal it as a single chunk.
+
+Receivers MUST read a 4‑byte length, then exactly that many ciphertext bytes, then open with the appropriate opener (HPKE for requests, derived AEAD for responses). Each chunk authenticates independently, in order, and a receiver MAY deliver a chunk's plaintext to the application as soon as that chunk has authenticated; plaintext delivered this way is an authentic prefix of the message. Once a chunk fails to authenticate, or the framing is violated, the receiver MUST deliver no further plaintext from that body (Section 5.4.1). An application that must not act on a prefix (for example one whose effect is not idempotent) reads the body to its end before acting.
 
 ### 4.4 Response Key Derivation
 
@@ -140,7 +143,7 @@ This derivation ensures:
 - Key acquisition: GET `/.well-known/hpke-keys` and parse the first `key_config` with Content-Type `application/ohttp-keys`.
 - Outbound request:
 
-  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
+  - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3, sealing and emitting chunks as the body is read rather than buffering it. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
   - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
@@ -156,8 +159,9 @@ This derivation ensures:
 - Request handling:
 
   - The middleware checks for `Ehbp-Encapsulated-Key`. The server accepts both encrypted and plaintext requests.
-  - If `Ehbp-Encapsulated-Key` is present, establish an HPKE opener using the server's private key (Section 4.4.1) and decrypt the body as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption.
-  - If the encrypted request is malformed, decapsulation fails, decryption/authentication fails, or framing is invalid, the server MUST fail closed and reject the request before application processing completes.
+  - If `Ehbp-Encapsulated-Key` is present, establish an HPKE opener using the server's private key (Section 4.4.1) and decrypt the body as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption. The server MAY hand each chunk's plaintext to the application as soon as it authenticates; it MUST NOT buffer the whole body merely to authenticate it first, so that bodies larger than memory can be processed.
+  - If `Ehbp-Encapsulated-Key` is malformed or decapsulation fails, the server MUST reject the request before any application processing with the status in Section 5.4.2.
+  - If a chunk fails to authenticate or the framing is invalid after application processing has begun, the server MUST stop delivering plaintext to the application at that chunk, and the exchange MUST NOT complete successfully: if the response has not started, the server responds with the status in Section 5.4.2; if it has, the server MUST abort the response so the client observes a transport-level failure rather than a complete message (on HTTP/1.1, close the connection without the terminating chunk; on HTTP/2 and HTTP/3, reset the stream).
   - Error status mapping:
     - malformed encapsulated request or cryptographic verification failure: HTTP 400
     - key/configuration mismatch (for example, stale client key after rotation): HTTP 422 (Unprocessable Content) with optional `application/problem+json` details as defined in Section 5.4.2
@@ -197,7 +201,7 @@ EHBP implementations MUST treat these as protocol failures:
 - AEAD authentication/decryption failure
 - invalid `Ehbp-Response-Nonce`, or `Ehbp-Response-Nonce` missing from a 2xx response, when an encrypted response is expected (a missing nonce on a non-2xx response is handled per Section 5.3 and is not a protocol failure)
 
-Implementations MUST fail closed: no plaintext fallback for encrypted exchanges and no partial decrypted data exposure after authentication failure.
+Implementations MUST fail closed: no plaintext fallback for encrypted exchanges and no decrypted data exposure after an authentication failure. Plaintext released before the failure, chunk by chunk as each authenticated (Section 4.3), is an authentic prefix and is not a failure of this rule; nothing from the failing chunk or any later chunk is ever released.
 
 #### 5.4.2 HTTP Error Signaling
 
