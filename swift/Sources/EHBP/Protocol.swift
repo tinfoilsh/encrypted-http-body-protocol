@@ -11,6 +11,15 @@ public enum EHBPProtocol {
     /// Media type for HPKE key configuration
     public static let keysMediaType = "application/ohttp-keys"
 
+    /// Media type of RFC 9457 problem-details error responses
+    public static let problemJSONMediaType = "application/problem+json"
+
+    /// Problem type identifying a key configuration mismatch (SPEC 5.4.2)
+    public static let keyConfigProblemType = "urn:ietf:params:ehbp:error:key-config"
+
+    /// Largest problem-details body the client inspects; larger ones pass through
+    public static let maxProblemDetailsBytes = 64 * 1024
+
     /// Well-known path for HPKE keys endpoint
     public static let keysPath = "/.well-known/hpke-keys"
 }
