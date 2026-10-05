@@ -29,5 +29,8 @@ RESPONSE_KEY_LABEL = b"key"
 RESPONSE_NONCE_LABEL = b"nonce"
 
 LENGTH_PREFIX_SIZE = 4
-MAX_CHUNK_LENGTH = 0xFFFFFFFF
+MAX_CHUNK_LENGTH = 0xFFFFFFFF  # framing limit: the length prefix is a u32
+# Receive-side bound on a single response frame, enforced before buffering.
+# Matches the other SDKs' response decryptors; the send path is not capped.
+MAX_RESPONSE_CHUNK_LENGTH = 64 * 1024 * 1024
 MAX_SEQUENCE = (1 << 64) - 1
