@@ -208,15 +208,27 @@ pub(crate) struct RequestEncryptor {
     sender: AeadCtxS<Aead, Kdf, KemSuite>,
 }
 
+/// Plaintext bytes per request frame (SPEC 4.3). Bounded so a receiver can
+/// authenticate and release one frame at a time with bounded memory.
+pub const REQUEST_FRAME_SIZE: usize = 64 * 1024;
+
 impl RequestEncryptor {
+    /// Seals `plaintext` as one or more consecutive frames of at most
+    /// `REQUEST_FRAME_SIZE` plaintext bytes each, reusing the sender context.
     pub fn encrypt_chunk(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let ciphertext = self.sender.seal(plaintext, &[]).map_err(|err| {
-            Error::Coded(
-                Code::HpkeSetupFailed,
-                format!("failed to seal request body: {err:?}"),
-            )
-        })?;
-        frame_chunk(&ciphertext)
+        let mut out = Vec::with_capacity(
+            plaintext.len() + 20 * plaintext.len().div_ceil(REQUEST_FRAME_SIZE).max(1),
+        );
+        for piece in plaintext.chunks(REQUEST_FRAME_SIZE) {
+            let ciphertext = self.sender.seal(piece, &[]).map_err(|err| {
+                Error::Coded(
+                    Code::HpkeSetupFailed,
+                    format!("failed to seal request body: {err:?}"),
+                )
+            })?;
+            out.extend_from_slice(&frame_chunk(&ciphertext)?);
+        }
+        Ok(out)
     }
 }
 
@@ -283,6 +295,46 @@ mod tests {
         assert_eq!(plaintext, b"hello rust");
         assert_eq!(encrypted.token.exported_secret, exported_secret);
         assert_eq!(encrypted.token.request_enc, encrypted.encapsulated_key);
+    }
+
+    #[test]
+    fn large_request_body_is_split_into_bounded_frames() {
+        let mut csprng = StdRng::from_os_rng();
+        let (private_key, public_key) = KemSuite::gen_keypair(&mut csprng);
+        let identity = ServerIdentity {
+            key_id: KEY_ID,
+            public_key,
+        };
+        let plaintext: Vec<u8> = (0..200 * 1024).map(|i| i as u8).collect();
+        let encrypted = identity.encrypt_request_body(&plaintext).unwrap().unwrap();
+
+        let encapped_key =
+            <KemSuite as Kem>::EncappedKey::from_bytes(&encrypted.encapsulated_key).unwrap();
+        let mut receiver = setup_receiver::<Aead, Kdf, KemSuite>(
+            &OpModeR::Base,
+            &private_key,
+            &encapped_key,
+            HPKE_REQUEST_INFO,
+        )
+        .unwrap();
+        let mut offset = 0;
+        let mut frames = 0;
+        let mut opened = Vec::new();
+        while offset < encrypted.body.len() {
+            let len =
+                u32::from_be_bytes(encrypted.body[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            assert!(len <= REQUEST_FRAME_SIZE + 16, "frame exceeds the bound");
+            opened.extend(
+                receiver
+                    .open(&encrypted.body[offset..offset + len], &[])
+                    .unwrap(),
+            );
+            offset += len;
+            frames += 1;
+        }
+        assert_eq!(frames, 200 * 1024 / REQUEST_FRAME_SIZE + 1); // 64+64+64+8 KiB
+        assert_eq!(opened, plaintext);
     }
 
     #[test]

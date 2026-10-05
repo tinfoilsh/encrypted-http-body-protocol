@@ -368,22 +368,66 @@ impl Client {
         Ok(())
     }
 
+    /// Encrypts and sends a builder request. Byte bodies take the buffered
+    /// path; streamed bodies are routed through the same encryptor the raw
+    /// `execute` path uses, so both bound frames to `REQUEST_FRAME_SIZE`.
+    async fn dispatch(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Option<BodySource>,
+    ) -> Result<Dispatched> {
+        // The guard is armed before the send so a transport failure clears
+        // the published token; callers disarm it once the exchange completes.
+        match body {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(BodySource::Stream(stream)) => {
+                let request = self
+                    .http_client
+                    .request(method, url)
+                    .headers(headers)
+                    .body(reqwest::Body::wrap_stream(stream))
+                    .build()?;
+                let PreparedRawRequest {
+                    request,
+                    token,
+                    generation,
+                } = self.prepare_raw_request(request).await?;
+                let guard = token
+                    .as_ref()
+                    .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+                let response = self.http_client.execute(request).await?;
+                Ok((response, token, generation, guard))
+            }
+            other => {
+                let bytes = match other {
+                    Some(BodySource::Bytes(bytes)) => Some(bytes),
+                    _ => None,
+                };
+                let PreparedRequest {
+                    request,
+                    token,
+                    generation,
+                } = self.prepare_request_builder(method, url, headers, bytes)?;
+                let guard = token
+                    .as_ref()
+                    .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+                let response = request.send().await?;
+                Ok((response, token, generation, guard))
+            }
+        }
+    }
+
     async fn send_parts(
         &self,
         method: Method,
         url: Url,
         headers: HeaderMap,
-        body: Option<Bytes>,
+        body: Option<BodySource>,
     ) -> Result<Response> {
-        let PreparedRequest {
-            request,
-            token,
-            generation,
-        } = self.prepare_request_builder(method, url, headers, body)?;
-        let mut guard = token
-            .as_ref()
-            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
-        let response = request.send().await?;
+        let (response, token, generation, mut guard) =
+            self.dispatch(method, url, headers, body).await?;
         let status = response.status();
         let headers = response.headers().clone();
         let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
@@ -428,17 +472,10 @@ impl Client {
         method: Method,
         url: Url,
         headers: HeaderMap,
-        body: Option<Bytes>,
+        body: Option<BodySource>,
     ) -> Result<StreamingResponse> {
-        let PreparedRequest {
-            request,
-            token,
-            generation,
-        } = self.prepare_request_builder(method, url, headers, body)?;
-        let mut guard = token
-            .as_ref()
-            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
-        let response = request.send().await?;
+        let (response, token, generation, mut guard) =
+            self.dispatch(method, url, headers, body).await?;
 
         let Some(token) = token else {
             return Ok(StreamingResponse {
@@ -527,8 +564,21 @@ pub struct RequestBuilder {
     method: Method,
     url: Url,
     headers: HeaderMap,
-    body: Option<Bytes>,
+    body: Option<BodySource>,
 }
+
+enum BodySource {
+    Bytes(Bytes),
+    #[cfg(not(target_arch = "wasm32"))]
+    Stream(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>),
+}
+
+type Dispatched = (
+    reqwest::Response,
+    Option<SessionRecoveryToken>,
+    u64,
+    Option<SessionGuard>,
+);
 
 struct PreparedRequest {
     request: reqwest::RequestBuilder,
@@ -579,7 +629,27 @@ impl RequestBuilder {
     }
 
     pub fn body(mut self, body: impl Into<Bytes>) -> Self {
-        self.body = Some(body.into());
+        self.body = Some(BodySource::Bytes(body.into()));
+        self
+    }
+
+    /// Streams `body` through encryption without buffering it: each chunk is
+    /// sealed into frames of at most `REQUEST_FRAME_SIZE` plaintext bytes as
+    /// it arrives, so memory stays bounded by the chunk size, not the body.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn body_stream<S, E>(mut self, body: S) -> Self
+    where
+        S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let mut body = Box::pin(body);
+        self.body = Some(BodySource::Stream(Box::pin(async_stream::try_stream! {
+            while let Some(chunk) = std::future::poll_fn(|cx| body.as_mut().poll_next(cx)).await {
+                let chunk = chunk
+                    .map_err(|err| Error::Protocol(format!("request body stream failed: {err}")))?;
+                yield chunk;
+            }
+        })));
         self
     }
 
@@ -587,7 +657,7 @@ impl RequestBuilder {
         let body = serde_json::to_vec(value)?;
         self.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        self.body = Some(Bytes::from(body));
+        self.body = Some(BodySource::Bytes(Bytes::from(body)));
         Ok(self)
     }
 
@@ -2064,6 +2134,101 @@ mod tests {
         assert!(request.contains("transfer-encoding: chunked"));
         assert!(!request.contains("content-length:"));
         assert!(request.contains("ehbp-encapsulated-key:"));
+    }
+
+    #[tokio::test]
+    async fn body_stream_is_encrypted_lazily_into_bounded_frames() {
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured_for_task = Arc::clone(&captured);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.ends_with(b"0\r\n\r\n") {
+                    break;
+                }
+            }
+            *captured_for_task.lock().unwrap() = bytes;
+            socket
+                .write_all(b"HTTP/1.1 422 Unprocessable Content\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let (client, private_key) = raw_client_with_private_key();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            client.identity.clone(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        // Three source chunks, one larger than a frame: the encryptor must
+        // re-frame it and consume the source as it goes.
+        let pulls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pulls_for_stream = Arc::clone(&pulls);
+        let chunks = vec![
+            Bytes::from_static(b"first"),
+            Bytes::from(vec![0xABu8; 100 * 1024]),
+            Bytes::from_static(b"last"),
+        ];
+        let expected: Vec<u8> = chunks.concat();
+        let source =
+            stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>)).inspect(move |_| {
+                pulls_for_stream.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+
+        let _ = client
+            .post("/secure")
+            .unwrap()
+            .body_stream(source)
+            .send()
+            .await;
+
+        let raw = captured.lock().unwrap().clone();
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(text.contains("transfer-encoding: chunked"));
+        assert!(!text.contains("content-length:"));
+        let enc_hex = text
+            .lines()
+            .find_map(|l| l.strip_prefix("ehbp-encapsulated-key: "))
+            .unwrap()
+            .trim()
+            .to_string();
+        let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let framed = dechunk(&raw[body_start..]);
+        let frames = decrypt_request_frames(&private_key, &hex::decode(enc_hex).unwrap(), &framed);
+        assert_eq!(frames.len(), 4, "5 B, 64 KiB + 36 KiB, 4 B");
+        assert!(frames
+            .iter()
+            .all(|f| f.len() <= crate::identity::REQUEST_FRAME_SIZE));
+        assert_eq!(frames.concat(), expected);
+        assert_eq!(pulls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// Decodes an HTTP/1.1 chunked transfer encoding body.
+    fn dechunk(mut body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let line_end = body.windows(2).position(|w| w == b"\r\n").unwrap();
+            let size =
+                usize::from_str_radix(std::str::from_utf8(&body[..line_end]).unwrap().trim(), 16)
+                    .unwrap();
+            body = &body[line_end + 2..];
+            if size == 0 {
+                return out;
+            }
+            out.extend_from_slice(&body[..size]);
+            body = &body[size + 2..];
+        }
     }
 
     // Emulates a server whose encrypted reply reaches the client with an
