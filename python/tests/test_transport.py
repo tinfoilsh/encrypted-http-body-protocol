@@ -305,6 +305,22 @@ def test_content_length_zero_header_does_not_bypass_encryption(server: MockServe
     assert b"SECRET-PLAINTEXT" not in server.last_request.read()
 
 
+def test_async_content_length_zero_header_does_not_bypass_encryption(server: MockServer):
+    class RawStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"SECRET-PLAINTEXT"
+
+    async def run() -> httpx.Response:
+        async with _async_client(server) as client:
+            request = httpx.Request("POST", URL, stream=RawStream(), headers={"content-length": "0"})
+            return await client.send(request)
+
+    response = asyncio.run(run())
+    assert response.content == b"echo:SECRET-PLAINTEXT"
+    assert ENCAPSULATED_KEY_HEADER in server.last_request.headers
+    assert b"SECRET-PLAINTEXT" not in server.last_request.read()
+
+
 def test_empty_stream_request_passes_through_bodyless(server: MockServer):
     class EmptyStream(httpx.SyncByteStream):
         def __iter__(self):
