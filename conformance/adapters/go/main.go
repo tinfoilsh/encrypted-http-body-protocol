@@ -287,7 +287,8 @@ func middlewareRequest(fx *fixture, r *result) error {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		_, delivered, readErr = readTracked(req.Body)
 		if readErr != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			// Return without writing: the middleware then answers with the
+			// protocol status (SPEC 5.2) instead of aborting a started response.
 			return
 		}
 		w.WriteHeader(http.StatusOK)
