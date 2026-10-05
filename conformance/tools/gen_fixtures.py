@@ -11,6 +11,7 @@ all JSON files under test-vectors/conformance. The written files are the source
 of truth the harness consumes; this script is the reproducible authoring aid.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -31,12 +32,27 @@ def load(name: str) -> dict:
 
 
 def config(key_id="00", kem=KEM_X25519, pubkey=None, suites_len=None,
-           kdf=KDF_HKDF_SHA256, aead=AEAD_AES_256_GCM) -> str:
+           kdf=KDF_HKDF_SHA256, aead=AEAD_AES_256_GCM, suites=None) -> str:
+    """Encode a key_config; `suites` is a list of (kdf, aead) pairs, defaulting
+    to the single pinned suite."""
     pubkey = pubkey if pubkey is not None else "07" * 32
-    body = "".join([kdf, aead])
+    body = "".join(k + a for k, a in (suites or [(kdf, aead)]))
     if suites_len is None:
         suites_len = f"{len(body) // 2:04x}"
     return key_id + kem + pubkey + suites_len + body
+
+
+def large_body_digest(size_bytes: int, seed: int) -> str:
+    """SHA-256 of the large-body pattern: a 1 MiB block with block[i] = (i + seed) & 0xff,
+    repeated to size_bytes, exactly what every adapter streams."""
+    block = bytes((i + seed) & 0xFF for i in range(1 << 20))
+    h = hashlib.sha256()
+    remaining = size_bytes
+    while remaining > 0:
+        n = min(remaining, len(block))
+        h.update(block[:n])
+        remaining -= n
+    return h.hexdigest()
 
 
 def main() -> None:
@@ -526,7 +542,7 @@ def main() -> None:
         "category": "config",
         "operation": "parse_config",
         "inputs": {
-            "config": "000020070707070707070707070707070707070707070707070707070707070707070700080001000200010002"
+            "config": config(suites=[(KDF_HKDF_SHA256, AEAD_AES_256_GCM)] * 2)
         },
         "expect": {
             "outcome": "error",
@@ -688,7 +704,7 @@ def main() -> None:
         "expect": {
             "outcome": "ok",
             "status": 200,
-            "body_hex": "5bb8a0daf79ae7af2f38f80ac1ce890a741392362bfb96b37c5fe03261ab9a22"
+            "body_hex": large_body_digest(3221225472, 42)
         },
         "allowed_skips": {
             "js-chromium": "opfs-quota-below-body-size",
@@ -717,7 +733,7 @@ def main() -> None:
         "expect": {
             "outcome": "ok",
             "status": 200,
-            "body_hex": "f9a891ea18e0514540299aa52cc585ff94b199c11e0f1bc9cae12542893eb327"
+            "body_hex": large_body_digest(268435456, 42)
         },
         "allowed_skips": {
             "js-chromium": "opfs-quota-below-body-size",
