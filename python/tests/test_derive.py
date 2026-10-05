@@ -88,6 +88,12 @@ def test_streaming_decryptor_rejects_oversized_chunk_length():
         decryptor.push(oversized_prefix)
 
 
+def test_default_chunk_cap_is_64_mib():
+    decryptor = FrameDecryptor(_key_material())
+    with pytest.raises(ChunkTooLargeError):
+        decryptor.push((0xFFFFFFFF).to_bytes(4, "big"))
+
+
 def test_token_decryptor_delivers_before_source_eof():
     exported_secret = bytes(range(32))
     request_enc = bytes(reversed(range(32)))
