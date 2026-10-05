@@ -713,6 +713,35 @@ describe('Transport', () => {
     assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
   });
 
+  it('should fall back to a single Blob body where uploads cannot stream', async () => {
+    // Force the browser path: canStreamUpload() keys off process.versions.node.
+    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
+    Object.defineProperty(process, 'versions', { value: {}, configurable: true });
+    try {
+      const original = new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
+      const request = new Request('https://server.test/upload', { method: 'POST', body: original });
+      const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+      assert(context);
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+
+      const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
+      const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
+        info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+      });
+      const plain: Uint8Array[] = [];
+      let frames = 0;
+      for (let offset = 0; offset < body.byteLength; frames++) {
+        const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
+        plain.push(new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len))));
+        offset += 4 + len;
+      }
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
+    } finally {
+      Object.defineProperty(process, 'versions', versions);
+    }
+  });
+
   it('should pull a stream body incrementally rather than buffering it', async () => {
     let pulls = 0;
     const chunks = 8;

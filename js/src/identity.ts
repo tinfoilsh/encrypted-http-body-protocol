@@ -346,7 +346,8 @@ export class Identity {
     const frames = encryptFrames(ctx, reader, first);
     // ponytail: only Node is trusted to stream an upload. Chromium accepts a
     // stream body but fails it over HTTP/1.1, Firefox rejects it outright, so
-    // browsers get the frames collected into one buffer.
+    // browsers hold the encrypted body once, as a Blob of frames. A size
+    // limit for the fallback is the upgrade path if that ever matters.
     const body = canStreamUpload() ? frames : await collect(frames);
 
     return {
@@ -642,19 +643,18 @@ function encryptFrames(
   });
 }
 
-async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+// One copy at most: the frames go into a Blob as parts instead of being
+// concatenated into a second body-sized buffer.
+async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
   const parts: Uint8Array[] = [];
-  let total = 0;
   for (const reader = stream.getReader(); ;) {
     const { done, value } = await reader.read();
     if (done) break;
     parts.push(value);
-    total += value.byteLength;
   }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) { out.set(part, offset); offset += part.byteLength; }
-  return out;
+  const blob = new Blob(parts as BlobPart[]);
+  parts.length = 0;
+  return blob;
 }
 
 function canStreamUpload(): boolean {
