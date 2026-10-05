@@ -230,39 +230,43 @@ export class Transport {
       ? await extractSessionRecoveryToken(context)
       : undefined;
 
-    // Make the request
-    const response = await fetch(encryptedRequest);
-
     // Bodyless requests: context is null, response is plaintext
     if (!token) {
-      return response;
+      return fetch(encryptedRequest);
     }
 
-    const shouldDecrypt = await Transport.shouldDecryptResponse(response);
-    if (!shouldDecrypt) {
-      return response;
-    }
-
-    // Decrypt response using the already-extracted token
-    let streamTerminated = false;
+    // SPEC 6: the token exists once the body is sealed, before it is sent,
+    // so a caller can persist it ahead of the response. Anything that ends
+    // the exchange without an authenticated response consumes it.
     const clearToken = () => {
-      streamTerminated = true;
       if (this.requestGeneration === generation) {
         this._lastSessionRecoveryToken = undefined;
       }
     };
-    const decryptedResponse = await decryptResponseWithToken(
-      response,
-      token,
-      clearToken,
-      clearToken,
-    );
-
-    // Publish token only after confirming the response is valid
     if (this.requestGeneration === generation) {
-      this._lastSessionRecoveryToken = streamTerminated ? undefined : token;
+      this._lastSessionRecoveryToken = token;
     }
-    return decryptedResponse;
+
+    let response: Response;
+    let shouldDecrypt: boolean;
+    try {
+      response = await fetch(encryptedRequest);
+      shouldDecrypt = await Transport.shouldDecryptResponse(response);
+    } catch (err) {
+      clearToken();
+      throw err;
+    }
+    if (!shouldDecrypt) {
+      clearToken();
+      return response;
+    }
+
+    try {
+      return await decryptResponseWithToken(response, token, clearToken, clearToken);
+    } catch (err) {
+      clearToken();
+      throw err;
+    }
   }
 
   /**

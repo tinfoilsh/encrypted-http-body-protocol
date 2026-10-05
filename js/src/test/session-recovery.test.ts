@@ -977,7 +977,7 @@ describe('Session Recovery Token', () => {
       }
     });
 
-    it('should invalidate the previous token when a newer request starts', async () => {
+    it('should replace the previous token as soon as a newer request is sealed', async () => {
       const { identity, privateKey } = await generateTestKeys();
       const { Transport } = await import('../client.js');
       const transport = new Transport(identity, 'server.test');
@@ -1005,18 +1005,18 @@ describe('Session Recovery Token', () => {
 
       try {
         await transport.post('https://server.test/api', 'request-1');
-        assert(transport.getSessionRecoveryToken());
+        const first = transport.getSessionRecoveryToken();
 
         const second = transport.post('https://server.test/api', 'request-2');
         await secondStarted;
-        assert.throws(
-          () => transport.getSessionRecoveryToken(),
-          /No session recovery token available/,
-        );
+        // SPEC 6: the newer exchange's token replaces the older one as soon as
+        // its body is sealed, before any response.
+        const inFlight = transport.getSessionRecoveryToken();
+        assert.notDeepStrictEqual(inFlight.requestEnc, first.requestEnc);
 
         releaseSecond();
         await second;
-        assert(transport.getSessionRecoveryToken());
+        assert.deepStrictEqual(transport.getSessionRecoveryToken().requestEnc, inFlight.requestEnc);
       } finally {
         releaseSecond();
         globalThis.fetch = originalFetch;

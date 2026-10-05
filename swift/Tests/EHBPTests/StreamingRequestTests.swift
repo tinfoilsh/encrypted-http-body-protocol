@@ -145,3 +145,64 @@ final class StreamingRequestTests: XCTestCase {
         // (SPEC 5.1), and publication timing on this path is tracked by #109.
     }
 }
+
+final class TokenBeforeSendTests: XCTestCase {
+    /// Stub that reads the client's token while the request is in flight.
+    private func inFlightToken(_ run: (EHBPClient) async throws -> Void) async throws -> (seen: SessionRecoveryToken?, sentEnc: Data) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+        defer { StubURLProtocol.handler = nil }
+        var seen: SessionRecoveryToken?
+        var sentEnc = Data()
+        StubURLProtocol.handler = { request in
+            sentEnc = Data(hexString: request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader) ?? "") ?? Data()
+            seen = try? client.getSessionRecoveryToken()
+            // Nonce-less 502: passed through, and consumes the token.
+            return (HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: [:])!, Data())
+        }
+        try await run(client)
+        XCTAssertThrowsError(try client.getSessionRecoveryToken(), "pass-through consumes the token")
+        return (seen, sentEnc)
+    }
+
+    func testBufferedRequestPublishesTokenBeforeSend() async throws {
+        let (seen, sentEnc) = try await inFlightToken { client in
+            _ = try await client.request(method: "POST", path: "/secure", body: Data("hi".utf8))
+        }
+        XCTAssertEqual(seen?.requestEnc, sentEnc)
+    }
+
+    func testStreamingRequestPublishesTokenBeforeSend() async throws {
+        let (seen, sentEnc) = try await inFlightToken { client in
+            let (stream, _) = try await client.requestStream(method: "POST", path: "/secure", body: Data("hi".utf8))
+            for try await _ in stream {}
+        }
+        XCTAssertEqual(seen?.requestEnc, sentEnc)
+    }
+
+    func testTransportFailureClearsToken() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        let client = try EHBPClient(
+            baseURL: "https://server.test",
+            publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation),
+            session: URLSession(configuration: configuration)
+        )
+        defer { StubURLProtocol.handler = nil }
+        StubURLProtocol.handler = { _ in throw URLError(.networkConnectionLost) }
+        await XCTAssertThrowsErrorAsync(try await client.request(method: "POST", path: "/secure", body: Data("hi".utf8)))
+        XCTAssertThrowsError(try client.getSessionRecoveryToken())
+    }
+}
+
+private func XCTAssertThrowsErrorAsync<T>(_ expression: @autoclosure () async throws -> T) async {
+    do {
+        _ = try await expression()
+        XCTFail("expected an error")
+    } catch {}
+}

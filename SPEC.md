@@ -68,7 +68,7 @@ Encrypted bodies are framed as a sequence of chunks:
 
 - Each chunk = `LEN(4 bytes, big-endian uint32)` || `CIPHERTEXT(LEN bytes)`; `LEN` counts ciphertext bytes only.
 - `CIPHERTEXT` is produced by AEAD sealing under the single HPKE context for the message direction (AAD is empty). The sealer/opener pair is established once per body and reused for every chunk.
-- A chunk length of zero MAY appear when the application performs an empty write; receivers ignore such chunks and continue parsing.
+- A chunk length of zero MAY appear when the application performs an empty write. Receivers skip such chunks and continue parsing; a zero-length chunk is not authenticated, carries no meaning, and MUST NOT advance the sequence number (Section 4.4.1, step 5): sequence number `i` always names the i-th non-empty chunk.
 - End of message is indicated by the end of the HTTP entity body; no special sentinel chunk is used.
 - The maximum chunk length is 64 MiB (67,108,864 bytes of ciphertext). Senders MUST NOT emit a larger chunk; receivers MUST reject a length prefix above this maximum (`CHUNK_TOO_LARGE`) before allocating or reading the chunk.
 
@@ -269,6 +269,8 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 ## 6. Session Recovery Tokens (Optional)
 
 Clients MAY extract a **session recovery token** from the HPKE sender context after encrypting a request. This token contains the minimal cryptographic material needed to derive response decryption keys (Section 4.4) without retaining the live HPKE context, enabling response decryption in a different process or session than the one that sent the request. For example, a client can persist the token before issuing a long-running request so that the response can be decrypted even if the original process is interrupted.
+
+An implementation that offers session recovery tokens MUST make the token obtainable as soon as the request body has been encrypted and before the request is sent, so that it can be persisted ahead of the interruption window described above. This applies to every request path the implementation offers, streaming or not: any path that encrypts a body MUST publish its token.
 
 ### 6.1 Token Structure
 
