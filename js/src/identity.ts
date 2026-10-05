@@ -297,7 +297,8 @@ export class Identity {
    */
   async encryptRequestWithContext(
     request: Request,
-    source?: ReadableStream<Uint8Array> | Blob
+    source?: ReadableStream<Uint8Array> | Blob,
+    options: { memoryOnly?: boolean } = {}
   ): Promise<{ request: Request; context: RequestContext | null; cleanup?: () => Promise<void> }> {
     // A caller-supplied source bypasses the Request body entirely: browsers
     // without upload streaming cannot carry a stream in a Request (Firefox
@@ -354,21 +355,39 @@ export class Identity {
     // but fails it over HTTP/1.1, Firefox stringifies it. Browsers spool the
     // frames to a private file and upload that, which both engines stream
     // from disk, or fall back to one Blob in memory.
-    const sink = canStreamUpload()
-      ? { body: frames as BodyInit }
-      : await spool(frames, source instanceof Blob ? source.size : undefined);
+    let sink: { body: BodyInit; cleanup?: () => Promise<void> };
+    if (canStreamUpload()) {
+      sink = { body: frames as BodyInit };
+    } else if (options.memoryOnly) {
+      sink = { body: await collect(frames) };
+    } else {
+      try {
+        sink = await spool(frames, source instanceof Blob ? source.size : undefined);
+      } catch (err) {
+        // The frames are consumed. A Blob source can be re-read, so seal it
+        // again under a fresh context into the in-memory fallback; a stream
+        // cannot be replayed and the failure surfaces as is.
+        if (!(source instanceof Blob)) throw err;
+        return this.encryptRequestWithContext(request, new Blob([source]), { memoryOnly: true });
+      }
+    }
 
-    return {
-      request: new Request(request.url, {
-        ...forwardedRequestInit(request),
-        method: request.method,
-        headers,
-        body: sink.body,
-        duplex: 'half',
-      } as RequestInit),
-      context,
-      cleanup: sink.cleanup,
-    };
+    try {
+      return {
+        request: new Request(request.url, {
+          ...forwardedRequestInit(request),
+          method: request.method,
+          headers,
+          body: sink.body,
+          duplex: 'half',
+        } as RequestInit),
+        context,
+        cleanup: sink.cleanup,
+      };
+    } catch (err) {
+      await sink.cleanup?.().catch(() => {});
+      throw err;
+    }
   }
 
   /**
@@ -705,16 +724,18 @@ async function spool(
     typeof storage?.getDirectory === 'function' &&
     typeof (globalThis as { FileSystemFileHandle?: { prototype: { createWritable?: unknown } } })
       .FileSystemFileHandle?.prototype?.createWritable === 'function';
-  if (canSpool && knownSize !== undefined && typeof storage.estimate === 'function') {
-    const { quota = 0, usage = 0 } = await storage.estimate();
-    // Frame overhead is 20 bytes per 64 KiB (0.03 %); 1 % is ample headroom.
-    if (quota - usage < knownSize * 1.01) return { body: await collect(frames) };
-  }
   if (!canSpool) return { body: await collect(frames) };
+  if (knownSize !== undefined && typeof storage.estimate === 'function') {
+    const { quota = 0, usage = 0 } = await storage.estimate();
+    if (quota - usage < framedSize(knownSize)) return { body: await collect(frames) };
+  }
 
   const root = await storage.getDirectory();
-  const name = `ehbp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const cleanup = () => root.removeEntry(name).catch(() => {});
+  await sweepOrphanedSpools(root);
+  const name = `${SPOOL_PREFIX}${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // Removal failures propagate: a leftover file is ciphertext only, but the
+  // caller should know it is still there rather than assume it is gone.
+  const cleanup = () => root.removeEntry(name);
   try {
     const handle = await root.getFileHandle(name, { create: true });
     const writer = await handle.createWritable();
@@ -724,13 +745,42 @@ async function spool(
         if (done) break;
         await writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
       }
-    } finally {
-      await writer.close();
+    } catch (err) {
+      // An errored writable cannot be closed; abort it so the original error
+      // (quota exhausted mid-body, I/O failure) is the one that surfaces.
+      await writer.abort(err).catch(() => {});
+      throw err;
     }
+    await writer.close();
     return { body: await handle.getFile(), cleanup };
   } catch (err) {
-    await cleanup();
+    await cleanup().catch(() => {});
     throw err;
+  }
+}
+
+const SPOOL_PREFIX = 'ehbp-spool-';
+const SPOOL_ORPHAN_AGE_MS = 60 * 60 * 1000;
+
+/** Encrypted size of a body of `size` plaintext bytes: 4-byte length and 16-byte tag per frame. */
+function framedSize(size: number): number {
+  return size + Math.max(1, Math.ceil(size / REQUEST_FRAME_BYTES)) * 20;
+}
+
+/**
+ * A spool outlives its request only if the page died between upload and
+ * cleanup. Such files hold ciphertext, never keys, but there is no reason to
+ * keep them: remove ours that are older than an hour (younger ones may belong
+ * to a concurrent upload in another tab of the same origin).
+ */
+async function sweepOrphanedSpools(root: FileSystemDirectoryHandle): Promise<void> {
+  const entries = (root as unknown as { keys?: () => AsyncIterable<string> }).keys?.();
+  if (!entries) return;
+  const cutoff = Date.now() - SPOOL_ORPHAN_AGE_MS;
+  for await (const name of entries) {
+    if (!name.startsWith(SPOOL_PREFIX)) continue;
+    const born = Number(name.slice(SPOOL_PREFIX.length).split('-')[0]);
+    if (Number.isFinite(born) && born < cutoff) await root.removeEntry(name).catch(() => {});
   }
 }
 

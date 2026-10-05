@@ -816,14 +816,21 @@ describe('Transport', () => {
     Object.defineProperty(process, 'versions', { value: {}, configurable: true });
     return () => Object.defineProperty(process, 'versions', versions);
   }
-  function fakeOpfs(opts: { quota?: number } = {}) {
-    const state = { writes: [] as number[], removed: [] as string[] };
+  function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[] } = {}) {
+    const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0 };
     const chunks: Uint8Array[] = [];
     const handle = {
       async createWritable() {
+        let errored = false;
         return {
-          async write(v: Uint8Array) { state.writes.push(v.byteLength); chunks.push(new Uint8Array(v)); },
-          async close() {},
+          async write(v: Uint8Array) {
+            if (opts.failAfterWrites !== undefined && state.writes.length >= opts.failAfterWrites) {
+              errored = true; throw new DOMException('quota exceeded mid-body', 'QuotaExceededError');
+            }
+            state.writes.push(v.byteLength); chunks.push(new Uint8Array(v));
+          },
+          async abort() { state.aborted++; },
+          async close() { if (errored) { state.closedAfterError++; throw new TypeError('Cannot close a ERRORED writable stream'); } },
         };
       },
       async getFile() { return new File(chunks as BlobPart[], 'spool'); },
@@ -831,6 +838,7 @@ describe('Transport', () => {
     const root = {
       async getFileHandle() { return handle; },
       async removeEntry(name: string) { state.removed.push(name); },
+      async *keys() { for (const n of opts.existing ?? []) yield n; },
     };
     const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
     Object.defineProperty(globalThis, 'navigator', {
@@ -922,6 +930,97 @@ describe('Transport', () => {
       assert.deepStrictEqual(plain, Buffer.from(original));
     } finally {
       f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should fall back to a Blob when the quota only fits the plaintext, not the framed body', async () => {
+    const restoreMode = browserMode();
+    const original = original200k();
+    const { state, restore } = fakeOpfs({ quota: original.byteLength + 10 }); // 4 frames add 80 bytes
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(state.writes.length, 0, 'framed size exceeds quota: no spool');
+      const { frames } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should re-seal a Blob source into memory when the OPFS write fails mid-body', async () => {
+    const restoreMode = browserMode();
+    const { state, restore } = fakeOpfs({ failAfterWrites: 2 });
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      const response = await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(response.status, 502);
+      assert.strictEqual(state.aborted, 1, 'the errored writer is aborted, not closed');
+      assert.strictEqual(state.closedAfterError, 0);
+      assert.strictEqual(state.removed.length, 1, 'the partial spool is removed');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original), 'the retry sealed the whole body under a fresh context');
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should surface the OPFS failure for a stream source that cannot be replayed', async () => {
+    const restoreMode = browserMode();
+    const { state, restore } = fakeOpfs({ failAfterWrites: 1 });
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original200k()); c.close(); } });
+      await assert.rejects(
+        transport.request('https://server.test/upload', { method: 'POST', body: source }),
+        (err: unknown) => err instanceof DOMException && err.name === 'QuotaExceededError',
+      );
+      assert.strictEqual(state.aborted, 1);
+      assert.strictEqual(state.removed.length, 1);
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should remove orphaned spool files older than an hour and keep fresh ones', async () => {
+    const restoreMode = browserMode();
+    const old = `ehbp-spool-${Date.now() - 2 * 60 * 60 * 1000}-dead`;
+    const fresh = `ehbp-spool-${Date.now() - 1000}-live`;
+    const { state, restore } = fakeOpfs({ existing: [old, fresh, 'unrelated-file'] });
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()]) });
+      assert.ok(state.removed.includes(old), 'stale spool swept');
+      assert.ok(!state.removed.includes(fresh), 'a concurrent upload\'s spool is left alone');
+      assert.ok(!state.removed.includes('unrelated-file'));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should reject a GET or HEAD with a body before touching it, and keep a typed Blob\'s Content-Type', async () => {
+    const restoreMode = browserMode();
+    const { state, restore } = fakeOpfs();
+    const captured = { contentType: null as string | null };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (req: Request) => { captured.contentType = req.headers.get('content-type'); return new Response('x', { status: 502 }); }) as typeof fetch;
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      let pulled = false;
+      const source = new ReadableStream<Uint8Array>({ pull(c) { pulled = true; c.close(); } }, { highWaterMark: 0 });
+      await assert.rejects(transport.request('https://server.test/x', { method: 'GET', body: source }), InvalidInputError);
+      assert.strictEqual(pulled, false);
+      assert.strictEqual(state.writes.length, 0);
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()], { type: 'application/octet-stream' }) });
+      assert.strictEqual(captured.contentType, 'application/octet-stream');
+    } finally {
+      globalThis.fetch = originalFetch; restore(); restoreMode();
     }
   });
 
