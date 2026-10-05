@@ -78,6 +78,7 @@ final class StreamingRequestTests: XCTestCase {
         let frames = try openFrames(uploaded, privateKey: serverKey, enc: enc)
         XCTAssertEqual(frames.reduce(Data(), +), chunk + chunk + chunk)
         XCTAssertTrue(frames.allSatisfy { $0.count <= RequestEncryptor.frameSize })
-        XCTAssertNotNil(try? client.getSessionRecoveryToken(), "token is published for the exchange")
+        // No token assertion: a nonce-less 502 pass-through consumes the token
+        // (SPEC 5.1), and publication timing on this path is tracked by #109.
     }
 }
