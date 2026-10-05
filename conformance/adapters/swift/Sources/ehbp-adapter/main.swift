@@ -74,6 +74,8 @@ func run() async throws {
         try await requestOp()
     case "large_body":
         try await largeBodyOp(ins)
+    case "token_before_response":
+        try await tokenBeforeResponseOp()
     default:
         throw EHBPError(.invalidInput, "unknown operation \(op)")
     }
@@ -153,6 +155,28 @@ func requestOp() async throws {
     let noNonce = hdrs["ehbp-response-nonce"] == nil
     setBody(data)
     res["passthrough"] = noNonce && !(200..<300).contains(response.statusCode)
+}
+
+// tokenBeforeResponseOp sends the fixture request to the holding oracle route
+// and reads the session recovery token while the response is still pending.
+func tokenBeforeResponseOp() async throws {
+    let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
+    let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
+    let client = try EHBPClient(baseURL: base, config: config)
+    let req = fx["request"] as? [String: Any] ?? [:]
+    let body = Data(hexString: (req["body_hex"] as? String) ?? "")
+
+    let pending = Task {
+        try await client.request(
+            method: (req["method"] as? String) ?? "POST",
+            path: (req["path"] as? String) ?? "/",
+            body: body)
+    }
+    try await Task.sleep(nanoseconds: 300_000_000)
+    res["token_before_response"] = (try? client.getSessionRecoveryToken()) != nil
+    let (data, response) = try await pending.value
+    res["status"] = response.statusCode
+    setBody(data)
 }
 
 // largeBodyOp streams a multi-GiB patterned body through the client's
