@@ -1,5 +1,8 @@
 import Foundation
 
+/// Pull-based request body: return the next plaintext chunk, or nil at end.
+public typealias RequestBodySource = () throws -> Data?
+
 /// Streaming EHBP client for making encrypted HTTP requests
 public final class EHBPClient: @unchecked Sendable {
     private let identity: Identity
@@ -63,9 +66,30 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let (request, generation, requestContext, token) = try prepareRequest(
-            method: method, path: path, headers: headers, body: body
-        )
+        try await request(method: method, path: path, headers: headers, body: .data(body))
+    }
+
+    /// Streaming-body variant: `bodySource` is pulled chunk by chunk (return
+    /// nil at end) and encrypted with O(frame) memory, so multi-GiB uploads work.
+    public func request(
+        method: String,
+        path: String,
+        headers: [String: String] = [:],
+        bodySource: @escaping RequestBodySource
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        try await request(method: method, path: path, headers: headers, body: .source(bodySource))
+    }
+
+    private func request(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: RequestBody
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
+        defer { prepared.cleanup() }
+        let (request, generation, requestContext, token) =
+            (prepared.request, prepared.generation, prepared.context, prepared.token)
 
         let (data, response) = try await session.data(for: request)
 
@@ -111,11 +135,38 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let (request, generation, requestContext, token) = try prepareRequest(
-            method: method, path: path, headers: headers, body: body
-        )
+        try await requestStream(method: method, path: path, headers: headers, body: .data(body))
+    }
 
-        let (asyncBytes, response) = try await session.bytes(for: request)
+    /// Streaming-body variant of `requestStream`; see `request(bodySource:)`.
+    public func requestStream(
+        method: String,
+        path: String,
+        headers: [String: String] = [:],
+        bodySource: @escaping RequestBodySource
+    ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
+        try await requestStream(method: method, path: path, headers: headers, body: .source(bodySource))
+    }
+
+    private func requestStream(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: RequestBody
+    ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
+        let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
+        let (request, generation, requestContext, token) =
+            (prepared.request, prepared.generation, prepared.context, prepared.token)
+
+        let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
+        do {
+            (asyncBytes, response) = try await session.bytes(for: request)
+        } catch {
+            prepared.cleanup()
+            throw error
+        }
+        // Response headers mean the upload finished; the spool is no longer needed.
+        prepared.cleanup()
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
@@ -226,12 +277,30 @@ public final class EHBPClient: @unchecked Sendable {
     /// the buffered and streaming paths so the two cannot diverge: URL
     /// resolution against the configured origin, generation tracking,
     /// reserved-header validation, and body encryption.
+    private enum RequestBody {
+        case data(Data?)
+        case source(RequestBodySource)
+    }
+
+    private struct PreparedRequest {
+        let request: URLRequest
+        let generation: UInt64
+        let context: RequestContext?
+        let token: SessionRecoveryToken?
+        /// Encrypted body spooled for a streaming source; removed after upload.
+        let spool: URL?
+
+        func cleanup() {
+            if let spool { try? FileManager.default.removeItem(at: spool) }
+        }
+    }
+
     private func prepareRequest(
         method: String,
         path: String,
         headers: [String: String],
-        body: Data?
-    ) throws -> (URLRequest, UInt64, RequestContext?, SessionRecoveryToken?) {
+        body: RequestBody
+    ) throws -> PreparedRequest {
         let url = try resolveURL(path)
         let generation = beginRequest()
 
@@ -244,19 +313,56 @@ public final class EHBPClient: @unchecked Sendable {
 
         var requestContext: RequestContext?
         var token: SessionRecoveryToken?
+        var spool: URL?
 
-        if let body = body, !body.isEmpty {
-            let (encryptedBody, context) = try identity.encryptRequest(body: body)
-            requestContext = context
-            token = try extractSessionRecoveryToken(context: context)
-
+        switch body {
+        case .data(let data):
+            if let data, !data.isEmpty {
+                let (encryptedBody, context) = try identity.encryptRequest(body: data)
+                requestContext = context
+                token = try extractSessionRecoveryToken(context: context)
+                request.httpBody = encryptedBody
+            }
+        case .source(let next):
+            let encryptor = try identity.makeRequestEncryptor()
+            requestContext = encryptor.context
+            // The token exists before a single byte is read or sent (SPEC 6).
+            token = try extractSessionRecoveryToken(context: encryptor.context)
+            spool = try EHBPClient.spoolEncrypted(from: next, with: encryptor)
+            request.httpBodyStream = InputStream(url: spool!)
+        }
+        if let context = requestContext {
             request.setValue(
                 context.requestEnc.hexString,
                 forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
             )
-            request.httpBody = encryptedBody
         }
-        return (request, generation, requestContext, token)
+        return PreparedRequest(request: request, generation: generation,
+                               context: requestContext, token: token, spool: spool)
+    }
+
+    /// Encrypts a streaming source frame by frame into a temporary file so
+    /// memory stays O(frame) while URLSession gets a body it can upload.
+    // ponytail: temp-file spool costs O(size) disk; replace with a custom
+    // InputStream that seals on demand if disk becomes the constraint.
+    private static func spoolEncrypted(from next: RequestBodySource, with encryptor: RequestEncryptor) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ehbp-\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil),
+              let handle = FileHandle(forWritingAtPath: url.path) else {
+            throw EHBPError.network("cannot create upload spool file")
+        }
+        defer { try? handle.close() }
+        do {
+            while let chunk = try next() {
+                if chunk.isEmpty { continue }
+                try handle.write(contentsOf: try encryptor.seal(chunk))
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        return url
     }
 
     static func mayBeKeyConfigMismatch(_ response: HTTPURLResponse) -> Bool {

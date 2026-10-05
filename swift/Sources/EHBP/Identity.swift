@@ -226,34 +226,30 @@ public final class Identity: Sendable {
         )
     }
 
-    /// Encrypts request body and returns context for response decryption (SPEC Section 5.1)
-    ///
-    /// - Parameter body: Request body to encrypt
-    /// - Returns: Encrypted body with chunk framing, and context needed to decrypt the response
+    /// Encrypts a request body as a sequence of framed chunks (SPEC 4.3).
+    /// Large bodies produce several frames; see `makeRequestEncryptor()` for
+    /// the incremental form.
     public func encryptRequest(body: Data) throws -> (encryptedBody: Data, context: RequestContext) {
-        let info = Data(EHBPConstants.hpkeRequestInfo.utf8)
+        let encryptor = try makeRequestEncryptor()
+        var framed = Data()
+        var offset = 0
+        while offset < body.count {
+            let end = min(offset + RequestEncryptor.frameSize, body.count)
+            framed.append(try encryptor.seal(body[offset..<end]))
+            offset = end
+        }
+        return (framed, encryptor.context)
+    }
 
-        var sender = try HPKE.Sender(
+    /// Sets up the HPKE sender once; each `seal` call then yields one framed
+    /// chunk, so a body of any size streams with memory bounded by the frame.
+    public func makeRequestEncryptor() throws -> RequestEncryptor {
+        let sender = try HPKE.Sender(
             recipientKey: publicKey,
             ciphersuite: ciphersuite,
-            info: info
+            info: Data(EHBPConstants.hpkeRequestInfo.utf8)
         )
-
-        let encapsulatedKey = sender.encapsulatedKey
-        let encrypted = try sender.seal(body)
-
-        // Frame as: LEN (4 bytes big-endian) || ciphertext
-        var chunkedData = Data()
-        var length = UInt32(encrypted.count).bigEndian
-        chunkedData.append(Data(bytes: &length, count: 4))
-        chunkedData.append(encrypted)
-
-        let context = RequestContext(
-            sender: sender,
-            requestEnc: encapsulatedKey
-        )
-
-        return (chunkedData, context)
+        return RequestEncryptor(sender: sender)
     }
 
     /// Derives response decryption keys using OHTTP-style derivation (SPEC Section 4.4.1)
@@ -290,5 +286,37 @@ private extension DecodingError {
         @unknown default:
             return String(describing: self)
         }
+    }
+}
+
+/// Incremental request encryptor: one HPKE sender, one framed chunk per `seal`.
+public final class RequestEncryptor {
+    /// Plaintext bytes per frame; well under the 64 MiB receiver bound.
+    public static let frameSize = 64 * 1024
+
+    private var sender: HPKE.Sender
+    /// Available before any chunk is sealed, so the session recovery token
+    /// can be persisted ahead of the upload.
+    public let context: RequestContext
+
+    init(sender: HPKE.Sender) {
+        self.sender = sender
+        self.context = RequestContext(sender: sender, requestEnc: sender.encapsulatedKey)
+    }
+
+    /// Seals one plaintext chunk (split into `frameSize` frames if larger)
+    /// and returns the framed ciphertext: LEN(4, big-endian) || CIPHERTEXT per frame.
+    public func seal(_ plaintext: Data) throws -> Data {
+        var out = Data()
+        var offset = plaintext.startIndex
+        repeat {
+            let end = min(offset + RequestEncryptor.frameSize, plaintext.endIndex)
+            let encrypted = try sender.seal(plaintext[offset..<end])
+            var length = UInt32(encrypted.count).bigEndian
+            out.append(Data(bytes: &length, count: 4))
+            out.append(encrypted)
+            offset = end
+        } while offset < plaintext.endIndex
+        return out
     }
 }
