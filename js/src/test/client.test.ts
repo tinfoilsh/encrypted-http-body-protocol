@@ -810,6 +810,136 @@ describe('Transport', () => {
     }
   });
 
+  // Browser-mode helpers: force the no-upload-streaming path and fake OPFS.
+  function browserMode() {
+    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
+    Object.defineProperty(process, 'versions', { value: {}, configurable: true });
+    return () => Object.defineProperty(process, 'versions', versions);
+  }
+  function fakeOpfs(opts: { quota?: number } = {}) {
+    const state = { writes: [] as number[], removed: [] as string[] };
+    const chunks: Uint8Array[] = [];
+    const handle = {
+      async createWritable() {
+        return {
+          async write(v: Uint8Array) { state.writes.push(v.byteLength); chunks.push(new Uint8Array(v)); },
+          async close() {},
+        };
+      },
+      async getFile() { return new File(chunks as BlobPart[], 'spool'); },
+    };
+    const root = {
+      async getFileHandle() { return handle; },
+      async removeEntry(name: string) { state.removed.push(name); },
+    };
+    const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { storage: { getDirectory: async () => root, estimate: async () => ({ quota: opts.quota ?? 1e12, usage: 0 }) } },
+      configurable: true,
+    });
+    const g = globalThis as Record<string, unknown>;
+    const prevHandle = g.FileSystemFileHandle;
+    g.FileSystemFileHandle = class { createWritable() {} };
+    const restore = () => {
+      if (nav) Object.defineProperty(globalThis, 'navigator', nav); else delete g.navigator;
+      g.FileSystemFileHandle = prevHandle;
+    };
+    return { state, restore };
+  }
+  // Captures what fetch was handed and answers a nonce-less 502 (pass-through).
+  function captureFetch() {
+    const captured = { body: undefined as Uint8Array | undefined, enc: '', removedAtFetch: -1 };
+    const originalFetch = globalThis.fetch;
+    const install = (state?: { removed: string[] }) => {
+      globalThis.fetch = (async (req: Request) => {
+        captured.removedAtFetch = state?.removed.length ?? -1;
+        captured.enc = req.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
+        captured.body = new Uint8Array(await req.arrayBuffer());
+        return new Response('upstream', { status: 502 });
+      }) as typeof fetch;
+    };
+    return { captured, install, restore: () => { globalThis.fetch = originalFetch; } };
+  }
+  async function openFrames(body: Uint8Array, encHex: string) {
+    const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
+    const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), hexToBytes(encHex), {
+      info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+    });
+    const plain: Uint8Array[] = [];
+    for (let offset = 0; offset < body.byteLength;) {
+      const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
+      plain.push(new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len))));
+      offset += 4 + len;
+    }
+    return { frames: plain.length, plain: Buffer.concat(plain) };
+  }
+  const original200k = () => new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
+
+  it('should spool frames to OPFS incrementally and upload the file where uploads cannot stream', async () => {
+    const restoreMode = browserMode();
+    const { state, restore } = fakeOpfs();
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      let streamed = 0;
+      const source = new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (streamed >= original.byteLength) { c.close(); return; }
+          c.enqueue(original.subarray(streamed, streamed + 50 * 1024)); streamed += 50 * 1024;
+        },
+      });
+      const response = await transport.request('https://server.test/upload', { method: 'POST', body: source });
+      assert.strictEqual(response.status, 502);
+      assert.deepStrictEqual(state.writes.map((n) => n - 20), [65536, 65536, 65536, 8192], 'one OPFS write per sealed frame');
+      assert.strictEqual(f.captured.removedAtFetch, 0, 'the spool file is alive while fetch runs');
+      assert.strictEqual(state.removed.length, 1, 'the spool file is removed after the response');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should fall back to a Blob when OPFS quota cannot hold a body of known size', async () => {
+    const restoreMode = browserMode();
+    const { state, restore } = fakeOpfs({ quota: 1024 });
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      let streamCalls = 0;
+      const blob = new Blob([original]);
+      const realStream = blob.stream.bind(blob);
+      blob.stream = () => { streamCalls++; return realStream(); };
+      blob.arrayBuffer = async () => { throw new Error('must not buffer the source'); };
+      await transport.request('https://server.test/upload', { method: 'POST', body: blob });
+      assert.strictEqual(state.writes.length, 0, 'no spool when quota is short');
+      assert.strictEqual(streamCalls, 1, 'the Blob source is read as a stream');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should fall back to a Blob where OPFS is absent', async () => {
+    const restoreMode = browserMode();
+    const f = captureFetch(); f.install();
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restoreMode();
+    }
+  });
+
   it('should frame a single huge source chunk by cursor without chunk-sized copies', async () => {
     const chunk = new Uint8Array(1024 * 1024).map((_, i) => i & 0xff);
     let maxInput = 0;

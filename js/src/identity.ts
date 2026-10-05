@@ -296,12 +296,18 @@ export class Identity {
    * 3. Returns a RequestContext that must be used to decrypt the response
    */
   async encryptRequestWithContext(
-    request: Request
-  ): Promise<{ request: Request; context: RequestContext | null }> {
+    request: Request,
+    source?: ReadableStream<Uint8Array> | Blob
+  ): Promise<{ request: Request; context: RequestContext | null; cleanup?: () => Promise<void> }> {
+    // A caller-supplied source bypasses the Request body entirely: browsers
+    // without upload streaming cannot carry a stream in a Request (Firefox
+    // stringifies it), so the transport hands it over out of band. Otherwise
     // Node and Chromium expose Request.body as a stream; Firefox does not, so
     // buffer there. Either way the body is sealed frame by frame below.
     let reader: ReadableStreamDefaultReader<Uint8Array>;
-    if (request.body) {
+    if (source) {
+      reader = (source instanceof Blob ? source.stream() : source).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    } else if (request.body) {
       reader = request.body.getReader();
     } else {
       const body = new Uint8Array(await request.arrayBuffer());
@@ -344,21 +350,24 @@ export class Identity {
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
 
     const frames = encryptFrames(ctx, reader, first);
-    // ponytail: only Node is trusted to stream an upload. Chromium accepts a
-    // stream body but fails it over HTTP/1.1, Firefox rejects it outright, so
-    // browsers hold the encrypted body once, as a Blob of frames. A size
-    // limit for the fallback is the upgrade path if that ever matters.
-    const body = canStreamUpload() ? frames : await collect(frames);
+    // Only Node is trusted to stream an upload: Chromium accepts a stream body
+    // but fails it over HTTP/1.1, Firefox stringifies it. Browsers spool the
+    // frames to a private file and upload that, which both engines stream
+    // from disk, or fall back to one Blob in memory.
+    const sink = canStreamUpload()
+      ? { body: frames as BodyInit }
+      : await spool(frames, source instanceof Blob ? source.size : undefined);
 
     return {
       request: new Request(request.url, {
         ...forwardedRequestInit(request),
         method: request.method,
         headers,
-        body,
+        body: sink.body,
         duplex: 'half',
       } as RequestInit),
       context,
+      cleanup: sink.cleanup,
     };
   }
 
@@ -678,6 +687,53 @@ export function encryptFrames(
   });
 }
 
+/**
+ * Where the runtime cannot stream an upload, write the encrypted frames to an
+ * Origin Private File System file as they are produced and upload the File:
+ * browsers stream a File body from disk, so memory stays one frame deep.
+ * Falls back to a single in-memory Blob when OPFS is missing or its quota
+ * cannot hold a body of known size.
+ * ponytail: Safari exposes OPFS only through sync access handles in a worker,
+ * so it takes the Blob fallback; a worker-based spool is the upgrade path.
+ */
+async function spool(
+  frames: ReadableStream<Uint8Array>,
+  knownSize?: number
+): Promise<{ body: BodyInit; cleanup?: () => Promise<void> }> {
+  const storage = (globalThis as { navigator?: { storage?: StorageManager } }).navigator?.storage;
+  const canSpool =
+    typeof storage?.getDirectory === 'function' &&
+    typeof (globalThis as { FileSystemFileHandle?: { prototype: { createWritable?: unknown } } })
+      .FileSystemFileHandle?.prototype?.createWritable === 'function';
+  if (canSpool && knownSize !== undefined && typeof storage.estimate === 'function') {
+    const { quota = 0, usage = 0 } = await storage.estimate();
+    // Frame overhead is 20 bytes per 64 KiB (0.03 %); 1 % is ample headroom.
+    if (quota - usage < knownSize * 1.01) return { body: await collect(frames) };
+  }
+  if (!canSpool) return { body: await collect(frames) };
+
+  const root = await storage.getDirectory();
+  const name = `ehbp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const cleanup = () => root.removeEntry(name).catch(() => {});
+  try {
+    const handle = await root.getFileHandle(name, { create: true });
+    const writer = await handle.createWritable();
+    try {
+      for (const reader = frames.getReader(); ;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
+      }
+    } finally {
+      await writer.close();
+    }
+    return { body: await handle.getFile(), cleanup };
+  } catch (err) {
+    await cleanup();
+    throw err;
+  }
+}
+
 // One copy at most: the frames go into a Blob as parts instead of being
 // concatenated into a second body-sized buffer.
 async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
@@ -690,7 +746,8 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
   return new Blob(parts as BlobPart[]);
 }
 
-function canStreamUpload(): boolean {
+/** @internal true where fetch streams a ReadableStream body (Node). */
+export function canStreamUpload(): boolean {
   const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
   return typeof proc?.versions?.node === 'string';
 }
