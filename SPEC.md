@@ -270,6 +270,8 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 
 Clients MAY extract a **session recovery token** from the HPKE sender context after encrypting a request. This token contains the minimal cryptographic material needed to derive response decryption keys (Section 4.4) without retaining the live HPKE context, enabling response decryption in a different process or session than the one that sent the request. For example, a client can persist the token before issuing a long-running request so that the response can be decrypted even if the original process is interrupted.
 
+An implementation that offers session recovery tokens MUST make the token obtainable as soon as the request body has been encrypted and before the request is sent, so that it can be persisted ahead of the interruption window described above. This applies to every request path the implementation offers, streaming or not: any path that encrypts a body MUST publish its token.
+
 ### 6.1 Token Structure
 
 A session recovery token consists of:
