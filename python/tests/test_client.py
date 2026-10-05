@@ -1,5 +1,6 @@
 """Client behavior tests against the in-process EHBP mock server."""
 
+import struct
 import threading
 
 import httpx
@@ -300,3 +301,43 @@ def test_custom_client_cannot_reenable_redirects(server: MockServer):
     )
     response = client.get("/redirect")
     assert response.status_code == 302
+
+
+def test_large_bytes_body_is_sent_as_multiple_frames(server: MockServer):
+    from ehbp.identity import REQUEST_FRAME_SIZE
+
+    payload = bytes(range(256)) * 800  # 200 KiB -> 4 frames
+    client = server.make_client()
+    response = client.post("/v1/echo", body=payload)
+    assert response.content == b"echo:" + payload
+    wire = server.last_request.read()
+    frames = 0
+    offset = 0
+    while offset < len(wire):
+        (n,) = struct.unpack_from(">I", wire, offset)
+        assert n <= REQUEST_FRAME_SIZE + 16
+        offset += 4 + n
+        frames += 1
+    assert frames == 4
+
+
+def test_generator_body_is_stream_encrypted(server: MockServer):
+    pulled = []
+
+    def source():
+        for i in range(3):
+            pulled.append(i)
+            yield b"chunk-%d;" % i
+
+    client = server.make_client()
+    response = client.post("/v1/echo", body=source())
+    assert response.content == b"echo:chunk-0;chunk-1;chunk-2;"
+    assert pulled == [0, 1, 2]
+
+
+def test_file_body_is_stream_encrypted(server: MockServer):
+    import io
+
+    client = server.make_client()
+    response = client.post("/v1/echo", body=io.BytesIO(b"from a file"))
+    assert response.content == b"echo:from a file"

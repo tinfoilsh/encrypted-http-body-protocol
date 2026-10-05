@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import IO, Any, Optional, Union
 
 import httpx
 
@@ -33,7 +33,7 @@ from ._http import (
     single_chunk_body as _single_chunk_body,
 )
 from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
-from .identity import ServerIdentity
+from .identity import REQUEST_FRAME_SIZE, ServerIdentity
 from .protocol import (
     ENCAPSULATED_KEY_HEADER,
     KEYS_MEDIA_TYPE,
@@ -52,7 +52,9 @@ _RESERVED_REQUEST_HEADERS = frozenset(
     }
 )
 
-Body = Union[bytes, bytearray, str, None]
+# bytes-like and str are buffered; an iterable of bytes or a binary file is
+# stream-encrypted frame by frame without ever being held in memory.
+Body = Union[bytes, bytearray, str, Iterable[bytes], IO[bytes], None]
 HeadersInput = Optional[Mapping[str, str]]
 
 
@@ -193,9 +195,9 @@ class Client:
         headers: HeadersInput = None,
     ) -> Response:
         url = self._resolve_url(path_or_url)
-        request_headers, plaintext = self._prepare_body(headers, body, json_body)
+        request_headers, source = self._prepare_body(headers, body, json_body)
         generation = self._begin_request()
-        encrypted = self._identity.encrypt_request_body(plaintext)
+        encrypted = self._encrypt(source)
 
         if encrypted is None:
             with self._http.stream(
@@ -204,15 +206,15 @@ class Client:
                 raw = self._read_body_capped(resp)
                 return Response(resp.status_code, resp.headers, raw)
 
-        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
-        token = encrypted.token
+        encapsulated_key, token, content = encrypted
+        request_headers[ENCAPSULATED_KEY_HEADER] = encapsulated_key.hex()
         self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
                 url,
                 headers=request_headers,
-                content=_single_chunk_body(encrypted.body),
+                content=content,
                 follow_redirects=False,
             ) as resp:
                 status = resp.status_code
@@ -267,9 +269,9 @@ class Client:
         headers: HeadersInput = None,
     ) -> Iterator[StreamingResponse]:
         url = self._resolve_url(path_or_url)
-        request_headers, plaintext = self._prepare_body(headers, body, json_body)
+        request_headers, source = self._prepare_body(headers, body, json_body)
         generation = self._begin_request()
-        encrypted = self._identity.encrypt_request_body(plaintext)
+        encrypted = self._encrypt(source)
 
         if encrypted is None:
             with self._http.stream(
@@ -278,15 +280,15 @@ class Client:
                 yield StreamingResponse(resp.status_code, resp.headers, resp.iter_bytes())
             return
 
-        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
-        token = encrypted.token
+        encapsulated_key, token, content = encrypted
+        request_headers[ENCAPSULATED_KEY_HEADER] = encapsulated_key.hex()
         self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
                 url,
                 headers=request_headers,
-                content=_single_chunk_body(encrypted.body),
+                content=content,
                 follow_redirects=False,
             ) as resp:
                 status = resp.status_code
@@ -336,14 +338,26 @@ class Client:
 
     def _prepare_body(
         self, headers: HeadersInput, body: Body, json_body: Any
-    ) -> tuple[httpx.Headers, bytes]:
+    ) -> tuple[httpx.Headers, Union[bytes, Iterable[bytes]]]:
         request_headers = self._prepare_headers(headers)
         if json_body is not None:
             if body is not None:
                 raise InvalidInputError("provide either body or json_body, not both")
             request_headers["content-type"] = "application/json"
             return request_headers, json.dumps(json_body).encode("utf-8")
-        return request_headers, _as_bytes(body)
+        return request_headers, _as_body_source(body)
+
+    def _encrypt(
+        self, source: Union[bytes, Iterable[bytes]]
+    ) -> Optional[tuple[bytes, SessionRecoveryToken, Iterator[bytes]]]:
+        """Return (encapsulated_key, token, framed content iterator), or None for bodyless."""
+        if isinstance(source, bytes):
+            encrypted = self._identity.encrypt_request_body(source)
+            if encrypted is None:
+                return None
+            return encrypted.encapsulated_key, encrypted.token, _single_chunk_body(encrypted.body)
+        stream = self._identity.encrypt_request_stream(source)
+        return stream.encapsulated_key, stream.token, stream.frames  # type: ignore[return-value]
 
     def _prepare_headers(self, headers: HeadersInput) -> httpx.Headers:
         prepared = httpx.Headers(headers or {})
@@ -396,14 +410,19 @@ def _default_http_client() -> httpx.Client:
     return httpx.Client(follow_redirects=False, timeout=DEFAULT_TIMEOUT)
 
 
-def _as_bytes(body: Body) -> bytes:
+def _as_body_source(body: Body) -> Union[bytes, Iterable[bytes]]:
     if body is None:
         return b""
     if isinstance(body, str):
         return body.encode("utf-8")
     if isinstance(body, (bytes, bytearray)):
         return bytes(body)
-    raise InvalidInputError("body must be bytes, str, or None")
+    read = getattr(body, "read", None)
+    if callable(read):
+        return iter(lambda: read(REQUEST_FRAME_SIZE), b"")
+    if isinstance(body, Iterable):
+        return body
+    raise InvalidInputError("body must be bytes, str, an iterable of bytes, a binary file, or None")
 
 
 def _normalize_base_url(raw: Union[str, httpx.URL]) -> httpx.URL:

@@ -23,7 +23,6 @@ from ._http import (
     DEFAULT_MAX_RESPONSE_BYTES,
     raise_for_key_config_mismatch,
     response_nonce_for_status,
-    single_chunk_body,
 )
 from .derive import FrameDecryptor, derive_response_keys
 from .errors import ChunkTooLargeError
@@ -34,8 +33,16 @@ from .session import SessionRecoveryToken
 _FRAMING_HEADERS = ("content-length", "transfer-encoding")
 
 
-async def _single_chunk_body_async(body: bytes) -> AsyncIterator[bytes]:
-    yield body
+def _is_bodyless(request: httpx.Request) -> bool:
+    """Bodyless requests pass through unencrypted (SPEC 7.4).
+
+    httpx sets Content-Length for buffered content and Transfer-Encoding for
+    streamed content; a request with neither carries no payload body. The
+    body is deliberately not read here so streamed uploads stay streamed.
+    """
+    if request.headers.get("content-length") == "0":
+        return True
+    return "content-length" not in request.headers and "transfer-encoding" not in request.headers
 
 
 def _read_capped(stream: httpx.SyncByteStream, max_bytes: int) -> bytes:
@@ -158,16 +165,17 @@ class EHBPTransport(httpx.BaseTransport):
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        plaintext = request.read()
-        encrypted = self._identity.encrypt_request_body(plaintext)
-        if encrypted is None:
+        if _is_bodyless(request):
             return self._inner.handle_request(request)
+        encrypted = self._identity.encrypt_request_stream(
+            cast(httpx.SyncByteStream, request.stream)
+        )
 
         enc_request = httpx.Request(
             method=request.method,
             url=request.url,
             headers=_encrypted_headers(request, encrypted.encapsulated_key),
-            content=single_chunk_body(encrypted.body),
+            content=encrypted.frames,
             extensions=request.extensions,
         )
         response = self._inner.handle_request(enc_request)
@@ -232,16 +240,17 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        plaintext = await request.aread()
-        encrypted = self._identity.encrypt_request_body(plaintext)
-        if encrypted is None:
+        if _is_bodyless(request):
             return await self._inner.handle_async_request(request)
+        encrypted = self._identity.encrypt_request_stream_async(
+            cast(httpx.AsyncByteStream, request.stream)
+        )
 
         enc_request = httpx.Request(
             method=request.method,
             url=request.url,
             headers=_encrypted_headers(request, encrypted.encapsulated_key),
-            content=_single_chunk_body_async(encrypted.body),
+            content=encrypted.frames,
             extensions=request.extensions,
         )
         response = await self._inner.handle_async_request(enc_request)

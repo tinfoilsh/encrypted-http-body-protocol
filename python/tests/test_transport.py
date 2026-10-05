@@ -227,3 +227,28 @@ def test_async_encrypted_request_preserves_extensions(server: MockServer):
 
     asyncio.run(run())
     assert "timeout" in server.last_request.extensions
+
+
+def test_streamed_request_body_is_encrypted_frame_by_frame(server: MockServer):
+    def source():
+        yield b"part one, "
+        yield b"part two"
+
+    with _sync_client(server) as client:
+        response = client.post(URL, content=source())
+    assert response.content == b"echo:part one, part two"
+    # Streamed content goes out chunked; the transport never buffers it.
+    assert "content-length" not in server.last_request.headers
+
+
+def test_async_streamed_request_body_round_trip(server: MockServer):
+    async def source():
+        yield b"async "
+        yield b"stream"
+
+    async def run() -> bytes:
+        async with _async_client(server) as client:
+            response = await client.post(URL, content=source())
+            return response.content
+
+    assert asyncio.run(run()) == b"echo:async stream"
