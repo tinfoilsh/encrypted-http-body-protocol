@@ -39,7 +39,11 @@ export class Transport {
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
-    this.serverOrigin = serverHost.includes('://') ? new URL(serverHost).origin : undefined;
+    const originUrl = serverHost.includes('://') ? new URL(serverHost) : undefined;
+    if (originUrl && (originUrl.username || originUrl.password)) {
+      throw new InvalidInputError('base URL must not include credentials');
+    }
+    this.serverOrigin = originUrl?.origin;
     // Canonicalize the hostname (lower-case, IDNA) so the comparison in
     // request() is spelling-independent, but keep an explicit port as given:
     // URL would drop ":80" and let "example.com:80" match https on 443.
@@ -61,6 +65,11 @@ export class Transport {
    */
   static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
     const url = new URL(serverURL);
+    // Same canonical rejection as the constructor and request(), before the
+    // key fetch can fail with an uncoded TypeError.
+    if (url.username || url.password) {
+      throw new InvalidInputError('base URL must not include credentials');
+    }
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
@@ -184,6 +193,20 @@ export class Transport {
     const inputUrl = input instanceof Request ? input.url : String(input);
     if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) {
       return fetch(input, init);
+    }
+    // Reject credential-bearing URLs with the canonical code before the
+    // platform Request constructor rejects them with an uncoded TypeError,
+    // so every SDK reports the same error for the same input.
+    // Resolve against the configured server so protocol-relative forms
+    // ("//user:pass@host/x") are inspected too.
+    const credentialed = (() => {
+      try {
+        const u = new URL(inputUrl, this.serverOrigin ?? `http://${this.serverHost}`);
+        return Boolean(u.username || u.password);
+      } catch { return false; }
+    })();
+    if (credentialed) {
+      throw new InvalidInputError('request URL must not include credentials');
     }
 
     // Normalize through the platform Request constructor first so RequestInit

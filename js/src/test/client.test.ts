@@ -282,6 +282,20 @@ describe('Transport', () => {
     }
   });
 
+  it('should reject credential-bearing URLs with the canonical code', async () => {
+    const transport = new Transport(serverIdentity, 'https://server.test');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
+    try {
+      await assert.rejects(transport.post('https://user:pass@server.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(transport.post('//user:pass@server.test/secure', 'hello'), InvalidInputError);
+      assert.throws(() => new Transport(serverIdentity, 'https://user:pass@server.test'), InvalidInputError);
+      await assert.rejects(Transport.create('https://user:pass@server.test'), InvalidInputError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should compare the configured host case-insensitively', async () => {
     const transport = new Transport(serverIdentity, 'SERVER.TEST');
     const originalFetch = globalThis.fetch;
