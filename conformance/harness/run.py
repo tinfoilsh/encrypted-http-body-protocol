@@ -381,14 +381,16 @@ def check_expect(result, expect):
     exp_code = expect.get("error_code") if outcome == "error" else None
     if result.get("error_code") != exp_code:
         fails.append(f"error_code {result.get('error_code')} != {exp_code}")
-    # SPEC 5.5: every library prefixes its message with the canonical code. An
-    # error whose native message lacks that prefix was raised uncoded and only
-    # looks classified because of the adapter's INVALID_INPUT fallback.
+    # SPEC 5.5: every library puts the canonical code, followed by a colon, in
+    # its message. Transports may wrap it with context (Go: 'Post "...": failed
+    # to decrypt response: CODE: ...'), so the code must appear, not lead. A
+    # native message without it was raised uncoded and only looks classified
+    # because of the adapter's INVALID_INPUT fallback.
     if result.get("outcome") == "error":
         code = result.get("error_code") or ""
         native = str(result.get("native_error") or "")
-        if not native.startswith(f"{code}:"):
-            fails.append(f"UNCODED: native_error does not start with {code}:")
+        if f"{code}:" not in native:
+            fails.append(f"UNCODED: native_error does not carry {code}:")
     for key in ("status", "body_hex", "passthrough", "token_before_response"):
         if key in expect and result.get(key) != expect[key]:
             fails.append(f"{key} {result.get(key)!r} != {expect[key]!r}")
