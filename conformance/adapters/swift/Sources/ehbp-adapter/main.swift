@@ -72,6 +72,8 @@ func run() async throws {
         try await hardeningOp(op)
     case "request":
         try await requestOp()
+    case "large_body":
+        try await largeBodyOp(ins)
     default:
         throw EHBPError(.invalidInput, "unknown operation \(op)")
     }
@@ -151,6 +153,37 @@ func requestOp() async throws {
     let noNonce = hdrs["ehbp-response-nonce"] == nil
     setBody(data)
     res["passthrough"] = noNonce && !(200..<300).contains(response.statusCode)
+}
+
+// largeBodyOp streams a multi-GiB patterned body through the client's
+// bodySource path to the oracle's digest route and reports peak RSS so any
+// buffering is visible. Mirrors the Go adapter's op.
+func largeBodyOp(_ ins: [String: Any]) async throws {
+    let size = Int64((ins["size_bytes"] as? NSNumber)?.int64Value ?? 0)
+    let seed = Int((ins["block_seed"] as? NSNumber)?.intValue ?? 0)
+    let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
+    let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
+    let client = try EHBPClient(baseURL: base, config: config)
+    let req = fx["request"] as? [String: Any] ?? [:]
+
+    // 1 MiB block with block[i] = (i + seed) & 0xff, repeated; never materialised.
+    let block = Data((0..<(1 << 20)).map { UInt8(truncatingIfNeeded: $0 + seed) })
+    var remaining = size
+    let (data, response) = try await client.request(
+        method: (req["method"] as? String) ?? "POST",
+        path: (req["path"] as? String) ?? "/",
+        bodySource: {
+            if remaining <= 0 { return nil }
+            let n = Int(min(remaining, Int64(block.count)))
+            remaining -= Int64(n)
+            return n == block.count ? block : block.prefix(n)
+        })
+
+    res["status"] = response.statusCode
+    setBody(data)
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    res["peak_rss_bytes"] = Int(usage.ru_maxrss) // bytes on macOS
 }
 
 // mapError reads the canonical code the library attached; anything uncoded is
