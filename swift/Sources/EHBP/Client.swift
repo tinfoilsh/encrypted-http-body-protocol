@@ -93,6 +93,9 @@ public final class EHBPClient: @unchecked Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
         }
+        if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
+            throw mismatch
+        }
 
         guard let responseNonceHex = try EHBPClient.responseNonceHex(
             from: httpResponse,
@@ -159,13 +162,28 @@ public final class EHBPClient: @unchecked Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
         }
+        var iterator = asyncBytes.makeAsyncIterator()
+        var prefetched = Data()
+        if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
+            // Read the (small) problem body so it can be classified; anything
+            // over the limit is not a problem document and passes through.
+            while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
+                  let byte = try await iterator.next() {
+                prefetched.append(byte)
+            }
+            if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: prefetched) {
+                asyncBytes.task.cancel()
+                throw mismatch
+            }
+        }
 
         guard let responseNonceHex = try EHBPClient.responseNonceHex(
             from: httpResponse,
             requestWasEncrypted: requestContext != nil
         ) else {
             let chunker = PullDrivenByteChunker(
-                iterator: asyncBytes.makeAsyncIterator(),
+                iterator: iterator,
+                prefix: prefetched,
                 chunkSize: EHBPClient.passThroughChunkSize,
                 onFailure: { self.clearToken(for: generation) },
                 onCancel: { asyncBytes.task.cancel() }
@@ -189,7 +207,7 @@ public final class EHBPClient: @unchecked Sendable {
         publishToken(token!, for: generation)
 
         let decryptor = PullDrivenResponseDecryptor(
-            iterator: asyncBytes.makeAsyncIterator(),
+            iterator: iterator,
             decryptor: responseDecryptor,
             onComplete: { self.clearToken(for: generation) },
             onFailure: { self.clearToken(for: generation) },
@@ -244,6 +262,29 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError(.invalidInput, "reserved request header cannot be set by callers: \(name)")
         }
         return headers
+    }
+
+    static func mayBeKeyConfigMismatch(_ response: HTTPURLResponse) -> Bool {
+        guard response.statusCode == 422,
+              let contentType = response.value(forHTTPHeaderField: "Content-Type"),
+              let mediaType = contentType.split(separator: ";", maxSplits: 1).first else {
+            return false
+        }
+        return mediaType.trimmingCharacters(in: .whitespaces).lowercased() == EHBPProtocol.problemJSONMediaType
+    }
+
+    /// A 422 problem-details body whose type is the key-config URN means the
+    /// server rejected a stale client key (SPEC 5.4.2); callers re-fetch the
+    /// key configuration and retry. Mirrors the Go client.
+    static func keyConfigMismatch(_ response: HTTPURLResponse, body: Data) -> EHBPError? {
+        guard mayBeKeyConfigMismatch(response),
+              body.count <= EHBPProtocol.maxProblemDetailsBytes,
+              let problem = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              problem["type"] as? String == EHBPProtocol.keyConfigProblemType else {
+            return nil
+        }
+        let title = problem["title"] as? String ?? ""
+        return EHBPError(.keyConfigMismatch, title.isEmpty ? "stale client key configuration" : title)
     }
 
     private func beginRequest() -> UInt64 {
@@ -315,6 +356,7 @@ public final class EHBPClient: @unchecked Sendable {
 actor PullDrivenByteChunker<Iterator: AsyncIteratorProtocol & Sendable>
 where Iterator.Element == UInt8 {
     private var iterator: Iterator
+    private var prefix: Data
     private let chunkSize: Int
     private let onFailure: @Sendable () -> Void
     private let onCancel: @Sendable () -> Void
@@ -322,12 +364,14 @@ where Iterator.Element == UInt8 {
 
     init(
         iterator: Iterator,
+        prefix: Data = Data(),
         chunkSize: Int,
         onFailure: @escaping @Sendable () -> Void = {},
         onCancel: @escaping @Sendable () -> Void = {}
     ) {
         precondition(chunkSize > 0)
         self.iterator = iterator
+        self.prefix = prefix
         self.chunkSize = chunkSize
         self.onFailure = onFailure
         self.onCancel = onCancel
@@ -339,6 +383,11 @@ where Iterator.Element == UInt8 {
         }
         isReading = true
         defer { isReading = false }
+
+        if !prefix.isEmpty {
+            defer { prefix = Data() }
+            return prefix
+        }
 
         do {
             let cancel = onCancel
