@@ -174,6 +174,16 @@ func sameOrigin(a, b *url.URL) bool {
 		portOf(a) == portOf(b)
 }
 
+// setToken publishes (or clears, with nil) the token for generation unless a
+// newer request has since started.
+func (t *Transport) setToken(generation uint64, token *identity.SessionRecoveryToken) {
+	t.mu.Lock()
+	if t.requestGeneration == generation {
+		t.lastSessionRecoveryToken = token
+	}
+	t.mu.Unlock()
+}
+
 // validateRequest rejects requests that would let the caller influence the
 // authority or the protocol headers the library owns. Content-Length,
 // Transfer-Encoding, and Host entries in req.Header never reach the wire in
@@ -341,6 +351,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session recovery token: %w", err)
 		}
+		// Publish before sending (SPEC 6): the token must survive a crash
+		// while the response is pending. Every failure path below clears it.
+		t.setToken(generation, token)
 	}
 
 	// Send through a RoundTripper rather than a nested http.Client: a
@@ -349,6 +362,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// (and each redirected attempt is re-encrypted for its target).
 	resp, err := t.roundTripper().RoundTrip(newReq)
 	if err != nil {
+		t.setToken(generation, nil)
 		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 
@@ -357,10 +371,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		rekey, title, checkErr := isKeyConfigMismatchResponse(resp)
 		if checkErr != nil {
 			resp.Body.Close()
+			t.setToken(generation, nil)
 			return nil, checkErr
 		}
 		if rekey {
 			resp.Body.Close()
+			t.setToken(generation, nil)
 			if title == "" {
 				title = "key configuration mismatch"
 			}
@@ -369,36 +385,21 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
 			(resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+			// Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
+			t.setToken(generation, nil)
 			return resp, nil
 		}
 
 		if err := identity.DecryptResponseWithToken(resp, token); err != nil {
 			resp.Body.Close()
+			t.setToken(generation, nil)
 			return nil, fmt.Errorf("failed to decrypt response: %w", err)
 		}
 
-		t.mu.Lock()
-		if t.requestGeneration == generation {
-			t.lastSessionRecoveryToken = token
-		}
-		t.mu.Unlock()
-
 		resp.Body = &tokenOwningReadCloser{
 			ReadCloser: resp.Body,
-			onComplete: func() {
-				t.mu.Lock()
-				if t.requestGeneration == generation {
-					t.lastSessionRecoveryToken = nil
-				}
-				t.mu.Unlock()
-			},
-			onError: func() {
-				t.mu.Lock()
-				if t.requestGeneration == generation {
-					t.lastSessionRecoveryToken = nil
-				}
-				t.mu.Unlock()
-			},
+			onComplete: func() { t.setToken(generation, nil) },
+			onError:    func() { t.setToken(generation, nil) },
 		}
 	}
 

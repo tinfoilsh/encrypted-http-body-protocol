@@ -1096,3 +1096,15 @@ func TestStreamingDecryptReaderSurvivesEmptyFrameBurst(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "payload", string(plain))
 }
+
+func TestDecapsulationFailureIsAKeyConfigMismatch(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	// An all-zero X25519 point is rejected at decapsulation, before any chunk.
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader([]byte{0, 0, 0, 1, 0}))
+	req.Header.Set(protocol.EncapsulatedKeyHeader, hex.EncodeToString(make([]byte, 32)))
+	_, err = serverIdentity.DecryptRequestWithContext(req)
+	require.Error(t, err)
+	assert.Equal(t, protocol.HPKESetupFailed, protocol.CodeOf(err))
+	assert.True(t, IsKeyConfigError(err), "setup failure must map to 422, not 400 (SPEC 5.4.2)")
+}

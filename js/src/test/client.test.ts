@@ -8,7 +8,7 @@ import {
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
-import { encryptFrames } from '../identity.js';
+import { encryptFrames, type SessionRecoveryToken } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
@@ -399,6 +399,47 @@ describe('Transport', () => {
         () => transport.getSessionRecoveryToken(),
         /No session recovery token available/
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should publish the recovery token before the request is sent', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    let seenInFlight: SessionRecoveryToken | undefined;
+    let sentEnc = '';
+    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+      sentEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
+      // SPEC 6: readable while the request is on the wire.
+      seenInFlight = transport.getSessionRecoveryToken();
+      return new Response('upstream down', { status: 502 });
+    }) as typeof fetch;
+
+    try {
+      await transport.post('https://server.test/secure', 'hello');
+      assert(seenInFlight);
+      assert.strictEqual(bytesToHex(seenInFlight.requestEnc), sentEnc);
+      // A nonce-less pass-through consumes it.
+      assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token available/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should clear the recovery token when the transport fails', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (): Promise<Response> => { throw new TypeError('connection reset'); }) as typeof fetch;
+
+    try {
+      await assert.rejects(() => transport.post('https://server.test/secure', 'hello'), /connection reset/);
+      assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token available/);
     } finally {
       globalThis.fetch = originalFetch;
     }

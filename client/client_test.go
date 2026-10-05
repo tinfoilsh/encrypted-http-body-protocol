@@ -2,6 +2,8 @@ package client
 
 import (
 	"bytes"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -854,7 +856,8 @@ func TestTransportInvalidatesRecoveryTokenWhenRequestStarts(t *testing.T) {
 	initialResp, err := httpClient.Do(initialReq)
 	assert.NoError(t, err)
 	initialResp.Body.Close()
-	assert.NotNil(t, transport.GetSessionRecoveryToken())
+	initialToken := transport.GetSessionRecoveryToken()
+	assert.NotNil(t, initialToken)
 
 	blockedResult := make(chan error, 1)
 	go func() {
@@ -871,10 +874,41 @@ func TestTransportInvalidatesRecoveryTokenWhenRequestStarts(t *testing.T) {
 	}()
 
 	<-blockedStarted
-	assert.Nil(t, transport.GetSessionRecoveryToken())
+	// SPEC 6: the new exchange's token replaces the old one as soon as the
+	// request is sent, so a crash while the response is pending can recover.
+	inFlight := transport.GetSessionRecoveryToken()
+	assert.NotNil(t, inFlight)
+	assert.NotEqual(t, initialToken.RequestEnc, inFlight.RequestEnc, "the in-flight token belongs to the new request")
 	close(releaseBlocked)
 	assert.NoError(t, <-blockedResult)
 	assert.NotNil(t, transport.GetSessionRecoveryToken())
+}
+
+func TestTransportPublishesRecoveryTokenBeforeSending(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	cfg, err := serverIdentity.MarshalConfig()
+	assert.NoError(t, err)
+
+	var transport *Transport
+	var seenEnc, published string
+	stub := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		seenEnc = req.Header.Get(protocol.EncapsulatedKeyHeader)
+		if tok := transport.GetSessionRecoveryToken(); tok != nil {
+			published = hex.EncodeToString(tok.RequestEnc)
+		}
+		return nil, errors.New("connection refused")
+	})
+	transport, err = NewTransportWithConfig("http://configured.example", cfg,
+		WithHTTPClient(&http.Client{Transport: stub}))
+	assert.NoError(t, err)
+
+	req, _ := http.NewRequest("POST", "http://configured.example/x", strings.NewReader("hello"))
+	_, err = transport.RoundTrip(req)
+	assert.Error(t, err)
+	assert.NotEmpty(t, seenEnc)
+	assert.Equal(t, seenEnc, published, "token is readable inside the send, and matches the request")
+	assert.Nil(t, transport.GetSessionRecoveryToken(), "a transport failure consumes it")
 }
 
 func TestTransportClearsRecoveryTokenAfterStreamFailure(t *testing.T) {

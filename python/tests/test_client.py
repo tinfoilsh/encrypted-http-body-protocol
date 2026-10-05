@@ -16,7 +16,7 @@ from ehbp.errors import (
     MissingResponseNonceError,
 )
 from ehbp.identity import REQUEST_FRAME_SIZE
-from ehbp.protocol import RESPONSE_NONCE_HEADER
+from ehbp.protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
 
 
 def test_encrypted_round_trip(server: MockServer):
@@ -318,6 +318,31 @@ def _install_seal_counter(monkeypatch):
 
     monkeypatch.setattr(identity_module, "_seal", counting_seal)
     return seals
+
+
+def test_session_recovery_token_is_readable_while_request_is_in_flight(server: MockServer):
+    seen: dict = {}
+
+    class Inner(httpx.BaseTransport):
+        def handle_request(self, request):
+            # In flight: the request has been sealed and sent, no response yet.
+            seen["token"] = holder["client"].get_session_recovery_token()
+            seen["enc"] = request.headers[ENCAPSULATED_KEY_HEADER]
+            headers = httpx.Headers(request.headers)
+            del headers["transfer-encoding"]
+            return server.handler(
+                httpx.Request(request.method, request.url, headers=headers, content=request.read())
+            )
+
+    holder: dict = {}
+    holder["client"] = Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=Inner()),
+    )
+    assert holder["client"].post("/v1/echo", body=b"hi").content == b"echo:hi"
+    assert seen["token"] is not None
+    assert seen["token"].request_enc.hex() == seen["enc"]
 
 
 def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):

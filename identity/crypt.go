@@ -335,11 +335,19 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "invalid encapsulated key: %w", err))
 	}
 
+	// Wrong length is a syntactic error (400); only a well-formed key that
+	// fails to decapsulate is treated as a key-configuration mismatch.
+	if len(encapKey) != RequestEncLength {
+		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "encapsulated key must be %d bytes, got %d", RequestEncLength, len(encapKey)))
+	}
+
 	// Create recipient and setup decryption
 	// The info parameter must match the sender's info for domain separation
 	recipient, err := hpke.NewRecipient(encapKey, i.sk, i.kdf, i.aead, []byte(HPKERequestInfo))
 	if err != nil {
-		return nil, NewClientError(protocol.Errorf(protocol.HPKESetupFailed, "failed to setup decryption: %w", err))
+		// A failed decapsulation is indistinguishable from a stale client key
+		// and recovers the same way: 422, refresh the key configuration (SPEC 5.4.2).
+		return nil, NewKeyConfigError(protocol.Errorf(protocol.HPKESetupFailed, "failed to setup decryption: %w", err))
 	}
 
 	// Wrap the body with streaming decryption

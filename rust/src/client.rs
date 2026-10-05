@@ -2243,6 +2243,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_recovery_token_is_readable_while_request_is_in_flight() {
+        // A server that reads the request, then holds its reply: the token
+        // must already be published while we wait (SPEC 6).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !bytes.ends_with(b"0\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            socket
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let (client, _) = raw_client_with_private_key();
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            client.identity.clone(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        let observer = client.clone();
+        let (resp, in_flight) = tokio::join!(
+            client.post("/secure").unwrap().body(b"hi".to_vec()).send(),
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                observer.get_session_recovery_token()
+            }
+        );
+        assert!(
+            in_flight.is_some(),
+            "token must be published before the response arrives"
+        );
+        let resp = resp.unwrap();
+        assert_eq!(resp.status().as_u16(), 502);
+        // A nonce-less pass-through consumes the token.
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
     async fn empty_body_stream_is_a_bodyless_request() {
         let source = stream::iter(Vec::<std::result::Result<Bytes, std::io::Error>>::new());
         let (raw, _) = capture_body_stream(source).await;
