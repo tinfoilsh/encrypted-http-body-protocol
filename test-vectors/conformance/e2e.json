@@ -481,5 +481,24 @@
       "status": 200,
       "body_hex": "5bb8a0daf79ae7af2f38f80ac1ce890a741392362bfb96b37c5fe03261ab9a22"
     }
+  },
+  {
+    "id": "e2e-token-before-response",
+    "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. The oracle holds its reply for 1.5 s; the client reads the token 300 ms after sending, while the response is pending, then completes the exchange.",
+    "category": "e2e",
+    "operation": "token_before_response",
+    "server_scenario": "hold",
+    "request": {
+      "method": "POST",
+      "path": "/s/hold",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "68656c6c6f",
+      "token_before_response": true
+    }
   }
 ]

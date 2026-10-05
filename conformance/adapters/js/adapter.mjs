@@ -69,6 +69,8 @@ async function run(fx, res) {
     }
     case 'large_body':
       return largeBody(fx, res);
+    case 'token_before_response':
+      return tokenBeforeResponse(fx, res);
     case 'request':
       return doRequest(fx, res);
     case 'discover':
@@ -121,6 +123,21 @@ async function decrypt(fx, res) {
   const response = new Response(source, { headers: { [RESPONSE_NONCE_HEADER]: bytesToHex(hb(ins.responseNonce)) } });
   const decrypted = await decryptResponseWithToken(response, token);
   res.body_hex = await drain(decrypted.body, res);
+}
+
+// Reads the session recovery token while the oracle is still holding its
+// reply, then completes the exchange (SPEC 6: token before send).
+async function tokenBeforeResponse(fx, res) {
+  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const transport = await createTransport(base);
+  const req = fx.request;
+  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
+  await new Promise((r) => setTimeout(r, 300));
+  // The getter throws when no token is published; either way, no translation.
+  try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
+  const response = await pending;
+  res.status = response.status;
+  res.body_hex = await drain(response.body, res);
 }
 
 async function doRequest(fx, res) {

@@ -49,7 +49,8 @@
         "reject_url_credentials",
         "decrypt_request",
         "middleware_request",
-        "large_body"
+        "large_body",
+        "token_before_response"
       ],
       "description": "The standard operation the adapter performs. `request` is used for e2e/shape; crypto/config/server operations run in-process."
     },
@@ -180,6 +181,7 @@
         "plaintext_emitted_before_error": {
           "type": "boolean"
         },
+        "token_before_response": { "type": "boolean" },
         "bytes_emitted_before_error": {
           "type": "integer",
           "minimum": 0

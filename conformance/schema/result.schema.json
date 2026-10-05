@@ -76,6 +76,10 @@
       "description": "NOT ASSERTED. The raw native error type and message, for human audit and the mapping table.",
       "oneOf": [{"type": "null"}, {"type": "string"}]
     },
+    "token_before_response": {
+      "type": "boolean",
+      "description": "token_before_response operations: whether the session recovery token was readable while the response was still pending (SPEC 6)."
+    },
     "peak_rss_bytes": {
       "type": "integer",
       "minimum": 0,

@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
@@ -53,6 +54,7 @@ type result struct {
 	SkipReason  *string           `json:"skip_reason,omitempty"`
 	Runner      string            `json:"runner"`
 	PeakRSS     *int64            `json:"peak_rss_bytes,omitempty"`
+	TokenEarly  *bool             `json:"token_before_response,omitempty"`
 }
 
 func main() {
@@ -134,6 +136,8 @@ func run(fx *fixture, r *result) error {
 		return middlewareRequest(fx, r)
 	case "large_body":
 		return largeBody(fx, r)
+	case "token_before_response":
+		return tokenBeforeResponse(fx, r)
 	default:
 		return fmt.Errorf("unknown operation %q", fx.Operation)
 	}
@@ -303,6 +307,45 @@ func middlewareRequest(fx *fixture, r *result) error {
 	if rec.Code != http.StatusOK {
 		return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
 	}
+	return nil
+}
+
+// tokenBeforeResponse sends the fixture request to the holding oracle route
+// and reads the session recovery token while the response is still pending.
+func tokenBeforeResponse(fx *fixture, r *result) error {
+	serverURL := os.Getenv("ORACLE_URL")
+	tr, err := client.NewTransport(serverURL)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, bytes.NewReader(mustHex(*fx.Request.BodyHex)))
+	if err != nil {
+		return err
+	}
+	type outcome struct {
+		resp *http.Response
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		resp, err := (&http.Client{Transport: tr}).Do(req)
+		done <- outcome{resp, err}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	early := tr.GetSessionRecoveryToken() != nil
+	r.TokenEarly = &early
+	out := <-done
+	if out.err != nil {
+		return out.err
+	}
+	status := out.resp.StatusCode
+	r.Status = &status
+	plain, _, rerr := readTracked(out.resp.Body)
+	_ = out.resp.Body.Close()
+	if rerr != nil {
+		return rerr
+	}
+	setBody(r, plain)
 	return nil
 }
 

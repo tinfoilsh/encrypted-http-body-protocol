@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
@@ -249,6 +250,12 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 
 		switch name {
 		case "echo":
+			writeEncrypted(w, nonce, framed, http.StatusOK)
+		case "hold":
+			// The whole request has been read; keep the response pending long
+			// enough for the client to be observed mid-flight (SPEC 6: the
+			// session recovery token must exist before any response).
+			time.Sleep(1500 * time.Millisecond)
 			writeEncrypted(w, nonce, framed, http.StatusOK)
 		case "empty_encrypted":
 			// A valid encrypted response with a nonce but zero frames; the client

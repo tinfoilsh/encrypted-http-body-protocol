@@ -64,6 +64,8 @@ async function run(fx, res, oracleUrl) {
       res.body_hex = bytesToHex(await id.marshalConfig());
       return;
     }
+    case 'token_before_response':
+      return tokenBeforeResponse(fx, res, oracleUrl);
     case 'request':
       return doRequest(fx, res, oracleUrl);
     default:
@@ -82,6 +84,19 @@ async function decrypt(fx, res) {
   const response = new Response(source, { headers: { [RESPONSE_NONCE_HEADER]: bytesToHex(hb(ins.responseNonce)) } });
   const decrypted = await decryptResponseWithToken(response, token);
   res.body_hex = await drain(decrypted.body, res);
+}
+
+async function tokenBeforeResponse(fx, res, oracleUrl) {
+  const base = oracleUrl.replace(/\/$/, '');
+  const transport = await createTransport(base);
+  const req = fx.request;
+  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
+  await new Promise((r) => setTimeout(r, 300));
+  // The getter throws when no token is published; either way, no translation.
+  try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
+  const response = await pending;
+  res.status = response.status;
+  res.body_hex = await drain(response.body, res);
 }
 
 async function doRequest(fx, res, oracleUrl) {
