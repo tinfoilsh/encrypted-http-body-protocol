@@ -15,6 +15,7 @@ import {
   HPKE_REQUEST_INFO,
   EXPORT_LABEL,
   EXPORT_LENGTH,
+  REQUEST_ENC_LENGTH,
   RESPONSE_NONCE_LENGTH,
   ResponseKeyMaterial,
 } from './derive.js';
@@ -188,11 +189,19 @@ export class Identity {
   static async unmarshalPublicConfig(data: Uint8Array): Promise<Identity> {
     let offset = 0;
 
+    // Fixed header: key id (1) || KEM id (2) || X25519 key (32) || suites length (2)
+    if (data.length < 37) {
+      throw new InvalidKeyConfigError('truncated key config');
+    }
+
     // Read Key ID
     const keyId = data[offset++];
 
     // Read KEM ID
     const kemId = (data[offset++] << 8) | data[offset++];
+    if (kemId !== HPKE_CONFIG.KEM) {
+      throw new UnsupportedSuiteError(`unsupported KEM: 0x${kemId.toString(16).padStart(4, '0')}`);
+    }
 
     // Read Public Key (32 bytes for X25519)
     const publicKeySize = 32;
@@ -201,6 +210,12 @@ export class Identity {
 
     // Read Cipher Suites Length
     const cipherSuitesLength = (data[offset++] << 8) | data[offset++];
+    if (cipherSuitesLength % 4 !== 0) {
+      throw new InvalidKeyConfigError('cipher suites length must be a multiple of 4');
+    }
+    if (offset + cipherSuitesLength > data.length) {
+      throw new InvalidKeyConfigError('truncated cipher suites');
+    }
 
     // Parse all cipher suites (each suite is 4 bytes: 2 for KDF, 2 for AEAD)
     const suites = [];
@@ -383,10 +398,17 @@ export function serializeSessionRecoveryToken(token: SessionRecoveryToken): stri
 export function deserializeSessionRecoveryToken(json: string): SessionRecoveryToken {
   try {
     const parsed = JSON.parse(json);
-    return {
+    const token = {
       exportedSecret: hexToBytes(parsed.exportedSecret),
       requestEnc: hexToBytes(parsed.requestEnc),
     };
+    if (token.exportedSecret.length !== EXPORT_LENGTH) {
+      throw new Error(`exported secret must be ${EXPORT_LENGTH} bytes, got ${token.exportedSecret.length}`);
+    }
+    if (token.requestEnc.length !== REQUEST_ENC_LENGTH) {
+      throw new Error(`request enc must be ${REQUEST_ENC_LENGTH} bytes, got ${token.requestEnc.length}`);
+    }
+    return token;
   } catch (error) {
     throw new InvalidTokenError(`invalid session recovery token: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }

@@ -4,6 +4,7 @@ import {
   Identity,
   Transport,
   createTransport,
+  InvalidInputError,
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
@@ -231,6 +232,63 @@ describe('Transport', () => {
           return true;
         }
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should reject cross-origin URLs and caller-set reserved headers', async () => {
+    const transport = new Transport(serverIdentity, 'https://server.test');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
+    try {
+      await assert.rejects(transport.post('https://other.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(transport.post('http://server.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(
+        transport.request('https://server.test/secure', {
+          method: 'POST', body: 'hello', headers: { [PROTOCOL.ENCAPSULATED_KEY_HEADER]: 'deadbeef' },
+        }),
+        InvalidInputError,
+      );
+      // Rejection happens before the body is read.
+      let bodyRead = false;
+      const body = new ReadableStream<Uint8Array>({ pull() { bodyRead = true; } }, { highWaterMark: 0 });
+      await assert.rejects(
+        transport.request('https://other.test/secure', { method: 'POST', body, duplex: 'half' } as RequestInit),
+        InvalidInputError,
+      );
+      assert.strictEqual(bodyRead, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should keep an explicit port when configured host-only', async () => {
+    const transport = new Transport(serverIdentity, 'server.test:80');
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
+    try {
+      // https on 443 is not the configured port 80.
+      await assert.rejects(transport.post('https://server.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(transport.post('http://server.test:8080/secure', 'hello'), InvalidInputError);
+      assert.strictEqual(fetched, false);
+      // http's default port is the configured 80, so this one is dispatched.
+      await assert.rejects(transport.post('http://server.test/secure', 'hello'), /stop/);
+      assert.strictEqual(fetched, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should compare the configured host case-insensitively', async () => {
+    const transport = new Transport(serverIdentity, 'SERVER.TEST');
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
+    try {
+      await assert.rejects(transport.post('https://server.test/secure', 'hello'), /stop/);
+      assert.strictEqual(fetched, true);
     } finally {
       globalThis.fetch = originalFetch;
     }

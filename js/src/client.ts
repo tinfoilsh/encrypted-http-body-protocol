@@ -3,7 +3,7 @@ import { extractSessionRecoveryToken, decryptResponseWithToken } from './identit
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
+import { InvalidInputError, InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -16,15 +16,36 @@ const MAX_PROBLEM_DETAILS_BYTES = 64 * 1024;
 /**
  * HTTP transport for EHBP
  */
+/** Headers the library owns; callers cannot set them (mirrors the Python client). */
+const RESERVED_REQUEST_HEADERS = [
+  'content-length',
+  'transfer-encoding',
+  'host',
+  PROTOCOL.ENCAPSULATED_KEY_HEADER,
+  PROTOCOL.RESPONSE_NONCE_HEADER,
+];
+
 export class Transport {
   private serverIdentity: Identity;
   private serverHost: string;
+  private serverHostname: string;
+  /** Explicit port from a host-only configuration; undefined means the scheme default. */
+  private serverPort?: string;
+  private serverOrigin?: string;
   private _lastSessionRecoveryToken?: SessionRecoveryToken;
   private requestGeneration = 0;
 
+  /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
+    this.serverOrigin = serverHost.includes('://') ? new URL(serverHost).origin : undefined;
+    // Canonicalize the hostname (lower-case, IDNA) so the comparison in
+    // request() is spelling-independent, but keep an explicit port as given:
+    // URL would drop ":80" and let "example.com:80" match https on 443.
+    const parsed = new URL(`http://${this.serverOrigin ? new URL(this.serverOrigin).host : serverHost}`);
+    this.serverHostname = parsed.hostname;
+    this.serverPort = /:(\d+)$/.exec(serverHost)?.[1];
   }
 
   getSessionRecoveryToken(): SessionRecoveryToken {
@@ -40,7 +61,6 @@ export class Transport {
    */
   static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
     const url = new URL(serverURL);
-    const serverHost = url.host;
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
@@ -58,7 +78,7 @@ export class Transport {
     const keysData = new Uint8Array(await response.arrayBuffer());
     const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
 
-    return new Transport(serverIdentity, serverHost);
+    return new Transport(serverIdentity, url.origin);
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -147,6 +167,15 @@ export class Transport {
   /**
    * Make an encrypted HTTP request.
    */
+  private matchesConfiguredServer(url: URL): boolean {
+    if (this.serverOrigin) return url.origin === this.serverOrigin;
+    if (url.hostname !== this.serverHostname) return false;
+    // url.port is '' for the scheme default; an explicit configured port must
+    // match the effective port, and no configured port means the default.
+    const effectivePort = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+    return this.serverPort === undefined ? url.port === '' : effectivePort === this.serverPort;
+  }
+
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const generation = ++this.requestGeneration;
     this._lastSessionRecoveryToken = undefined;
@@ -160,12 +189,22 @@ export class Transport {
     // Normalize through the platform Request constructor first so RequestInit
     // overrides a Request input with the same semantics as fetch().
     const normalizedRequest = new Request(input, init);
+
+    // Validate before consuming the body so a rejected request never buffers
+    // or waits on a caller-supplied stream.
+    const url = new URL(normalizedRequest.url);
+    if (!this.matchesConfiguredServer(url)) {
+      throw new InvalidInputError(`request URL must use the configured origin: ${this.serverOrigin ?? this.serverHost}`);
+    }
+    for (const name of RESERVED_REQUEST_HEADERS) {
+      if (normalizedRequest.headers.has(name)) {
+        throw new InvalidInputError(`reserved request header cannot be set by callers: ${name}`);
+      }
+    }
+
     // Firefox does not expose Request.body even when payload bytes are present.
     const requestBodyBytes = await normalizedRequest.arrayBuffer();
     const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
-
-    const url = new URL(normalizedRequest.url);
-    url.host = this.serverHost;
 
     const request = new Request(url.toString(), {
       ...forwardedRequestInit(normalizedRequest),
