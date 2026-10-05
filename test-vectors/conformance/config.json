@@ -207,5 +207,21 @@
     "allowed_skips": {
       "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
     }
+  },
+  {
+    "id": "parse-config-two-suites",
+    "description": "The suites list declares two entries, both the pinned pair. SPEC 3.2 requires exactly one suite.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "000020070707070707070707070707070707070707070707070707070707070707070700080001000200010002"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNSUPPORTED_SUITE"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
   }
 ]
