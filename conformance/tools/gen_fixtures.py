@@ -19,6 +19,9 @@ VECTORS = ROOT / "test-vectors"
 OUT = VECTORS / "conformance"
 
 KEM_X25519 = "0020"
+P256_GENERATOR = ("04"
+    "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+    "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5")
 KDF_HKDF_SHA256 = "0001"
 AEAD_AES_256_GCM = "0002"
 
@@ -488,7 +491,9 @@ def main() -> None:
             "id": "parse-config-unsupported-kem",
             "description": "KEM id is P-256, not X25519.",
             "category": "config", "operation": "parse_config",
-            "inputs": {"config": config(kem="0010", pubkey="07" * 32)},
+            # A valid uncompressed P-256 point (the curve's generator, 65 bytes),
+            # so the KEM id alone is what every parser must reject.
+            "inputs": {"config": config(kem="0010", pubkey=P256_GENERATOR)},
             "expect": {"outcome": "error", "error_code": "UNSUPPORTED_SUITE"},
         },
         {

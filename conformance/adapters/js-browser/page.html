@@ -125,7 +125,7 @@ async function largeBody(fx, res, oracleUrl) {
       remaining -= n;
     },
   });
-  const response = await transport.request(base + fx.request.path, { method: fx.request.method, body });
+  const response = await transport.request(base + fx.request.path, { method: fx.request.method, body, duplex: 'half' });
   res.status = response.status;
   res.body_hex = await drain(response.body, res);
 }

@@ -317,7 +317,7 @@ func tokenBeforeResponse(fx *fixture, r *result) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, bytes.NewReader(mustHex(*fx.Request.BodyHex)))
+	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex")))
 	if err != nil {
 		return err
 	}
@@ -461,7 +461,7 @@ func doRequest(fx *fixture, r *result) error {
 	}
 	var reqBody io.Reader
 	if fx.Request.BodyHex != nil {
-		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex))
+		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex"))
 	}
 	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, reqBody)
 	if err != nil {
@@ -495,6 +495,8 @@ func doRequest(fx *fixture, r *result) error {
 
 // mapErr reads the canonical code the library attached (protocol.CodeOf).
 // Anything uncoded is a caller/adapter input error.
+// mapErr reads the canonical code the library attached (protocol.CodeOf);
+// it never matches message text. Uncoded errors are adapter/transport input errors.
 func mapErr(err error) string {
 	if c := protocol.CodeOf(err); c != "" {
 		return string(c)
@@ -564,7 +566,22 @@ func setBody(r *result, b []byte) {
 	r.BodyHex = &s
 }
 
-func hexIn(fx *fixture, key string) []byte { return mustHex(strIn(fx, key)) }
-func strIn(fx *fixture, key string) string { s, _ := fx.Inputs[key].(string); return s }
-func mustHex(s string) []byte              { b, _ := hex.DecodeString(s); return b }
-func fatal(err error)                      { fmt.Fprintln(os.Stderr, err); os.Exit(2) }
+// Fixture inputs are repository-controlled; a missing field or bad hex is a
+// broken fixture, so fail the adapter loudly (ADAPTER_CRASH in the harness)
+// rather than feed an empty value to a crypto API and report its reaction.
+func hexIn(fx *fixture, key string) []byte { return mustHex(strIn(fx, key), key) }
+func strIn(fx *fixture, key string) string {
+	s, ok := fx.Inputs[key].(string)
+	if !ok {
+		fatal(fmt.Errorf("fixture %s: input %q missing or not a string", fx.ID, key))
+	}
+	return s
+}
+func mustHex(s, field string) []byte {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		fatal(fmt.Errorf("fixture field %q: %w", field, err))
+	}
+	return b
+}
+func fatal(err error) { fmt.Fprintln(os.Stderr, err); os.Exit(2) }

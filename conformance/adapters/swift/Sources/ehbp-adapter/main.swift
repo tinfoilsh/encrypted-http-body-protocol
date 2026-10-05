@@ -54,8 +54,14 @@ func run() async throws {
         let keyData = km.key.withUnsafeBytes { Data($0) }
         setBody(keyData + km.nonceBase)
     case "compute_nonce":
-        let seq = UInt64((ins["seqHex"] as? String) ?? "", radix: 16) ?? 0
-        setBody(computeNonce(nonceBase: hexToData(ins["nonceBase"]), seq: seq))
+        let nonceBase = hexToData(ins["nonceBase"])
+        guard nonceBase.count == EHBPConstants.aesGCMNonceLength else {
+            throw EHBPError(.invalidInput, "nonce base must be \(EHBPConstants.aesGCMNonceLength) bytes")
+        }
+        guard let seq = UInt64((ins["seqHex"] as? String) ?? "", radix: 16) else {
+            throw EHBPError(.invalidInput, "seqHex is not a hex sequence number")
+        }
+        setBody(computeNonce(nonceBase: nonceBase, seq: seq))
     case "decrypt_response", "decrypt_response_streaming":
         try decryptOp(ins)
     case "token_roundtrip":

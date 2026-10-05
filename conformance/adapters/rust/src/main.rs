@@ -157,6 +157,11 @@ fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
     };
 
     let mut acc: Vec<u8> = Vec::new();
+    // Fail-closed bookkeeping: whatever plaintext was delivered before the error.
+    let record_partial = |out: &mut Out, acc: &[u8]| {
+        out.bytes_emitted_before_error = acc.len();
+        out.plaintext_emitted_before_error = !acc.is_empty();
+    };
     for seg in segments {
         match dec.push(&seg) {
             Ok(chunks) => {
@@ -165,15 +170,13 @@ fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
                 }
             }
             Err(e) => {
-                out.bytes_emitted_before_error = acc.len();
-                out.plaintext_emitted_before_error = !acc.is_empty();
+                record_partial(out, &acc);
                 return Err(e);
             }
         }
     }
     if let Err(e) = dec.finish() {
-        out.bytes_emitted_before_error = acc.len();
-        out.plaintext_emitted_before_error = !acc.is_empty();
+        record_partial(out, &acc);
         return Err(e);
     }
     out.body_hex = Some(hex::encode(acc));

@@ -527,6 +527,10 @@
       "outcome": "ok",
       "status": 200,
       "body_hex": "f9a891ea18e0514540299aa52cc585ff94b199c11e0f1bc9cae12542893eb327"
+    },
+    "allowed_skips": {
+      "js-chromium": "opfs-quota-below-body-size",
+      "js-firefox": "opfs-quota-below-body-size"
     }
   }
 ]

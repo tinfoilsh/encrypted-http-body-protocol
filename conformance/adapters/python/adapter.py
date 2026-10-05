@@ -78,6 +78,12 @@ def run(fx: dict, res: dict) -> None:
         raise InvalidInputError(f"unknown operation {op}")
 
 
+def record_partial(res: dict, out: bytes) -> None:
+    """Fail-closed bookkeeping: plaintext delivered before the error, if any."""
+    res["bytes_emitted_before_error"] = len(out)
+    res["plaintext_emitted_before_error"] = len(out) > 0
+
+
 def discover_target(ins: dict) -> str:
     return {"bad_ct": os.environ.get("ORACLE_BAD_CT_URL", ""),
             "non200": os.environ.get("ORACLE_NON200_URL", "")}.get(
@@ -109,8 +115,7 @@ def decrypt(fx: dict, res: dict) -> None:
                 out += chunk
         decryptor.finish()
     except EHBPError:
-        res["bytes_emitted_before_error"] = len(out)
-        res["plaintext_emitted_before_error"] = len(out) > 0
+        record_partial(res, out)
         raise
     res["body_hex"] = bytes(out).hex()
 
@@ -139,8 +144,7 @@ def request(fx: dict, res: dict) -> None:
         no_nonce = RESPONSE_NONCE_HEADER.lower() not in {k.lower() for k in (res.get("response_headers") or {})}
         res["passthrough"] = no_nonce and not (200 <= (res["status"] or 0) < 300)
     except EHBPError:
-        res["bytes_emitted_before_error"] = len(out)
-        res["plaintext_emitted_before_error"] = len(out) > 0
+        record_partial(res, out)
         raise
     finally:
         client.close()
