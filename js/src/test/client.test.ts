@@ -263,6 +263,19 @@ describe('Transport', () => {
     }
   });
 
+  it('should keep an explicit port when configured host-only', async () => {
+    const transport = new Transport(serverIdentity, 'server.test:80');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
+    try {
+      // https on 443 is not the configured port 80.
+      await assert.rejects(transport.post('https://server.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(transport.post('http://server.test:8080/secure', 'hello'), InvalidInputError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should compare the configured host case-insensitively', async () => {
     const transport = new Transport(serverIdentity, 'SERVER.TEST');
     const originalFetch = globalThis.fetch;

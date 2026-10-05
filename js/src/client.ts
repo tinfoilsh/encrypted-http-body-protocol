@@ -28,6 +28,9 @@ const RESERVED_REQUEST_HEADERS = [
 export class Transport {
   private serverIdentity: Identity;
   private serverHost: string;
+  private serverHostname: string;
+  /** Explicit port from a host-only configuration; undefined means the scheme default. */
+  private serverPort?: string;
   private serverOrigin?: string;
   private _lastSessionRecoveryToken?: SessionRecoveryToken;
   private requestGeneration = 0;
@@ -35,10 +38,14 @@ export class Transport {
   /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
-    // Canonicalize (lower-case, IDNA, default port dropped) so the comparison
-    // against URL.host in request() is spelling-independent.
+    this.serverHost = serverHost;
     this.serverOrigin = serverHost.includes('://') ? new URL(serverHost).origin : undefined;
-    this.serverHost = this.serverOrigin ? new URL(this.serverOrigin).host : new URL(`http://${serverHost}`).host;
+    // Canonicalize the hostname (lower-case, IDNA) so the comparison in
+    // request() is spelling-independent, but keep an explicit port as given:
+    // URL would drop ":80" and let "example.com:80" match https on 443.
+    const parsed = new URL(`http://${this.serverOrigin ? new URL(this.serverOrigin).host : serverHost}`);
+    this.serverHostname = parsed.hostname;
+    this.serverPort = /:(\d+)$/.exec(serverHost)?.[1];
   }
 
   getSessionRecoveryToken(): SessionRecoveryToken {
@@ -160,6 +167,15 @@ export class Transport {
   /**
    * Make an encrypted HTTP request.
    */
+  private matchesConfiguredServer(url: URL): boolean {
+    if (this.serverOrigin) return url.origin === this.serverOrigin;
+    if (url.hostname !== this.serverHostname) return false;
+    // url.port is '' for the scheme default; an explicit configured port must
+    // match the effective port, and no configured port means the default.
+    const effectivePort = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+    return this.serverPort === undefined ? url.port === '' : effectivePort === this.serverPort;
+  }
+
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const generation = ++this.requestGeneration;
     this._lastSessionRecoveryToken = undefined;
@@ -177,7 +193,7 @@ export class Transport {
     // Validate before consuming the body so a rejected request never buffers
     // or waits on a caller-supplied stream.
     const url = new URL(normalizedRequest.url);
-    if (this.serverOrigin ? url.origin !== this.serverOrigin : url.host !== this.serverHost) {
+    if (!this.matchesConfiguredServer(url)) {
       throw new InvalidInputError(`request URL must use the configured origin: ${this.serverOrigin ?? this.serverHost}`);
     }
     for (const name of RESERVED_REQUEST_HEADERS) {
