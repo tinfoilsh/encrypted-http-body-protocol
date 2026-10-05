@@ -4,6 +4,7 @@ import {
   Identity,
   Transport,
   createTransport,
+  InvalidInputError,
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
@@ -230,6 +231,24 @@ describe('Transport', () => {
           assert.strictEqual(err.message, 'KEY_CONFIG_MISMATCH: key configuration mismatch');
           return true;
         }
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should reject cross-origin URLs and caller-set reserved headers', async () => {
+    const transport = new Transport(serverIdentity, 'https://server.test');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
+    try {
+      await assert.rejects(transport.post('https://other.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(transport.post('http://server.test/secure', 'hello'), InvalidInputError);
+      await assert.rejects(
+        transport.request('https://server.test/secure', {
+          method: 'POST', body: 'hello', headers: { [PROTOCOL.ENCAPSULATED_KEY_HEADER]: 'deadbeef' },
+        }),
+        InvalidInputError,
       );
     } finally {
       globalThis.fetch = originalFetch;

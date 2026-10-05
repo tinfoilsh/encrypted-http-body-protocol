@@ -3,7 +3,7 @@ import { extractSessionRecoveryToken, decryptResponseWithToken } from './identit
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
+import { InvalidInputError, InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -16,15 +16,27 @@ const MAX_PROBLEM_DETAILS_BYTES = 64 * 1024;
 /**
  * HTTP transport for EHBP
  */
+/** Headers the library owns; callers cannot set them (mirrors the Python client). */
+const RESERVED_REQUEST_HEADERS = [
+  'content-length',
+  'transfer-encoding',
+  'host',
+  PROTOCOL.ENCAPSULATED_KEY_HEADER,
+  PROTOCOL.RESPONSE_NONCE_HEADER,
+];
+
 export class Transport {
   private serverIdentity: Identity;
   private serverHost: string;
+  private serverOrigin?: string;
   private _lastSessionRecoveryToken?: SessionRecoveryToken;
   private requestGeneration = 0;
 
+  /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
+    this.serverOrigin = serverHost.includes('://') ? new URL(serverHost).origin : undefined;
   }
 
   getSessionRecoveryToken(): SessionRecoveryToken {
@@ -40,7 +52,6 @@ export class Transport {
    */
   static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
     const url = new URL(serverURL);
-    const serverHost = url.host;
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
@@ -58,7 +69,7 @@ export class Transport {
     const keysData = new Uint8Array(await response.arrayBuffer());
     const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
 
-    return new Transport(serverIdentity, serverHost);
+    return new Transport(serverIdentity, url.origin);
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -165,7 +176,14 @@ export class Transport {
     const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
 
     const url = new URL(normalizedRequest.url);
-    url.host = this.serverHost;
+    if (this.serverOrigin ? url.origin !== this.serverOrigin : url.host !== this.serverHost) {
+      throw new InvalidInputError(`request URL must use the configured origin: ${this.serverOrigin ?? this.serverHost}`);
+    }
+    for (const name of RESERVED_REQUEST_HEADERS) {
+      if (normalizedRequest.headers.has(name)) {
+        throw new InvalidInputError(`reserved request header cannot be set by callers: ${name}`);
+      }
+    }
 
     const request = new Request(url.toString(), {
       ...forwardedRequestInit(normalizedRequest),
