@@ -150,6 +150,10 @@ class ServerIdentity:
             raise InvalidKeyConfigError("cipher suites length must be a multiple of 4")
         if offset + suites_len > len(data):
             raise InvalidKeyConfigError("truncated cipher suites")
+        if suites_len != _CIPHER_SUITE_ENTRY_SIZE:
+            raise UnsupportedSuiteError(
+                f"expected exactly one cipher suite, got {suites_len // _CIPHER_SUITE_ENTRY_SIZE}"
+            )
 
         kdf_id, offset = _read_u16(data, offset, "KDF id")
         aead_id, offset = _read_u16(data, offset, "AEAD id")

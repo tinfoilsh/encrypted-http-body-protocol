@@ -54,6 +54,19 @@ describe('Identity', () => {
     await assert.rejects(Identity.unmarshalPublicConfig(new Uint8Array(0)), InvalidKeyConfigError);
   });
 
+  it('should reject a config advertising more than one cipher suite', async () => {
+    const config = await (await Identity.generate()).marshalConfig();
+    const two = new Uint8Array(config.length + 4);
+    two.set(config);
+    two[36] = 8; // suites length: two entries
+    two.set([0x00, 0x01, 0x00, 0x02], config.length);
+    await assert.rejects(Identity.unmarshalPublicConfig(two), UnsupportedSuiteError);
+    // An empty list is malformed, not an unsupported suite.
+    const none = new Uint8Array(config.slice(0, 37));
+    none[36] = 0;
+    await assert.rejects(Identity.unmarshalPublicConfig(none), InvalidKeyConfigError);
+  });
+
   it('should reject a truncated or misaligned cipher-suites section', async () => {
     const config = await (await Identity.generate()).marshalConfig();
     await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, -1)), InvalidKeyConfigError);

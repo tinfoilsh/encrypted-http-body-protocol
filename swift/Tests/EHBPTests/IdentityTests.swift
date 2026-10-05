@@ -101,6 +101,15 @@ final class IdentityTests: XCTestCase {
         }
     }
 
+    func testIdentityFromConfigWithTwoSuites() {
+        var config = Data([0, 0x00, 0x20])
+        config.append(contentsOf: Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
+        config.append(contentsOf: [0x00, 0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x02])
+        XCTAssertThrowsError(try Identity(config: config)) { error in
+            XCTAssertEqual((error as? EHBPError)?.code, .unsupportedSuite)
+        }
+    }
+
     func testIdentityFromConfigWithWrongKDF() {
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let publicKeyBytes = privateKey.publicKey.rawRepresentation
