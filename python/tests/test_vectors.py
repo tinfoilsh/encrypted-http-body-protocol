@@ -10,7 +10,7 @@ from ehbp import (
     SessionRecoveryToken,
     derive_response_keys,
 )
-from ehbp.errors import InvalidTokenError
+from ehbp.errors import InvalidTokenError, UnsupportedSuiteError
 from ehbp.protocol import (
     AEAD_AES_256_GCM,
     KDF_HKDF_SHA256,
@@ -77,6 +77,14 @@ def test_parse_and_marshal_public_config():
     identity = ServerIdentity.unmarshal_public_config(config)
     assert identity.public_key_bytes() == public_key
     assert identity.marshal_public_config() == config
+
+
+def test_rejects_config_with_more_than_one_suite():
+    config = bytearray(_build_config(bytes([7]) * 32))
+    config[36] = 8  # suites_len: two entries
+    config += bytes([0x00, 0x01, 0x00, 0x02])
+    with pytest.raises(UnsupportedSuiteError):
+        ServerIdentity.unmarshal_public_config(bytes(config))
 
 
 def test_parses_first_config_and_ignores_additional():

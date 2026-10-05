@@ -9,7 +9,6 @@ problem response, and parsing the response nonce header.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from typing import Optional
 
 import httpx
@@ -32,12 +31,6 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = MAX_RESPONSE_CHUNK_LENGTH
 
 KEY_CONFIG_MISMATCH_STATUS = 422
-
-
-def single_chunk_body(body: bytes) -> Iterator[bytes]:
-    # Yielding from an iterator makes httpx use chunked transfer-encoding and
-    # omit Content-Length, as required for encrypted bodies (SPEC Section 4.1).
-    yield body
 
 
 def media_type(headers: httpx.Headers) -> str:

@@ -1076,3 +1076,23 @@ func TestDecryptRequestRejectsDuplicateEncapsulatedKey(t *testing.T) {
 	assert.Equal(t, protocol.InvalidEncapsulatedKey, protocol.CodeOf(err))
 	assert.True(t, IsClientError(err))
 }
+
+func TestStreamingDecryptReaderSurvivesEmptyFrameBurst(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	template := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader([]byte("payload")))
+	_, err = serverIdentity.EncryptRequestWithContext(template)
+	require.NoError(t, err)
+	framed, err := io.ReadAll(template.Body)
+	require.NoError(t, err)
+
+	// 100k zero-length frames before the real one: must be skipped iteratively.
+	body := append(make([]byte, 4*100_000), framed...)
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(body))
+	req.Header.Set(protocol.EncapsulatedKeyHeader, template.Header.Get(protocol.EncapsulatedKeyHeader))
+	_, err = serverIdentity.DecryptRequestWithContext(req)
+	require.NoError(t, err)
+	plain, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "payload", string(plain))
+}

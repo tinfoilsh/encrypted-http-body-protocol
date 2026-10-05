@@ -10,6 +10,9 @@ export const PROTOCOL = {
   KEY_CONFIG_PROBLEM_TYPE: 'urn:ietf:params:ehbp:error:key-config',
 } as const;
 
+/** Plaintext bytes sealed per request frame (SPEC 4.3); bounds memory while streaming. */
+export const REQUEST_FRAME_BYTES = 64 * 1024;
+
 /**
  * HPKE suite configuration matching the Go implementation
  */

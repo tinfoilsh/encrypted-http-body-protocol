@@ -8,6 +8,7 @@ import {
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
+import { encryptFrames } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
@@ -687,6 +688,131 @@ describe('Transport', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it('should seal large bodies as a sequence of 64 KiB frames', async () => {
+    const original = new Uint8Array(200 * 1024).map((_, i) => i & 0xff);
+    const request = new Request('https://server.test/upload', { method: 'POST', body: original });
+    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+    assert(context);
+    const body = new Uint8Array(await encrypted.arrayBuffer());
+
+    const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
+    const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
+      info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+    });
+    const frameSizes: number[] = [];
+    const plain: Uint8Array[] = [];
+    for (let offset = 0; offset < body.byteLength;) {
+      const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
+      const opened = new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len)));
+      frameSizes.push(opened.byteLength);
+      plain.push(opened);
+      offset += 4 + len;
+    }
+    assert.deepStrictEqual(frameSizes, [65536, 65536, 65536, 8 * 1024]);
+    assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
+  });
+
+  it('should fall back to a single Blob body where uploads cannot stream', async () => {
+    // Force the browser path: canStreamUpload() keys off process.versions.node.
+    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
+    Object.defineProperty(process, 'versions', { value: {}, configurable: true });
+    // Observe the fallback itself: it must build exactly one Blob from the
+    // frame parts, not a stream and not a second body-sized buffer.
+    const RealBlob = globalThis.Blob;
+    const blobs: number[] = [];
+    globalThis.Blob = class extends RealBlob {
+      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+        super(parts, options);
+        blobs.push(parts?.length ?? 0);
+      }
+    } as typeof Blob;
+    try {
+      const original = new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
+      const request = new Request('https://server.test/upload', { method: 'POST', body: original });
+      const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+      assert(context);
+      assert.deepStrictEqual(blobs, [4], 'one Blob built from the four frame parts');
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+
+      const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
+      const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
+        info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+      });
+      const plain: Uint8Array[] = [];
+      let frames = 0;
+      for (let offset = 0; offset < body.byteLength; frames++) {
+        const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
+        plain.push(new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len))));
+        offset += 4 + len;
+      }
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
+    } finally {
+      globalThis.Blob = RealBlob;
+      Object.defineProperty(process, 'versions', versions);
+    }
+  });
+
+  it('should frame a single huge source chunk by cursor without chunk-sized copies', async () => {
+    const chunk = new Uint8Array(1024 * 1024).map((_, i) => i & 0xff);
+    let maxInput = 0;
+    let zeroCopy = 0;
+    const ctx = {
+      async Seal(plaintext: Uint8Array) {
+        maxInput = Math.max(maxInput, plaintext.byteLength);
+        // A full frame is a view into the source chunk itself: no copy was made.
+        if (plaintext.buffer === chunk.buffer) zeroCopy++;
+        return plaintext.slice();
+      },
+    } as unknown as Parameters<typeof encryptFrames>[0];
+    const reader = new ReadableStream<Uint8Array>({ start(c) { c.close(); } }).getReader();
+    const stream = encryptFrames(ctx, reader, chunk);
+    let frames = 0;
+    for (const r = stream.getReader(); ;) {
+      const { done, value } = await r.read();
+      if (done) break;
+      frames++;
+      assert.strictEqual(value.byteLength, 4 + 65536);
+    }
+    assert.strictEqual(frames, 16);
+    assert.strictEqual(maxInput, 65536, 'Seal never sees more than one frame');
+    assert.strictEqual(zeroCopy, 16, 'every full frame was served from the source chunk by offset');
+  });
+
+  it('should cancel the source when sealing fails', async () => {
+    let cancelled: unknown = undefined;
+    const source = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(new Uint8Array(10)); },
+      cancel(reason) { cancelled = reason; },
+    }, { highWaterMark: 0 });
+    const boom = new Error('seal failed');
+    const ctx = { async Seal() { throw boom; } } as unknown as Parameters<typeof encryptFrames>[0];
+    const stream = encryptFrames(ctx, source.getReader(), new Uint8Array(5));
+    await assert.rejects(stream.getReader().read(), boom);
+    assert.strictEqual(cancelled, boom);
+  });
+
+  it('should pull a stream body incrementally rather than buffering it', async () => {
+    let pulls = 0;
+    const chunks = 8;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (pulls > chunks) controller.close();
+        else controller.enqueue(new Uint8Array(65536).fill(pulls));
+      },
+    }, { highWaterMark: 0 });
+    const request = new Request('https://server.test/upload', { method: 'POST', body: source, duplex: 'half' } as RequestInit);
+    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+    assert(context);
+    assert(encrypted.body, 'Node sends the encrypted frames as a stream');
+    const reader = encrypted.body.getReader();
+    const first = await reader.read();
+    assert(!first.done && first.value.byteLength === 4 + 65536 + 16, 'first frame is one sealed 64 KiB chunk');
+    assert(pulls < chunks, `source should not be drained up front (pulled ${pulls} of ${chunks})`);
+    await reader.cancel();
   });
 
   it('should preserve request payload when Request.body is unavailable', async () => {

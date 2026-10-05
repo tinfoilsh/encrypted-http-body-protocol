@@ -142,7 +142,14 @@ type StreamingDecryptReader struct {
 	recipient *hpke.Recipient
 	buffer    []byte
 	eof       bool
+	failure   error // first framing or authentication failure, sticky
+	opened    bool  // at least one chunk authenticated under this key
 }
+
+// Err reports the first framing or authentication failure seen while
+// streaming, or nil. The middleware consults it after the handler returns to
+// decide whether the exchange may complete (SPEC 5.2).
+func (r *StreamingDecryptReader) Err() error { return r.failure }
 
 // NewStreamingDecryptReader creates a new streaming decrypt reader
 func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *StreamingDecryptReader {
@@ -154,8 +161,20 @@ func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *Str
 	}
 }
 
-// Read implements io.Reader, decrypting data as it's read
+// Read implements io.Reader, decrypting data as it's read. A protocol failure
+// is sticky: every later Read returns it and Err exposes it.
 func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
+	if r.failure != nil {
+		return 0, r.failure
+	}
+	n, err = r.read(p)
+	if err != nil && err != io.EOF {
+		r.failure = err
+	}
+	return n, err
+}
+
+func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	if r.eof {
 		return 0, io.EOF
 	}
@@ -168,23 +187,22 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	}
 
 	// Read chunk length (4 bytes)
+	// Read the length prefix, skipping zero-length chunks (SPEC 4.3) in a
+	// loop so a burst of empty frames cannot grow the stack.
 	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF {
-			r.eof = true
-			return 0, io.EOF
+	var chunkLen uint32
+	for chunkLen == 0 {
+		if _, err := io.ReadFull(r.reader, chunkLenBytes); err != nil {
+			if err == io.EOF {
+				r.eof = true
+				return 0, io.EOF
+			}
+			if err == io.ErrUnexpectedEOF {
+				return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
+			}
+			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
 		}
-		if err == io.ErrUnexpectedEOF {
-			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
-		}
-		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
-	}
-
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		// Empty chunk, try reading next chunk
-		return r.Read(p)
+		chunkLen = binary.BigEndian.Uint32(chunkLenBytes)
 	}
 	if chunkLen > maxChunkBytes {
 		return 0, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
@@ -202,8 +220,15 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		// Decryption failure at this stage typically indicates request/receiver key mismatch
 		// (for example stale client key after server key rotation).
-		return 0, NewKeyConfigError(protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err))
+		perr := protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err)
+		if r.opened {
+			// An earlier chunk authenticated, so the key is right: this is
+			// corruption or tampering (400), not a stale key (422). SPEC 5.4.2.
+			return 0, NewClientError(perr)
+		}
+		return 0, NewKeyConfigError(perr)
 	}
+	r.opened = true
 
 	// Return as much as fits in p, buffer the rest
 	n = copy(p, decryptedChunk)
@@ -231,6 +256,7 @@ func (r *StreamingDecryptReader) Close() error {
 type ResponseContext struct {
 	recipient  *hpke.Recipient // The recipient from request decryption (has Export method)
 	RequestEnc []byte          // The encapsulated key from the request
+	decryptor  *StreamingDecryptReader
 }
 
 // DerivedResponseWriter wraps an http.ResponseWriter for streaming encryption
@@ -331,6 +357,7 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	return &ResponseContext{
 		recipient:  recipient,
 		RequestEnc: encapKey,
+		decryptor:  streamingReader,
 	}, nil
 }
 

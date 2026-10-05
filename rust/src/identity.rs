@@ -113,6 +113,12 @@ impl ServerIdentity {
                 "truncated cipher suites".into(),
             ));
         }
+        if suites_len != 4 {
+            return Err(Error::Coded(
+                Code::UnsupportedSuite,
+                format!("expected exactly one cipher suite, got {}", suites_len / 4),
+            ));
+        }
 
         let kdf_id = read_u16(data, &mut offset, "KDF id")?;
         let aead_id = read_u16(data, &mut offset, "AEAD id")?;
@@ -208,9 +214,26 @@ pub(crate) struct RequestEncryptor {
     sender: AeadCtxS<Aead, Kdf, KemSuite>,
 }
 
+/// Plaintext bytes per request frame (SPEC 4.3). Bounded so a receiver can
+/// authenticate and release one frame at a time with bounded memory.
+pub const REQUEST_FRAME_SIZE: usize = 64 * 1024;
+
 impl RequestEncryptor {
+    /// Seals `plaintext` as one or more consecutive frames of at most
+    /// `REQUEST_FRAME_SIZE` plaintext bytes each, reusing the sender context.
     pub fn encrypt_chunk(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let ciphertext = self.sender.seal(plaintext, &[]).map_err(|err| {
+        let mut out = Vec::new();
+        for piece in plaintext.chunks(REQUEST_FRAME_SIZE) {
+            out.extend_from_slice(&self.encrypt_frame(piece)?);
+        }
+        Ok(out)
+    }
+
+    /// Seals one frame. `piece` must be at most `REQUEST_FRAME_SIZE` bytes;
+    /// streaming callers slice their input so memory never exceeds one frame.
+    pub fn encrypt_frame(&mut self, piece: &[u8]) -> Result<Vec<u8>> {
+        debug_assert!(piece.len() <= REQUEST_FRAME_SIZE);
+        let ciphertext = self.sender.seal(piece, &[]).map_err(|err| {
             Error::Coded(
                 Code::HpkeSetupFailed,
                 format!("failed to seal request body: {err:?}"),
@@ -242,6 +265,15 @@ fn read_u16(data: &[u8], offset: &mut usize, field: &str) -> Result<u16> {
 mod tests {
     use super::*;
     use hpke::{setup_receiver, OpModeR};
+
+    #[test]
+    fn rejects_config_with_more_than_one_suite() {
+        let mut config = vec![0u8, 0x00, 0x20];
+        config.extend_from_slice(&[7u8; 32]);
+        config.extend_from_slice(&[0x00, 0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x02]);
+        let err = ServerIdentity::unmarshal_public_config(&config).unwrap_err();
+        assert_eq!(err.code(), Some(Code::UnsupportedSuite));
+    }
 
     #[test]
     fn encrypts_request_body_for_hpke_receiver() {
@@ -283,6 +315,46 @@ mod tests {
         assert_eq!(plaintext, b"hello rust");
         assert_eq!(encrypted.token.exported_secret, exported_secret);
         assert_eq!(encrypted.token.request_enc, encrypted.encapsulated_key);
+    }
+
+    #[test]
+    fn large_request_body_is_split_into_bounded_frames() {
+        let mut csprng = StdRng::from_os_rng();
+        let (private_key, public_key) = KemSuite::gen_keypair(&mut csprng);
+        let identity = ServerIdentity {
+            key_id: KEY_ID,
+            public_key,
+        };
+        let plaintext: Vec<u8> = (0..200 * 1024).map(|i| i as u8).collect();
+        let encrypted = identity.encrypt_request_body(&plaintext).unwrap().unwrap();
+
+        let encapped_key =
+            <KemSuite as Kem>::EncappedKey::from_bytes(&encrypted.encapsulated_key).unwrap();
+        let mut receiver = setup_receiver::<Aead, Kdf, KemSuite>(
+            &OpModeR::Base,
+            &private_key,
+            &encapped_key,
+            HPKE_REQUEST_INFO,
+        )
+        .unwrap();
+        let mut offset = 0;
+        let mut frames = 0;
+        let mut opened = Vec::new();
+        while offset < encrypted.body.len() {
+            let len =
+                u32::from_be_bytes(encrypted.body[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            assert!(len <= REQUEST_FRAME_SIZE + 16, "frame exceeds the bound");
+            opened.extend(
+                receiver
+                    .open(&encrypted.body[offset..offset + len], &[])
+                    .unwrap(),
+            );
+            offset += len;
+            frames += 1;
+        }
+        assert_eq!(frames, 200 * 1024 / REQUEST_FRAME_SIZE + 1); // 64+64+64+8 KiB
+        assert_eq!(opened, plaintext);
     }
 
     #[test]
