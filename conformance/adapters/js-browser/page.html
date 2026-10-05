@@ -107,7 +107,10 @@ async function tokenBeforeResponse(fx, res, oracleUrl) {
 async function largeBody(fx, res, oracleUrl) {
   const { size_bytes: size, block_seed: seed } = fx.inputs;
   const { quota = 0, usage = 0 } = await navigator.storage.estimate();
-  if (quota - usage < size * 1.01) {
+  // Chromium derives the origin quota from free disk, so it shrinks while the
+  // spool itself is written; require twice the framed size up front rather
+  // than fail mid-body with a source that cannot be replayed.
+  if (quota - usage < size * 2) {
     res.outcome = 'skipped';
     res.skip_reason = 'opfs-quota-below-body-size';
     return;
