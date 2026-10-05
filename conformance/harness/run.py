@@ -46,6 +46,10 @@ ORACLE_NON200_URL = f"http://{_HOST}:{int(_PORT) + 2}"
 
 ADAPTER_TIMEOUT_SECONDS = 30
 BATCH_TIMEOUT_SECONDS = 180
+# Heavy fixtures (multi-GiB bodies) run only with --heavy. A streaming client
+# must stay far below the body size; a buffering one lands at roughly 1x-3x it.
+HEAVY_TIMEOUT_SECONDS = 900
+HEAVY_PEAK_RSS_LIMIT = 512 << 20
 
 CANONICAL_ERROR_CODES = {
     "INVALID_KEY_CONFIG", "UNSUPPORTED_SUITE",
@@ -60,6 +64,7 @@ RESULT_FIELDS = {
     "fixture_id", "outcome", "error_code", "status", "response_headers",
     "body_hex", "passthrough", "plaintext_emitted_before_error",
     "bytes_emitted_before_error", "skip_reason", "native_error", "runner",
+    "peak_rss_bytes",
 }
 
 FIXTURE_CATEGORIES = {"crypto", "config", "e2e", "shape", "client-api", "server"}
@@ -68,13 +73,13 @@ FIXTURE_OPERATIONS = {
     "compute_nonce", "token_roundtrip", "parse_config",
     "marshal_config", "request", "discover", "reject_reserved_header",
     "reject_cross_origin", "reject_url_credentials", "decrypt_request",
-    "middleware_request",
+    "middleware_request", "large_body",
 }
 
 FIXTURE_FIELDS = {
     "id", "description", "category", "operation", "inputs", "chunking",
     "server_scenario", "request", "browser", "runners", "allowed_skips",
-    "expect",
+    "expect", "heavy",
 }
 EXPECT_FIELDS = {
     "outcome", "error_code", "status", "body_hex", "passthrough",
@@ -182,6 +187,9 @@ def validate_result(result, fixture_id):
     emitted = result.get("bytes_emitted_before_error")
     if emitted is not None and (type(emitted) is not int or emitted < 0):
         return "bytes_emitted_before_error is not a non-negative integer"
+    rss = result.get("peak_rss_bytes")
+    if rss is not None and (type(rss) is not int or rss < 0):
+        return "peak_rss_bytes is not a non-negative integer"
     headers = result.get("response_headers")
     if headers is not None and (not isinstance(headers, dict)
                                 or any(not isinstance(k, str) or not isinstance(v, str)
@@ -275,6 +283,8 @@ def validate_fixture(fixture, source="fixture", index=0):
         raise ValueError(f"{where}: expected body_hex is not lowercase hex")
     if "inputs" in fixture and not isinstance(fixture["inputs"], dict):
         raise ValueError(f"{where}: inputs must be an object")
+    if "heavy" in fixture and type(fixture["heavy"]) is not bool:
+        raise ValueError(f"{where}: heavy must be boolean")
     if "chunking" in fixture and (not isinstance(fixture["chunking"], list)
                                   or any(type(v) is not int or v < 1
                                          for v in fixture["chunking"])):
@@ -546,6 +556,8 @@ def observe(fx, adapters):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", action="append", dest="adapters", default=None)
+    ap.add_argument("--heavy", action="store_true",
+                    help="also run heavy fixtures (multi-GiB streaming bodies)")
     args = ap.parse_args()
     names = args.adapters or ["go"]
 
@@ -556,6 +568,11 @@ def main():
         sys.exit(2)
 
     fixtures = load_fixtures()
+    if not args.heavy:
+        heavy = [fx["id"] for fx in fixtures if fx.get("heavy")]
+        fixtures = [fx for fx in fixtures if not fx.get("heavy")]
+        for fid in heavy:
+            print(f"[heavy] {fid:<38} skipped (pass --heavy to run)")
     needs_oracle = any(fx["category"] in ("e2e", "shape", "client-api") for fx in fixtures)
     if needs_oracle:
         configure_oracle_addresses()
@@ -569,6 +586,7 @@ def main():
             runnable = [fx for fx in fixtures
                         if fx["category"] in ("crypto", "config", "e2e")
                         and (not fx.get("runners") or n in fx["runners"])
+                        and not fx.get("heavy")
                         and fx.get("browser", {}).get("runnable", True)]
             batch_results[n] = run_batch(adapters[n], runnable)
 
@@ -587,7 +605,8 @@ def main():
             for name, argv in per_fixture.items():
                 if fx.get("runners") and name not in fx["runners"]:
                     continue
-                results[name] = run_adapter(argv, fx)
+                results[name] = run_adapter(
+                    argv, fx, HEAVY_TIMEOUT_SECONDS if fx.get("heavy") else ADAPTER_TIMEOUT_SECONDS)
             for name in batch_names:
                 if fx.get("runners") and name not in fx["runners"]:
                     continue
@@ -610,12 +629,19 @@ def main():
             line = []
             div_names = set()
             for name, res in results.items():
+                rss = res.get("peak_rss_bytes")
+                rss_note = f" rss={rss >> 20}MiB" if rss is not None else ""
                 if check_expect(res, fx["expect"]):  # non-empty = failures = divergent
                     div_names.add(name)
                     cells += 1
-                    line.append(f"{name}=DIVERGENT({res.get('error_code') or res.get('outcome')})")
+                    line.append(f"{name}=DIVERGENT({res.get('error_code') or res.get('outcome')}){rss_note}")
+                elif fx.get("heavy") and rss is not None and rss > HEAVY_PEAK_RSS_LIMIT:
+                    # The body went through, but the client buffered it.
+                    div_names.add(name)
+                    cells += 1
+                    line.append(f"{name}=DIVERGENT(MEMORY){rss_note}")
                 else:
-                    line.append(f"{name}=ok")
+                    line.append(f"{name}=ok{rss_note}")
 
             cross = len(results) > 1 and not cross_equal(results)
             if cross:

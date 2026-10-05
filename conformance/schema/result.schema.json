@@ -76,6 +76,11 @@
       "description": "NOT ASSERTED. The raw native error type and message, for human audit and the mapping table.",
       "oneOf": [{"type": "null"}, {"type": "string"}]
     },
+    "peak_rss_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Peak resident set size of the adapter process in bytes; reported by heavy fixtures so buffering is visible."
+    },
     "runner": {
       "description": "NOT ASSERTED. Which adapter produced this (e.g. 'rust', 'js-browser:firefox'). For the report only.",
       "type": "string"

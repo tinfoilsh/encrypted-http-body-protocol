@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -215,6 +216,22 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 		}
 		if respCtx == nil {
 			http.Error(w, "scenario requires an encrypted request body", http.StatusBadRequest)
+			return
+		}
+		if name == "digest" {
+			// Stream the decrypted body straight into a hash so a multi-GiB
+			// request never lands in memory; reply with the raw 32-byte digest.
+			h := sha256.New()
+			if _, err := io.Copy(h, r.Body); err != nil {
+				http.Error(w, "request decryption failed", http.StatusBadRequest)
+				return
+			}
+			nonce, framed, err := sealResponse(id, respCtx, h.Sum(nil))
+			if err != nil {
+				http.Error(w, "response setup failed", http.StatusInternalServerError)
+				return
+			}
+			writeEncrypted(w, nonce, framed, http.StatusOK)
 			return
 		}
 		plaintext, err := io.ReadAll(r.Body)

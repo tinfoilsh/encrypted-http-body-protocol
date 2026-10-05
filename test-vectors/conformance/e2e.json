@@ -455,5 +455,31 @@
       "status": 200,
       "body_hex": "706c61696e7465787420666f7220626f64796c6573732072657175657374"
     }
+  },
+  {
+    "id": "e2e-large-body-3gib",
+    "description": "A 3 GiB request body streams through encryption and the server's streaming decryptor; the client must not buffer it. Body bytes: 1 MiB block with block[i] = (i + seed) & 0xff, repeated. The oracle replies with the raw SHA-256 of the plaintext.",
+    "category": "e2e",
+    "operation": "large_body",
+    "heavy": true,
+    "inputs": {
+      "size_bytes": 3221225472,
+      "block_seed": 42
+    },
+    "server_scenario": "digest",
+    "request": {
+      "method": "POST",
+      "path": "/s/digest",
+      "headers": {}
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "browsers-cannot-stream-request-bodies-portably"
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "5bb8a0daf79ae7af2f38f80ac1ce890a741392362bfb96b37c5fe03261ab9a22"
+    }
   }
 ]

@@ -48,7 +48,8 @@
         "reject_cross_origin",
         "reject_url_credentials",
         "decrypt_request",
-        "middleware_request"
+        "middleware_request",
+        "large_body"
       ],
       "description": "The standard operation the adapter performs. `request` is used for e2e/shape; crypto/config/server operations run in-process."
     },
@@ -112,6 +113,10 @@
           "type": "string"
         }
       }
+    },
+    "heavy": {
+      "type": "boolean",
+      "description": "Multi-GiB streaming fixture; the harness runs it only with --heavy and additionally fails a runner whose peak RSS exceeds 512 MiB."
     },
     "runners": {
       "description": "Optional applicability list for implementation-specific surfaces, such as the Go-only server API. Non-listed runners are not counted as skips.",

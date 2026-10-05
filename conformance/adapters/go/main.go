@@ -52,6 +52,7 @@ type result struct {
 	Native      *string           `json:"native_error"`
 	SkipReason  *string           `json:"skip_reason,omitempty"`
 	Runner      string            `json:"runner"`
+	PeakRSS     *int64            `json:"peak_rss_bytes,omitempty"`
 }
 
 func main() {
@@ -130,7 +131,9 @@ func run(fx *fixture, r *result) error {
 	case "decrypt_request":
 		return decryptRequest(fx, r)
 	case "middleware_request":
-		return middlewareRequest(fx)
+		return middlewareRequest(fx, r)
+	case "large_body":
+		return largeBody(fx, r)
 	default:
 		return fmt.Errorf("unknown operation %q", fx.Operation)
 	}
@@ -191,8 +194,21 @@ func encryptedRequest(id *identity.Identity, plaintext []byte) (*http.Request, [
 	if _, err := id.EncryptRequestWithContext(req); err != nil {
 		return nil, nil, err
 	}
-	framed, err := io.ReadAll(req.Body)
-	return req, framed, err
+	// Read in fixed 8 KiB steps so the encryptor emits deterministic 8 KiB
+	// plaintext frames; io.ReadAll's growing buffers would make frame sizes,
+	// and therefore the authenticated prefix, depend on allocator behaviour.
+	var framed []byte
+	buf := make([]byte, 8192)
+	for {
+		n, err := req.Body.Read(buf)
+		framed = append(framed, buf[:n]...)
+		if err == io.EOF {
+			return req, framed, nil
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 }
 
 // decryptRequest drives the public server-side request API with structural
@@ -244,10 +260,11 @@ func decryptRequest(fx *fixture, r *result) error {
 	return nil
 }
 
-// middlewareRequest proves whether a trailing authentication failure is
-// checked before application code executes. The handler deliberately consumes
-// only one byte, as real routing/auth middleware commonly does.
-func middlewareRequest(fx *fixture) error {
+// middlewareRequest verifies the server releases request plaintext one
+// authenticated frame at a time (SPEC 4.3): the handler reads the body to EOF,
+// the tampered trailing frame fails that read, and only the authenticated
+// prefix was delivered before the error.
+func middlewareRequest(fx *fixture, r *result) error {
 	if strIn(fx, "mutation") != "trailing_tamper" {
 		return fmt.Errorf("unknown middleware mutation")
 	}
@@ -265,22 +282,88 @@ func middlewareRequest(fx *fixture) error {
 		req.Header.Add(protocol.EncapsulatedKeyHeader, value)
 	}
 
-	handlerRan := false
+	var readErr error
+	var delivered int
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		handlerRan = true
-		one := make([]byte, 1)
-		_, _ = req.Body.Read(one)
+		_, delivered, readErr = readTracked(req.Body)
+		if readErr != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	rec := httptest.NewRecorder()
 	id.Middleware()(handler).ServeHTTP(rec, req)
-	if handlerRan {
-		return nil
+	if readErr != nil {
+		r.EmittedN = delivered
+		r.Emitted = delivered > 0
+		return readErr
 	}
-	if rec.Code == http.StatusUnprocessableEntity {
-		return identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "trailing request frame failed authentication"))
+	if rec.Code != http.StatusOK {
+		return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
 	}
-	return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
+	return nil
+}
+
+// patternReader yields size bytes of a 1 MiB block with block[i] = (i+seed)&0xff,
+// repeated, without ever materialising the body.
+type patternReader struct {
+	block     []byte
+	remaining int64
+	pos       int
+}
+
+func newPatternReader(size int64, seed int) *patternReader {
+	block := make([]byte, 1<<20)
+	for i := range block {
+		block[i] = byte(i + seed)
+	}
+	return &patternReader{block: block, remaining: size}
+}
+
+func (p *patternReader) Read(buf []byte) (int, error) {
+	if p.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := copy(buf, p.block[p.pos:])
+	if int64(n) > p.remaining {
+		n = int(p.remaining)
+	}
+	p.pos = (p.pos + n) % len(p.block)
+	p.remaining -= int64(n)
+	return n, nil
+}
+
+// largeBody streams a multi-GiB body through the client transport to the
+// oracle's digest route and reports peak RSS so buffering is visible.
+func largeBody(fx *fixture, r *result) error {
+	size, _ := fx.Inputs["size_bytes"].(float64)
+	seed, _ := fx.Inputs["block_seed"].(float64)
+	serverURL := os.Getenv("ORACLE_URL")
+	tr, err := client.NewTransport(serverURL)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, newPatternReader(int64(size), int(seed)))
+	if err != nil {
+		return err
+	}
+	req.ContentLength = -1
+	resp, err := (&http.Client{Transport: tr}).Do(req)
+	if err != nil {
+		return err
+	}
+	status := resp.StatusCode
+	r.Status = &status
+	plain, _, rerr := readTracked(resp.Body)
+	_ = resp.Body.Close()
+	rss := peakRSSBytes()
+	r.PeakRSS = &rss
+	if rerr != nil {
+		return rerr
+	}
+	setBody(r, plain)
+	return nil
 }
 
 func discoverTarget(fx *fixture) string {
