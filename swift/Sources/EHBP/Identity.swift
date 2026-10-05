@@ -207,6 +207,13 @@ public final class Identity: Sendable {
         guard cipherSuitesLength >= 4, config.count >= offset + 4 else {
             throw EHBPError(.invalidKeyConfig, "no cipher suites in config")
         }
+        guard config.count >= offset + cipherSuitesLength else {
+            throw EHBPError(.invalidKeyConfig, "truncated cipher suites")
+        }
+        // SPEC 3.2: a key_config advertises exactly one suite.
+        guard cipherSuitesLength == 4 else {
+            throw EHBPError(.unsupportedSuite, "expected exactly one cipher suite, got \(cipherSuitesLength / 4)")
+        }
 
         let kdfId = UInt16(config[offset]) << 8 | UInt16(config[offset + 1])
         let aeadId = UInt16(config[offset + 2]) << 8 | UInt16(config[offset + 3])

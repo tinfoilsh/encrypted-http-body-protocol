@@ -40,7 +40,7 @@ The implementation emits a `key_config` with fields:
 - `cipher_suites`: one suite consisting of KDF=HKDF_SHA256 and AEAD=AES_256_GCM
 - `public_key`: server KEM public key bytes for the selected KEM
 
-Clients MUST parse the first `key_config` and use its public key and suite. Additional `key_config` entries, if present, are ignored by this implementation.
+Clients MUST parse the first `key_config` and use its public key and suite. A `key_config` MUST advertise exactly one cipher suite. Clients MUST reject a `key_config` whose `cipher_suites` list contains more than one entry, or whose KEM, KDF, or AEAD differ from those listed above (`UNSUPPORTED_SUITE`); no other suite is negotiated or accepted. Additional `key_config` entries, if present, are ignored by this implementation.
 
 ## 4. Protocol Messages
 

@@ -113,6 +113,12 @@ impl ServerIdentity {
                 "truncated cipher suites".into(),
             ));
         }
+        if suites_len != 4 {
+            return Err(Error::Coded(
+                Code::UnsupportedSuite,
+                format!("expected exactly one cipher suite, got {}", suites_len / 4),
+            ));
+        }
 
         let kdf_id = read_u16(data, &mut offset, "KDF id")?;
         let aead_id = read_u16(data, &mut offset, "AEAD id")?;
@@ -242,6 +248,15 @@ fn read_u16(data: &[u8], offset: &mut usize, field: &str) -> Result<u16> {
 mod tests {
     use super::*;
     use hpke::{setup_receiver, OpModeR};
+
+    #[test]
+    fn rejects_config_with_more_than_one_suite() {
+        let mut config = vec![0u8, 0x00, 0x20];
+        config.extend_from_slice(&[7u8; 32]);
+        config.extend_from_slice(&[0x00, 0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x02]);
+        let err = ServerIdentity::unmarshal_public_config(&config).unwrap_err();
+        assert_eq!(err.code(), Some(Code::UnsupportedSuite));
+    }
 
     #[test]
     fn encrypts_request_body_for_hpke_receiver() {
