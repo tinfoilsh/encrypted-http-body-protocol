@@ -286,6 +286,12 @@ def validate_fixture(fixture, source="fixture", index=0):
         raise ValueError(f"{where}: inputs must be an object")
     if "heavy" in fixture and type(fixture["heavy"]) is not bool:
         raise ValueError(f"{where}: heavy must be boolean")
+    if fixture["operation"] == "large_body" and fixture.get("heavy") is not True:
+        raise ValueError(f"{where}: large_body fixtures must be heavy")
+    browser = fixture.get("browser", {})
+    if not isinstance(browser, dict) or (browser.get("runnable") is False
+                                         and not isinstance(browser.get("skip_reason"), str)):
+        raise ValueError(f"{where}: a non-runnable browser fixture needs a skip_reason")
     if "chunking" in fixture and (not isinstance(fixture["chunking"], list)
                                   or any(type(v) is not int or v < 1
                                          for v in fixture["chunking"])):
@@ -334,6 +340,7 @@ def configure_oracle_addresses():
 
 def start_oracle():
     out = ROOT / "conformance" / ".bin" / "oracle"
+    out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["go", "build", "-o", str(out), "./conformance/server"], cwd=ROOT, check=True)
     proc = subprocess.Popen([str(out), "-l", ORACLE_ADDR], cwd=ROOT,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -374,6 +381,14 @@ def check_expect(result, expect):
     exp_code = expect.get("error_code") if outcome == "error" else None
     if result.get("error_code") != exp_code:
         fails.append(f"error_code {result.get('error_code')} != {exp_code}")
+    # SPEC 5.5: every library prefixes its message with the canonical code. An
+    # error whose native message lacks that prefix was raised uncoded and only
+    # looks classified because of the adapter's INVALID_INPUT fallback.
+    if result.get("outcome") == "error":
+        code = result.get("error_code") or ""
+        native = str(result.get("native_error") or "")
+        if not native.startswith(f"{code}:"):
+            fails.append(f"UNCODED: native_error does not start with {code}:")
     for key in ("status", "body_hex", "passthrough", "token_before_response"):
         if key in expect and result.get(key) != expect[key]:
             fails.append(f"{key} {result.get(key)!r} != {expect[key]!r}")
@@ -457,7 +472,8 @@ def build_html(diverging, status, total, cells, cross_fails, skipped, runners):
         f"{cross_fails} cross-diff fixtures &middot; {skipped} skipped</p>",
     ]
     if not diverging:
-        out.append("<p>No divergences. Every runner agrees with the spec expectation.</p>")
+        out.append("<p>No divergences among the runners that produced a result "
+                   "(skipped and not-run fixtures are not passes).</p>")
     else:
         out.append("<table><thead><tr><th>Fixture</th><th>Category</th><th>Expected</th>")
         out.extend(f"<th>{esc(c)}</th>" for c in cols)
@@ -475,7 +491,7 @@ def build_html(diverging, status, total, cells, cross_fails, skipped, runners):
                 if r is None:
                     out.append("<td class='na'>&mdash;</td>")
                 elif r["divergent"]:
-                    out.append(f"<td class='div' title='{esc(r['native'] or '')}'>"
+                    out.append(f"<td class='div' title='{esc(str(r['native'] or ''))}'>"
                                f"&#x2717; <code>{esc(str(r['actual']))}</code></td>")
                 else:
                     out.append(f"<td class='ok'>&#x2713; <code>{esc(str(r['actual']))}</code></td>")
@@ -487,7 +503,7 @@ def build_html(diverging, status, total, cells, cross_fails, skipped, runners):
             for r in fx["rows"]:
                 if not r["divergent"]:
                     continue
-                native = r["native"] or "(no error: the library accepted the input)"
+                native = str(r["native"] or "(no error: the library accepted the input)")
                 out.append(f"<li><b>{esc(r['language'])}</b> &rarr; "
                            f"<code>{esc(str(r['actual']))}</code>: {esc(native)}</li>")
             out.append("</ul></details>")
@@ -498,16 +514,30 @@ def build_html(diverging, status, total, cells, cross_fails, skipped, runners):
     return "\n".join(out) + "\n"
 
 
-def write_report(diverging, total, cells, cross_fails, skipped, runners=None):
-    """Write a human report (report.md) and a machine report (report.json)."""
+def write_report(diverging, total, cells, cross_fails, skipped, runners=None,
+                 not_run=None, browser_skips=None):
+    """Write a human report (report.md) and a machine report (report.json).
+
+    `not_run` lists heavy fixtures omitted by the default filter and
+    `browser_skips` the per-fixture browser skip reasons, so a PASS report
+    states exactly what did not execute: skips are not passes."""
     status = "FAIL" if diverging else "PASS"
+    not_run = not_run or []
+    browser_skips = browser_skips or []
     lines = [
         "# EHBP Conformance Report", "",
         f"**{status}** — {total} fixtures | divergent cells {cells} | "
         f"cross-diff fixtures {cross_fails} | skipped {skipped}", "",
     ]
     if not diverging:
-        lines.append("No divergences. Every runner agrees with the spec expectation.")
+        lines.append("No divergences among the runners that produced a result "
+                     "(skipped and not-run fixtures are not passes).")
+    if not_run:
+        lines += ["", "## Not run", "", "Heavy fixtures omitted; pass `--heavy` to include them.", ""]
+        lines += [f"- `{fid}`" for fid in not_run]
+    if browser_skips:
+        lines += ["", "## Browser skips", ""]
+        lines += [f"- `{b['id']}` ({b['runner']}): {b['reason']}" for b in browser_skips]
     for fx in diverging:
         e = fx["expect"]
         expected = e.get("error_code") if e.get("outcome") == "error" else e.get("outcome")
@@ -527,6 +557,7 @@ def write_report(diverging, total, cells, cross_fails, skipped, runners=None):
     REPORT_JSON.write_text(json.dumps({
         "status": status, "total": total, "divergent_cells": cells,
         "cross_diff_fixtures": cross_fails, "skipped": skipped,
+        "not_run": not_run, "browser_skips": browser_skips,
         "divergences": diverging,
     }, indent=2) + "\n")
     REPORT_HTML.write_text(build_html(diverging, status, total, cells, cross_fails, skipped, runners))
@@ -569,11 +600,12 @@ def main():
         sys.exit(2)
 
     fixtures = load_fixtures()
+    not_run = []
     if not args.heavy:
-        heavy = [fx["id"] for fx in fixtures if fx.get("heavy")]
+        not_run = [fx["id"] for fx in fixtures if fx.get("heavy")]
         fixtures = [fx for fx in fixtures if not fx.get("heavy")]
-        for fid in heavy:
-            print(f"[heavy] {fid:<38} skipped (pass --heavy to run)")
+        for fid in not_run:
+            print(f"[heavy] {fid:<38} not run (pass --heavy to include it)")
     needs_oracle = any(fx["category"] in ("e2e", "shape", "client-api") for fx in fixtures)
     if needs_oracle:
         configure_oracle_addresses()
@@ -593,6 +625,7 @@ def main():
 
     total = cells = cross_fails = skipped = 0
     diverging = []
+    browser_skips = []
     try:
         for fx in fixtures:
             if fx["category"] == "shape":
@@ -608,14 +641,18 @@ def main():
                     continue
                 results[name] = run_adapter(
                     argv, fx, HEAVY_TIMEOUT_SECONDS if fx.get("heavy") else ADAPTER_TIMEOUT_SECONDS)
-            for name in batch_names:
-                if fx.get("runners") and name not in fx["runners"]:
-                    continue
-                if not fx.get("browser", {}).get("runnable", True):
-                    skipped += 1
-                    continue
-                results[name] = batch_results.get(name, {}).get(
-                    fx["id"], adapter_failure(fx["id"], "no batch result"))
+            browser = fx.get("browser", {})
+            applicable_batch = [n for n in batch_names
+                                if not fx.get("runners") or n in fx["runners"]]
+            if applicable_batch and not browser.get("runnable", True):
+                # One skip per fixture, whatever the number of browser runners.
+                skipped += 1
+                browser_skips.append({"id": fx["id"], "runner": ",".join(applicable_batch),
+                                      "reason": browser.get("skip_reason", "")})
+            else:
+                for name in applicable_batch:
+                    results[name] = batch_results.get(name, {}).get(
+                        fx["id"], adapter_failure(fx["id"], "no batch result"))
 
             # A skipped result (operation unsupported by that library) is counted
             # and excluded from comparison; never folded into pass or divergence.
@@ -632,10 +669,13 @@ def main():
             for name, res in results.items():
                 rss = res.get("peak_rss_bytes")
                 rss_note = f" rss={rss >> 20}MiB" if rss is not None else ""
-                if check_expect(res, fx["expect"]):  # non-empty = failures = divergent
+                fails = check_expect(res, fx["expect"])  # non-empty = failures = divergent
+                if fails:
                     div_names.add(name)
                     cells += 1
-                    line.append(f"{name}=DIVERGENT({res.get('error_code') or res.get('outcome')}){rss_note}")
+                    label = "UNCODED" if any(f.startswith("UNCODED") for f in fails) else (
+                        res.get("error_code") or res.get("outcome"))
+                    line.append(f"{name}=DIVERGENT({label}){rss_note}")
                 elif fx.get("heavy") and rss is not None and rss > HEAVY_PEAK_RSS_LIMIT:
                     # The body went through, but the client buffered it.
                     div_names.add(name)
@@ -671,9 +711,11 @@ def main():
                 oracle.kill()
                 oracle.wait(timeout=3)
 
-    write_report(diverging, total, cells, cross_fails, skipped, list(adapters))
+    write_report(diverging, total, cells, cross_fails, skipped, list(adapters),
+                 not_run=not_run, browser_skips=browser_skips)
+    omitted = f" | not run {len(not_run)}" if not_run else ""
     print(f"\n{total} fixtures | divergent cells {cells} | cross-diff fixtures {cross_fails} | "
-          f"skipped {skipped} | report: {REPORT_HTML.relative_to(ROOT)} (+ .md, .json)")
+          f"skipped {skipped}{omitted} | report: {REPORT_HTML.relative_to(ROOT)} (+ .md, .json)")
     sys.exit(1 if diverging else 0)
 
 

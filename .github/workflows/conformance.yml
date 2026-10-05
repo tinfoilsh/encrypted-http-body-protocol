@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: ["**"]
 
+# One run per ref: a new push cancels the superseded 40-minute macOS matrix.
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
 # The cross-language matrix must run on one machine so results can be compared in
 # a single process, and Swift needs macOS, so the whole suite runs on a macOS
 # runner. It fails on every divergence or cross-diff; no known-failure allowlist

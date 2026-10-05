@@ -60,8 +60,8 @@ conformance/spec/errors.md          canonical error enum
 conformance/spec/error-mapping.md   native error -> code, per language
 conformance/schema/*.schema.json    result and fixture formats
 conformance/server/                 Go oracle server
-conformance/adapters/{go,js,py,rs,swift}/   CLI runners (public API only)
-conformance/adapters/js-browser/    Playwright page
+conformance/adapters/{go,js,python,rust,swift}/   CLI runners (public API only)
+conformance/adapters/js-browser/    Playwright page (Chromium and Firefox batch runners)
 conformance/harness/                orchestrator: run, collect, diff, report
 ```
 

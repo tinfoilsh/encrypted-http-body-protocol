@@ -94,10 +94,12 @@ func main() {
 
 	// Two auxiliary key-config endpoints on port+1 and port+2 let discovery
 	// robustness be tested without disturbing the valid config on the main port.
+	// Bind them before the main listener so /health never reports ready while
+	// a discovery fixture could still get connection refused.
 	if host, portStr, err := net.SplitHostPort(*addr); err == nil {
 		if port, err := strconv.Atoi(portStr); err == nil {
-			go serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+1)), id, "bad-ct")
-			go serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+2)), id, "non200")
+			serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+1)), id, "bad-ct")
+			serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+2)), id, "non200")
 		}
 	}
 
@@ -119,7 +121,11 @@ func serveBadConfig(addr string, id *identity.Identity, mode string) {
 		cfg, _ := id.MarshalConfig()
 		_, _ = w.Write(cfg)
 	}))
-	_ = http.ListenAndServe(addr, mux)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("oracle: auxiliary listener %s: %v", addr, err)
+	}
+	go func() { _ = http.Serve(ln, mux) }()
 }
 
 // cors allows the browser adapter (a cross-origin page) to reach the oracle and
@@ -200,12 +206,7 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 				return
 			}
 			plaintext, _ := io.ReadAll(r.Body)
-			nonce, framed, err := sealResponse(id, respCtx, plaintext)
-			if err != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, nonce, framed, http.StatusOK)
+			sealAndWrite(w, id, respCtx, plaintext)
 			return
 		}
 
@@ -227,12 +228,7 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 				http.Error(w, "request decryption failed", http.StatusBadRequest)
 				return
 			}
-			nonce, framed, err := sealResponse(id, respCtx, h.Sum(nil))
-			if err != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, nonce, framed, http.StatusOK)
+			sealAndWrite(w, id, respCtx, h.Sum(nil))
 			return
 		}
 		plaintext, err := io.ReadAll(r.Body)
@@ -254,8 +250,9 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 		case "hold":
 			// The whole request has been read; keep the response pending long
 			// enough for the client to be observed mid-flight (SPEC 6: the
-			// session recovery token must exist before any response).
-			time.Sleep(1500 * time.Millisecond)
+			// session recovery token must exist before any response). Adapters
+			// probe at 500 ms, so this is a 10x timing margin, not a handshake.
+			time.Sleep(5 * time.Second)
 			writeEncrypted(w, nonce, framed, http.StatusOK)
 		case "empty_encrypted":
 			// A valid encrypted response with a nonce but zero frames; the client
@@ -281,11 +278,18 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(framed)
-		case "truncate_final_frame":
-			writeEncrypted(w, nonce, framed[:len(framed)-1], http.StatusOK)
-		case "tamper_tag":
+		case "truncate_final_frame", "tamper_tag":
+			if len(framed) == 0 {
+				// An empty plaintext seals to zero frames; nothing to mutate.
+				http.Error(w, "scenario needs a non-empty request body", http.StatusBadRequest)
+				return
+			}
 			bad := append([]byte(nil), framed...)
-			bad[len(bad)-1] ^= 0x01
+			if name == "truncate_final_frame" {
+				bad = bad[:len(bad)-1]
+			} else {
+				bad[len(bad)-1] ^= 0x01
+			}
 			writeEncrypted(w, nonce, bad, http.StatusOK)
 		case "wrong_nonce":
 			badNonce, _ := hex.DecodeString(nonce)
@@ -317,6 +321,17 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 // sealResponse derives a correct EHBP response for the request context and
 // returns its nonce header value and framed ciphertext, using only the public
 // identity API via an in-memory recorder.
+// sealAndWrite seals body for the request's context and writes it as a 200
+// encrypted response; the one place a plain echo is finalised.
+func sealAndWrite(w http.ResponseWriter, id *identity.Identity, respCtx *identity.ResponseContext, body []byte) {
+	nonce, framed, err := sealResponse(id, respCtx, body)
+	if err != nil {
+		http.Error(w, "response setup failed", http.StatusInternalServerError)
+		return
+	}
+	writeEncrypted(w, nonce, framed, http.StatusOK)
+}
+
 func sealResponse(id *identity.Identity, respCtx *identity.ResponseContext, body []byte) (string, []byte, error) {
 	rec := httptest.NewRecorder()
 	dw, err := id.SetupDerivedResponseEncryption(rec, respCtx)

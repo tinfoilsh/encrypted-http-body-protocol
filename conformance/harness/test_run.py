@@ -97,12 +97,14 @@ class FixturePolicyTests(unittest.TestCase):
 
     def test_duplicate_fixture_ids_are_rejected(self):
         old_dir = harness.FIXTURE_DIR
-        with tempfile.TemporaryDirectory() as temp:
-            harness.FIXTURE_DIR = Path(temp)
-            (Path(temp) / "fixtures.json").write_text(json.dumps([fixture(), fixture()]))
-            with self.assertRaisesRegex(ValueError, "duplicate fixture id"):
-                harness.load_fixtures()
-        harness.FIXTURE_DIR = old_dir
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                harness.FIXTURE_DIR = Path(temp)
+                (Path(temp) / "fixtures.json").write_text(json.dumps([fixture(), fixture()]))
+                with self.assertRaisesRegex(ValueError, "duplicate fixture id"):
+                    harness.load_fixtures()
+        finally:
+            harness.FIXTURE_DIR = old_dir
 
     def test_skip_requires_exact_fixture_authorization(self):
         value = fixture()

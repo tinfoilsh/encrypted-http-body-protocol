@@ -12,7 +12,7 @@ does produce; the mismatch is a fix target, not grounds to relax the fixture.
 | --- | --- | --- | --- |
 | `INVALID_KEY_CONFIG` | client | 3.1, 3.2 | Config unparseable: truncated, bad public key, no suites, or wrong discovery content type / status. |
 | `UNSUPPORTED_SUITE` | client | 3.2 | Config advertises a KEM/KDF/AEAD other than X25519-HKDF-SHA256 / HKDF-SHA256 / AES-256-GCM. |
-| `INVALID_ENCAPSULATED_KEY` | server | 4.1, 5.4.1 | Request `Ehbp-Encapsulated-Key` missing, not hex, or wrong length. |
+| `INVALID_ENCAPSULATED_KEY` | server | 4.1, 4.2, 5.4.1 | Request `Ehbp-Encapsulated-Key` missing, duplicated, not hex, or wrong length. |
 | `HPKE_SETUP_FAILED` | both | 5.4.1 | HPKE setup or decapsulation failed. |
 | `MISSING_RESPONSE_NONCE` | client | 4.2, 5.3 | `Ehbp-Response-Nonce` absent on a 2xx to an encrypted request. |
 | `INVALID_RESPONSE_NONCE` | client | 4.2 | `Ehbp-Response-Nonce` not hex or not 32 bytes. |
@@ -43,6 +43,15 @@ are `<CODE>: <detail>`; the detail is diagnostic and not asserted.
 Names are the code in each language's casing; acronyms follow the language
 (`HPKESetupFailedError` in Python, `HpkeSetupFailedError` in JavaScript).
 
+## Coded messages
+
+Every SDK prefixes an error's message with its canonical code (`CODE: detail`,
+SPEC 5.5). The harness enforces this on every `error` result: a `native_error`
+that does not start with `error_code` followed by `:` marks the cell divergent
+with the label `UNCODED`. That is the signature of an error the library raised
+uncoded and the adapter's `INVALID_INPUT` fallback masked, so it can never pass
+by coincidence.
+
 ## Fail-closed
 
 For any error code, `plaintext_emitted_before_error` MUST be `false` and
@@ -52,8 +61,11 @@ as a decrypted body.
 
 Authenticated plaintext from a complete earlier frame may be reported before a
 later framing/authentication error only when the fixture explicitly says so.
-Server middleware fixtures are stricter: application code must not run when an
-unconsumed trailing request frame is unauthenticated.
+Server middleware fixtures follow the same per-chunk rule (SPEC 4.3, 5.2): the
+server releases each request chunk to the application as it authenticates, so a
+tampered trailing frame fails inside the handler's read. The fixture states the
+authenticated prefix that was delivered; nothing from the failing frame or after
+it may be.
 
 ## Granularity
 
