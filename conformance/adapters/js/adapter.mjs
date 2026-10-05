@@ -67,6 +67,8 @@ async function run(fx, res) {
       res.body_hex = bytesToHex(await id.marshalConfig());
       return;
     }
+    case 'large_body':
+      return largeBody(fx, res);
     case 'request':
       return doRequest(fx, res);
     case 'discover':
@@ -134,6 +136,29 @@ async function doRequest(fx, res) {
   const noNonce = !(res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()];
   res.body_hex = await drain(response.body, res);
   res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);
+}
+
+// Streams a multi-GiB patterned body (1 MiB block, block[i] = (i + seed) & 0xff)
+// through the transport to the oracle's digest route; peak RSS shows buffering.
+async function largeBody(fx, res) {
+  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const transport = await createTransport(base);
+  const { size_bytes: size, block_seed: seed } = fx.inputs;
+  const block = new Uint8Array(1 << 20);
+  for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
+  let remaining = size;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) { controller.close(); return; }
+      const n = Math.min(remaining, block.length);
+      controller.enqueue(block.subarray(0, n));
+      remaining -= n;
+    },
+  });
+  const response = await transport.request(base + fx.request.path, { method: fx.request.method, body, duplex: 'half' });
+  res.status = response.status;
+  res.body_hex = await drain(response.body, res);
+  res.peak_rss_bytes = process.resourceUsage().maxRSS * 1024;
 }
 
 function mapError(op, err) {
