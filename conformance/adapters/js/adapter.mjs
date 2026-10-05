@@ -45,7 +45,7 @@ async function run(fx, res) {
       return;
     }
     case 'compute_nonce': {
-      const seq = Number.parseInt(ins.seqHex, 16);
+      const seq = BigInt(`0x${ins.seqHex}`);
       res.body_hex = bytesToHex(computeNonce(hb(ins.nonceBase), seq));
       return;
     }
