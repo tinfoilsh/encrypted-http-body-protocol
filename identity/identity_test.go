@@ -219,6 +219,30 @@ func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
 	}
 }
 
+func TestUnmarshalPublicConfigRejectsUnpinnedSuite(t *testing.T) {
+	id, err := NewIdentity()
+	require.NoError(t, err)
+	config, err := id.MarshalConfig()
+	require.NoError(t, err)
+	// layout: id(1) kem(2) pk(32) suites_len(2) kdf(2) aead(2)
+	cases := map[string]struct {
+		offset int
+		value  byte
+	}{
+		"P-256 KEM":     {2, 0x10},
+		"HKDF-SHA512":   {38, 0x03},
+		"ChaCha20 AEAD": {40, 0x03},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			data := append([]byte(nil), config...)
+			data[tc.offset] = tc.value
+			_, err := UnmarshalPublicConfig(data)
+			assert.Equal(t, protocol.UnsupportedSuite, protocol.CodeOf(err))
+		})
+	}
+}
+
 func TestFromPublicKeyHex(t *testing.T) {
 	original, err := NewIdentity()
 	require.NoError(t, err)

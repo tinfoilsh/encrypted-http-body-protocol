@@ -199,6 +199,11 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
 	}
 
+	// SPEC 3.2 defines a single suite; a config advertising any other KEM,
+	// KDF, or AEAD is unsupported, not negotiable (matches Python/Rust/Swift).
+	if kemID != 0x0020 {
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported KEM: 0x%04x", kemID)
+	}
 	kem, err := hpke.NewKEM(kemID)
 	if err != nil {
 		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KEM: %w", err)
@@ -251,6 +256,10 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 
 	if len(suites) == 0 {
 		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "no cipher suites found in config")
+	}
+	if suites[0].kdf.ID() != 0x0001 || suites[0].aead.ID() != 0x0002 {
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported cipher suite: KDF=0x%04x, AEAD=0x%04x",
+			suites[0].kdf.ID(), suites[0].aead.ID())
 	}
 
 	return &Identity{
