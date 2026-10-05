@@ -63,10 +63,7 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let urlString = baseURL + path
-        guard let url = URL(string: urlString) else {
-            throw EHBPError(.invalidInput, "invalid URL: \(urlString)")
-        }
+        let url = try resolveURL(path)
         let generation = beginRequest()
 
         var request = URLRequest(url: url)
@@ -132,10 +129,7 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let urlString = baseURL + path
-        guard let url = URL(string: urlString) else {
-            throw EHBPError(.invalidInput, "invalid URL: \(urlString)")
-        }
+        let url = try resolveURL(path)
         let generation = beginRequest()
 
         var request = URLRequest(url: url)
@@ -210,6 +204,31 @@ public final class EHBPClient: @unchecked Sendable {
         })
 
         return (stream, EHBPClient.sanitizedResponse(httpResponse))
+    }
+
+    /// Resolves `path` against the configured base URL (RFC 3986) and refuses
+    /// anything that would change the authority: a different origin, or
+    /// userinfo in either the base or the path. String concatenation let a
+    /// path like `@attacker.invalid/x` turn the configured host into userinfo.
+    func resolveURL(_ path: String) throws -> URL {
+        guard let base = URLComponents(string: baseURL),
+              let scheme = base.scheme, let host = base.host,
+              base.user == nil, base.password == nil else {
+            throw EHBPError(.invalidInput, "base URL must be an origin without credentials: \(baseURL)")
+        }
+        guard let url = URL(string: path, relativeTo: base.url)?.absoluteURL,
+              let resolved = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw EHBPError(.invalidInput, "invalid URL: \(path)")
+        }
+        guard resolved.user == nil, resolved.password == nil else {
+            throw EHBPError(.invalidInput, "request URL must not include credentials")
+        }
+        guard resolved.scheme?.lowercased() == scheme.lowercased(),
+              resolved.host?.lowercased() == host.lowercased(),
+              resolved.port == base.port else {
+            throw EHBPError(.invalidInput, "request URL must use the configured origin: \(scheme)://\(host)")
+        }
+        return url
     }
 
     private func beginRequest() -> UInt64 {
