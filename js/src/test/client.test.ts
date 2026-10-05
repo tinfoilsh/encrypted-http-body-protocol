@@ -718,11 +718,22 @@ describe('Transport', () => {
     // Force the browser path: canStreamUpload() keys off process.versions.node.
     const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
     Object.defineProperty(process, 'versions', { value: {}, configurable: true });
+    // Observe the fallback itself: it must build exactly one Blob from the
+    // frame parts, not a stream and not a second body-sized buffer.
+    const RealBlob = globalThis.Blob;
+    const blobs: number[] = [];
+    globalThis.Blob = class extends RealBlob {
+      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+        super(parts, options);
+        blobs.push(parts?.length ?? 0);
+      }
+    } as typeof Blob;
     try {
       const original = new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
       const request = new Request('https://server.test/upload', { method: 'POST', body: original });
       const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
       assert(context);
+      assert.deepStrictEqual(blobs, [4], 'one Blob built from the four frame parts');
       const body = new Uint8Array(await encrypted.arrayBuffer());
 
       const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
@@ -739,6 +750,7 @@ describe('Transport', () => {
       assert.strictEqual(frames, 4);
       assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
     } finally {
+      globalThis.Blob = RealBlob;
       Object.defineProperty(process, 'versions', versions);
     }
   });

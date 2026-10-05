@@ -323,7 +323,8 @@ def test_large_bytes_body_is_sent_as_multiple_frames(server: MockServer):
     assert frames == 4
 
 
-def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
+def _install_seal_counter(monkeypatch):
+    """Record the plaintext length of every frame sealed; returns the list."""
     import ehbp.identity as identity_module
 
     seals = []
@@ -334,6 +335,11 @@ def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
         return original(sender, plaintext)
 
     monkeypatch.setattr(identity_module, "_seal", counting_seal)
+    return seals
+
+
+def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
+    seals = _install_seal_counter(monkeypatch)
     seen_at_wire = []
 
     class Inner(httpx.BaseTransport):
@@ -361,16 +367,7 @@ def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
 
 
 def test_oversized_chunk_is_sliced_into_frames(server: MockServer, monkeypatch):
-    import ehbp.identity as identity_module
-
-    seals = []
-    original = identity_module._seal
-
-    def counting_seal(sender, plaintext):
-        seals.append(len(plaintext))
-        return original(sender, plaintext)
-
-    monkeypatch.setattr(identity_module, "_seal", counting_seal)
+    seals = _install_seal_counter(monkeypatch)
     one_mib = b"\x5a" * (1024 * 1024)
     client = server.make_client()
     assert client.post("/v1/echo", body=iter([one_mib])).content == b"echo:" + one_mib

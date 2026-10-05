@@ -324,15 +324,19 @@ public final class EHBPClient: @unchecked Sendable {
                 request.httpBody = encryptedBody
             }
         case .source(let next):
+            // Set up the throwing cryptographic state before touching the
+            // caller's (possibly non-rewindable) source, so a setup failure
+            // never costs it a chunk. The token therefore exists before any
+            // byte is read or sent (SPEC 6).
+            let encryptor = try identity.makeRequestEncryptor()
+            let candidate = try extractSessionRecoveryToken(context: encryptor.context)
             // A source that yields no bytes is a bodyless request: same path as
-            // `.data(nil)`, no HPKE context and no encapsulated-key header.
+            // `.data(nil)`, the unused context is dropped and no header is sent.
             var first = try next()
             while let chunk = first, chunk.isEmpty { first = try next() }
             if let first {
-                let encryptor = try identity.makeRequestEncryptor()
                 requestContext = encryptor.context
-                // The token exists before a single byte is read or sent (SPEC 6).
-                token = try extractSessionRecoveryToken(context: encryptor.context)
+                token = candidate
                 spool = try EHBPClient.spoolEncrypted(first: first, then: next, with: encryptor)
                 request.httpBodyStream = InputStream(url: spool!)
             }

@@ -22,6 +22,47 @@ final class StreamingRequestTests: XCTestCase {
         return frames
     }
 
+    /// Client whose session is routed through StubURLProtocol.
+    private func makeClient(publicKey: Data) throws -> EHBPClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubURLProtocol.self]
+        return try EHBPClient(baseURL: "https://server.test", publicKey: publicKey,
+                              session: URLSession(configuration: configuration))
+    }
+
+    /// Reads the request's httpBodyStream to EOF, as the stub server would.
+    private func drainBodyStream(_ request: URLRequest) -> Data {
+        var uploaded = Data()
+        guard let stream = request.httpBodyStream else { return uploaded }
+        stream.open()
+        var buf = [UInt8](repeating: 0, count: 1 << 16)
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buf, maxLength: buf.count)
+            if n <= 0 { break }
+            uploaded.append(buf, count: n)
+        }
+        stream.close()
+        return uploaded
+    }
+
+    /// What the stub server saw: the encapsulated key and the uploaded bytes.
+    private final class Capture: @unchecked Sendable {
+        var uploaded = Data()
+        var enc = Data()
+    }
+
+    /// Stub handler that records the upload and answers a nonce-less 502
+    /// (passed through, so no response encryption is needed).
+    private func captureUpload() -> Capture {
+        let capture = Capture()
+        StubURLProtocol.handler = { [self] request in
+            capture.enc = Data(hexString: request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader) ?? "") ?? Data()
+            capture.uploaded = drainBodyStream(request)
+            return (HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: [:])!, Data())
+        }
+        return capture
+    }
+
     func testLargeBodySplitsIntoFramesTheServerCanOpenInOrder() throws {
         let serverKey = Curve25519.KeyAgreement.PrivateKey()
         let identity = try Identity(publicKeyBytes: Data(serverKey.publicKey.rawRepresentation))
@@ -36,13 +77,7 @@ final class StreamingRequestTests: XCTestCase {
     }
 
     func testEmptyBodySourceIsBodyless() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let client = try EHBPClient(
-            baseURL: "https://server.test",
-            publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation),
-            session: URLSession(configuration: configuration)
-        )
+        let client = try makeClient(publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation))
         defer { StubURLProtocol.handler = nil }
 
         var sawEncapsulatedKey: String?
@@ -67,31 +102,10 @@ final class StreamingRequestTests: XCTestCase {
 
     func testOversizedPullIsSpooledOneFrameAtATime() async throws {
         let serverKey = Curve25519.KeyAgreement.PrivateKey()
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let client = try EHBPClient(
-            baseURL: "https://server.test",
-            publicKey: Data(serverKey.publicKey.rawRepresentation),
-            session: URLSession(configuration: configuration)
-        )
+        let client = try makeClient(publicKey: Data(serverKey.publicKey.rawRepresentation))
         defer { StubURLProtocol.handler = nil }
 
-        var uploaded = Data()
-        var enc = Data()
-        StubURLProtocol.handler = { request in
-            enc = Data(hexString: request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader) ?? "") ?? Data()
-            if let stream = request.httpBodyStream {
-                stream.open()
-                var buf = [UInt8](repeating: 0, count: 1 << 16)
-                while stream.hasBytesAvailable {
-                    let n = stream.read(&buf, maxLength: buf.count)
-                    if n <= 0 { break }
-                    uploaded.append(buf, count: n)
-                }
-                stream.close()
-            }
-            return (HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: [:])!, Data())
-        }
+        let capture = captureUpload()
 
         // One 1 MiB pull must still go out as 16 frames of at most 64 KiB.
         var pulled = false
@@ -101,7 +115,7 @@ final class StreamingRequestTests: XCTestCase {
             return pulled ? nil : body
         })
 
-        let frames = try openFrames(uploaded, privateKey: serverKey, enc: enc)
+        let frames = try openFrames(capture.uploaded, privateKey: serverKey, enc: capture.enc)
         XCTAssertEqual(frames.count, 16)
         XCTAssertTrue(frames.allSatisfy { $0.count <= RequestEncryptor.frameSize })
         XCTAssertEqual(frames.reduce(Data(), +), body)
@@ -109,33 +123,10 @@ final class StreamingRequestTests: XCTestCase {
 
     func testBodySourceIsEncryptedIncrementallyAndUploaded() async throws {
         let serverKey = Curve25519.KeyAgreement.PrivateKey()
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StubURLProtocol.self]
-        let client = try EHBPClient(
-            baseURL: "https://server.test",
-            publicKey: Data(serverKey.publicKey.rawRepresentation),
-            session: URLSession(configuration: configuration)
-        )
+        let client = try makeClient(publicKey: Data(serverKey.publicKey.rawRepresentation))
         defer { StubURLProtocol.handler = nil }
 
-        var uploaded = Data()
-        var enc = Data()
-        StubURLProtocol.handler = { request in
-            enc = Data(hexString: request.value(forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader) ?? "") ?? Data()
-            if let stream = request.httpBodyStream {
-                stream.open()
-                var buf = [UInt8](repeating: 0, count: 1 << 16)
-                while stream.hasBytesAvailable {
-                    let n = stream.read(&buf, maxLength: buf.count)
-                    if n <= 0 { break }
-                    uploaded.append(buf, count: n)
-                }
-                stream.close()
-            }
-            // A 502 without a nonce passes through, so no response encryption is needed.
-            let response = HTTPURLResponse(url: request.url!, statusCode: 502, httpVersion: nil, headerFields: [:])!
-            return (response, Data())
-        }
+        let capture = captureUpload()
 
         // 3 pulls of 100 KiB, then EOF: the source is consumed chunk by chunk.
         var pulls = 0
@@ -147,7 +138,7 @@ final class StreamingRequestTests: XCTestCase {
 
         XCTAssertEqual(response.statusCode, 502)
         XCTAssertEqual(pulls, 4)
-        let frames = try openFrames(uploaded, privateKey: serverKey, enc: enc)
+        let frames = try openFrames(capture.uploaded, privateKey: serverKey, enc: capture.enc)
         XCTAssertEqual(frames.reduce(Data(), +), chunk + chunk + chunk)
         XCTAssertTrue(frames.allSatisfy { $0.count <= RequestEncryptor.frameSize })
         // No token assertion: a nonce-less 502 pass-through consumes the token
