@@ -114,6 +114,9 @@ describe('computeNonce', () => {
     assert.strictEqual(bytesToHex(nonce), '000000000102030405060708');
     assert.throws(() => computeNonce(nonceBase, 1n << 64n), SequenceOverflowError);
     assert.throws(() => computeNonce(nonceBase, 2 ** 53), InvalidInputError);
+    // BigInt() would coerce these to 1n; they must be rejected, not aliased to seq 1.
+    assert.throws(() => computeNonce(nonceBase, '1' as unknown as number), InvalidInputError);
+    assert.throws(() => computeNonce(nonceBase, true as unknown as number), InvalidInputError);
   });
 });
 

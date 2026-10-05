@@ -97,6 +97,11 @@ export function computeNonce(nonceBase: Uint8Array, seq: number | bigint): Uint8
     throw new InvalidInputError(`nonce base must be ${AES_GCM_NONCE_LENGTH} bytes`);
   }
 
+  // BigInt() coerces strings and booleans, so check the runtime type first;
+  // an untyped caller passing "1" must not reuse the nonce for sequence 1.
+  if (typeof seq !== 'number' && typeof seq !== 'bigint') {
+    throw new InvalidInputError(`sequence number must be a number or bigint: got ${typeof seq}`);
+  }
   // Numbers above 2^53 are lossy; callers that far along must pass a bigint.
   if (typeof seq === 'number' && !Number.isSafeInteger(seq)) {
     throw new InvalidInputError(`sequence number must be a safe integer or bigint: got ${seq}`);
