@@ -237,15 +237,10 @@ public final class Identity: Sendable {
     /// Large bodies produce several frames; see `makeRequestEncryptor()` for
     /// the incremental form.
     public func encryptRequest(body: Data) throws -> (encryptedBody: Data, context: RequestContext) {
+        // seal() splits into 64 KiB frames and emits a tag-only frame for an
+        // empty body, preserving the pre-streaming output for Data().
         let encryptor = try makeRequestEncryptor()
-        var framed = Data()
-        var offset = 0
-        while offset < body.count {
-            let end = min(offset + RequestEncryptor.frameSize, body.count)
-            framed.append(try encryptor.seal(body[offset..<end]))
-            offset = end
-        }
-        return (framed, encryptor.context)
+        return (try encryptor.seal(body), encryptor.context)
     }
 
     /// Sets up the HPKE sender once; each `seal` call then yields one framed
