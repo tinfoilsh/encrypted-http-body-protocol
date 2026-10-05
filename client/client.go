@@ -321,6 +321,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// authenticated data.
 	newReq.RequestURI = ""
 
+	// req.Host, not req.URL.Host, is what Go sends as the wire Host header,
+	// so a caller (or a reverse proxy forwarding its inbound Host) could
+	// address another virtual host while the URL passes the origin check.
+	// Clear it so the Host header always follows the validated URL, as the
+	// Python and Rust clients do.
+	newReq.Host = ""
+
 	// Encrypt request to server's public key and get context for response decryption
 	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
 	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)

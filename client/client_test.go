@@ -429,6 +429,29 @@ func (r *firstResponseCorruptingRoundTripper) RoundTrip(req *http.Request) (*htt
 	return resp, nil
 }
 
+func TestTransportHostHeaderFollowsURL(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	cfg, err := serverIdentity.MarshalConfig()
+	assert.NoError(t, err)
+
+	var wireHost string
+	recorder := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		wireHost = req.Host
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	transport, err := NewTransportWithConfig("http://configured.example", cfg,
+		WithHTTPClient(&http.Client{Transport: recorder}))
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", "http://configured.example/probe", strings.NewReader("x"))
+	assert.NoError(t, err)
+	req.Host = "attacker.invalid"
+	_, _ = transport.RoundTrip(req)
+	// An empty Host makes net/http derive it from the URL.
+	assert.Equal(t, "", wireHost)
+}
+
 func TestTransportRejectsRequestsThatEscapeTheOrigin(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
