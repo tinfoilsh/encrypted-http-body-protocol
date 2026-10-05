@@ -174,11 +174,6 @@ func sameOrigin(a, b *url.URL) bool {
 		portOf(a) == portOf(b)
 }
 
-// validateRequest rejects requests that would let the caller influence the
-// authority or the protocol headers the library owns. Content-Length,
-// Transfer-Encoding, and Host entries in req.Header never reach the wire in
-// Go's client (the transport derives them from the request itself), so only
-// the Ehbp-* headers are reserved here.
 // setToken publishes (or clears, with nil) the token for generation unless a
 // newer request has since started.
 func (t *Transport) setToken(generation uint64, token *identity.SessionRecoveryToken) {
@@ -189,6 +184,11 @@ func (t *Transport) setToken(generation uint64, token *identity.SessionRecoveryT
 	t.mu.Unlock()
 }
 
+// validateRequest rejects requests that would let the caller influence the
+// authority or the protocol headers the library owns. Content-Length,
+// Transfer-Encoding, and Host entries in req.Header never reach the wire in
+// Go's client (the transport derives them from the request itself), so only
+// the Ehbp-* headers are reserved here.
 func (t *Transport) validateRequest(req *http.Request) error {
 	if req.URL == nil {
 		return protocol.Errorf(protocol.InvalidInput, "request has no URL")

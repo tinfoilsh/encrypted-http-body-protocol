@@ -177,24 +177,33 @@ public final class EHBPClient: @unchecked Sendable {
         }
         var iterator = asyncBytes.makeAsyncIterator()
         var prefetched = Data()
-        if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
-            // Read the (small) problem body so it can be classified; anything
-            // over the limit is not a problem document and passes through.
-            while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
-                  let byte = try await iterator.next() {
-                prefetched.append(byte)
+        // Any failure before the decryptor owns the token (problem-body read,
+        // key-config mismatch, invalid or missing nonce) ends the exchange
+        // unauthenticated: cancel the transfer and consume the token.
+        let responseNonceHex: String?
+        do {
+            if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
+                // Read the (small) problem body so it can be classified; anything
+                // over the limit is not a problem document and passes through.
+                while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
+                      let byte = try await iterator.next() {
+                    prefetched.append(byte)
+                }
+                if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: prefetched) {
+                    throw mismatch
+                }
             }
-            if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: prefetched) {
-                asyncBytes.task.cancel()
-                clearToken(for: generation)
-                throw mismatch
-            }
+            responseNonceHex = try EHBPClient.responseNonceHex(
+                from: httpResponse,
+                requestWasEncrypted: requestContext != nil
+            )
+        } catch {
+            asyncBytes.task.cancel()
+            clearToken(for: generation)
+            throw error
         }
 
-        guard let responseNonceHex = try EHBPClient.responseNonceHex(
-            from: httpResponse,
-            requestWasEncrypted: requestContext != nil
-        ) else {
+        guard let responseNonceHex else {
             // A nonce-less pass-through consumes the token (SPEC 5.1).
             clearToken(for: generation)
             let chunker = PullDrivenByteChunker(
