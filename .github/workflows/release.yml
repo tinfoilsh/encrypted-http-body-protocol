@@ -4,12 +4,24 @@ on:
   push:
     tags:
       - "v*"
+  # Re-publish to PyPI for a tag that already exists, using the workflow
+  # as it is on the branch this is dispatched from rather than the
+  # revision frozen into the tag. Only the PyPI jobs run on this path:
+  # npm rejects republishing an existing version and the GitHub release
+  # already exists.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish to PyPI (e.g. v0.3.3)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   release-npm:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,6 +59,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -84,9 +97,10 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   create-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write

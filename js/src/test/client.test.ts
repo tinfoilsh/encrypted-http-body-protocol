@@ -8,8 +8,8 @@ import {
   MissingResponseNonceError,
 } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
-import { CipherSuite } from 'hpke';
-import { KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
+import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
+import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
 import {
   bytesToHex,
   deriveResponseKeys,

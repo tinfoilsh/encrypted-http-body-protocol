@@ -10,10 +10,13 @@
  *   aead_nonce = Expand(prk, "nonce", Nn)
  */
 
-import { type KDF, type AEAD } from 'hpke';
-import { KDF_HKDF_SHA256, AEAD_AES_256_GCM } from '@panva/hpke-noble';
+import { type KDF, type AEAD, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
 import { InvalidInputError } from './errors.js';
 
+// Response bodies are decrypted chunk by chunk on the client, so the AEAD is
+// the hot path. The Web Cryptography implementations run at native speed in
+// every runtime, whereas the pure-JavaScript @noble variants depend on the
+// JIT; browsers that disable it (Vanadium) decrypt ~40x slower.
 const kdf: KDF = KDF_HKDF_SHA256();
 const aead: AEAD = AEAD_AES_256_GCM();
 
