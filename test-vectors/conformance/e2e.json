@@ -145,7 +145,37 @@
     "browser": {
       "runnable": false,
       "skip_reason": "browser-coalesces-duplicate-headers"
-    }
+    },
+    "runners": [
+      "go",
+      "python",
+      "rust"
+    ]
+  },
+  {
+    "id": "e2e-duplicate-nonce-coalesced",
+    "description": "fetch and URLSession coalesce repeated headers; the merged value is not valid hex of the required length and is rejected as malformed (SPEC 4.2).",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "duplicate_nonce",
+    "request": {
+      "method": "POST",
+      "path": "/s/duplicate_nonce",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "browser-coalesces-duplicate-headers"
+    },
+    "runners": [
+      "js",
+      "swift"
+    ]
   },
   {
     "id": "e2e-tampered-tag",

@@ -87,9 +87,8 @@ func hardeningOp(_ operation: String) async throws {
     var path = "/probe"
     var headers = [String: String]()
     if operation == "reject_cross_origin" {
-        // String concatenation turns this into
-        // http://configured.example@attacker.invalid/probe.
-        path = "@attacker.invalid/probe"
+        // Same absolute cross-origin target the Python and Rust adapters use.
+        path = "http://other.example/probe"
     } else if operation == "reject_url_credentials" {
         base = "http://user:pass@configured.example"
     } else {
