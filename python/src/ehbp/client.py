@@ -29,9 +29,6 @@ from ._http import (
 from ._http import (
     response_nonce_for_status as _response_nonce_for_status,
 )
-from ._http import (
-    single_chunk_body as _single_chunk_body,
-)
 from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
 from .identity import REQUEST_FRAME_SIZE, ServerIdentity
 from .protocol import (
@@ -350,13 +347,16 @@ class Client:
     def _encrypt(
         self, source: Union[bytes, Iterable[bytes]]
     ) -> Optional[tuple[bytes, SessionRecoveryToken, Iterator[bytes]]]:
-        """Return (encapsulated_key, token, framed content iterator), or None for bodyless."""
+        """Return (encapsulated_key, token, framed content iterator), or None for bodyless.
+
+        bytes go through the same lazy path as iterables, so the encrypted copy
+        is produced one frame at a time rather than materialised up front.
+        """
         if isinstance(source, bytes):
-            encrypted = self._identity.encrypt_request_body(source)
-            if encrypted is None:
-                return None
-            return encrypted.encapsulated_key, encrypted.token, _single_chunk_body(encrypted.body)
+            source = (source,)
         stream = self._identity.encrypt_request_stream(source)
+        if stream is None:
+            return None
         return stream.encapsulated_key, stream.token, stream.frames  # type: ignore[return-value]
 
     def _prepare_headers(self, headers: HeadersInput) -> httpx.Headers:

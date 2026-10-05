@@ -33,16 +33,30 @@ from .session import SessionRecoveryToken
 _FRAMING_HEADERS = ("content-length", "transfer-encoding")
 
 
-def _is_bodyless(request: httpx.Request) -> bool:
-    """Bodyless requests pass through unencrypted (SPEC 7.4).
+def _declared_bodyless(request: httpx.Request) -> bool:
+    """Fast path only: an explicit Content-Length of 0 carries no body.
 
-    httpx sets Content-Length for buffered content and Transfer-Encoding for
-    streamed content; a request with neither carries no payload body. The
-    body is deliberately not read here so streamed uploads stay streamed.
+    Anything else is decided by reading the stream itself (see the transports),
+    never from absent framing headers: a low-level ``httpx.Request(stream=...)``
+    may carry bytes with neither Content-Length nor Transfer-Encoding, and must
+    never be forwarded in plaintext.
     """
-    if request.headers.get("content-length") == "0":
-        return True
-    return "content-length" not in request.headers and "transfer-encoding" not in request.headers
+    return request.headers.get("content-length") == "0"
+
+
+def _bodyless_passthrough(request: httpx.Request) -> httpx.Request:
+    """The same request with an empty body, for a stream that yielded nothing."""
+    headers = httpx.Headers(request.headers)
+    for name in _FRAMING_HEADERS:
+        if name in headers:
+            del headers[name]
+    return httpx.Request(
+        method=request.method,
+        url=request.url,
+        headers=headers,
+        content=b"",
+        extensions=request.extensions,
+    )
 
 
 def _read_capped(stream: httpx.SyncByteStream, max_bytes: int) -> bytes:
@@ -165,11 +179,13 @@ class EHBPTransport(httpx.BaseTransport):
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if _is_bodyless(request):
+        if _declared_bodyless(request):
             return self._inner.handle_request(request)
         encrypted = self._identity.encrypt_request_stream(
             cast(httpx.SyncByteStream, request.stream)
         )
+        if encrypted is None:
+            return self._inner.handle_request(_bodyless_passthrough(request))
 
         enc_request = httpx.Request(
             method=request.method,
@@ -240,11 +256,13 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if _is_bodyless(request):
+        if _declared_bodyless(request):
             return await self._inner.handle_async_request(request)
-        encrypted = self._identity.encrypt_request_stream_async(
+        encrypted = await self._identity.encrypt_request_stream_async(
             cast(httpx.AsyncByteStream, request.stream)
         )
+        if encrypted is None:
+            return await self._inner.handle_async_request(_bodyless_passthrough(request))
 
         enc_request = httpx.Request(
             method=request.method,

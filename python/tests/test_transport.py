@@ -8,6 +8,7 @@ import pytest
 from conftest import MockServer
 from ehbp import AsyncEHBPTransport, EHBPTransport
 from ehbp.errors import ChunkTooLargeError, KeyConfigMismatchError, MissingResponseNonceError
+from ehbp.identity import REQUEST_FRAME_SIZE
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER
 
 URL = "https://server.example/v1/echo"
@@ -229,16 +230,88 @@ def test_async_encrypted_request_preserves_extensions(server: MockServer):
     assert "timeout" in server.last_request.extensions
 
 
+class _StreamingInner(httpx.BaseTransport):
+    """Forwards to the mock server but records how many source chunks had been
+    pulled when each encrypted chunk reached the wire, so a transport that
+    buffers the whole upload first is caught."""
+
+    def __init__(self, server: MockServer, pulled: list) -> None:
+        self._server = server
+        self._pulled = pulled
+        self.pulled_at_wire: list = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.wire_headers = request.headers
+        body = bytearray()
+        for chunk in request.stream:
+            self.pulled_at_wire.append(len(self._pulled))
+            body += chunk
+        headers = httpx.Headers(request.headers)
+        del headers["transfer-encoding"]
+        return self._server.handler(
+            httpx.Request(request.method, request.url, headers=headers, content=bytes(body))
+        )
+
+
 def test_streamed_request_body_is_encrypted_frame_by_frame(server: MockServer):
+    pulled = []
+    # Frame-sized parts: each pull completes a frame, so the first frame can
+    # leave before the next part is pulled.
+    parts = [bytes([i]) * REQUEST_FRAME_SIZE for i in (1, 2, 3)]
+
     def source():
-        yield b"part one, "
-        yield b"part two"
+        for part in parts:
+            pulled.append(part)
+            yield part
+
+    inner = _StreamingInner(server, pulled)
+    transport = EHBPTransport.from_public_key_hex(server.public_key_bytes.hex(), inner=inner)
+    with httpx.Client(transport=transport) as client:
+        response = client.post(URL, content=source())
+    assert response.content == b"echo:" + b"".join(parts)
+    # Streamed content goes out chunked; the transport never buffers it.
+    assert "content-length" not in inner.wire_headers
+    # The first encrypted chunk reached the wire before the source was exhausted.
+    assert inner.pulled_at_wire, "no encrypted chunks were streamed"
+    assert inner.pulled_at_wire[0] < len(pulled)
+
+
+def test_headerless_stream_request_is_encrypted_not_passed_through(server: MockServer):
+    class RawStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"secret"
 
     with _sync_client(server) as client:
-        response = client.post(URL, content=source())
-    assert response.content == b"echo:part one, part two"
-    # Streamed content goes out chunked; the transport never buffers it.
-    assert "content-length" not in server.last_request.headers
+        # A low-level Request(stream=...) carries neither Content-Length nor
+        # Transfer-Encoding; the body must still be encrypted.
+        request = httpx.Request("POST", URL, stream=RawStream())
+        response = client.send(request)
+    assert response.content == b"echo:secret"
+    assert ENCAPSULATED_KEY_HEADER in server.last_request.headers
+
+
+def test_empty_stream_request_passes_through_bodyless(server: MockServer):
+    class EmptyStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b""
+
+    with _sync_client(server) as client:
+        response = client.send(httpx.Request("POST", URL, stream=EmptyStream()))
+    assert response.content == b"plaintext ok"
+    assert ENCAPSULATED_KEY_HEADER not in server.last_request.headers
+
+
+def test_async_empty_stream_request_passes_through_bodyless(server: MockServer):
+    async def source():
+        yield b""
+
+    async def run() -> httpx.Response:
+        async with _async_client(server) as client:
+            return await client.post(URL, content=source())
+
+    response = asyncio.run(run())
+    assert response.content == b"plaintext ok"
+    assert ENCAPSULATED_KEY_HEADER not in server.last_request.headers
 
 
 def test_async_streamed_request_body_round_trip(server: MockServer):
