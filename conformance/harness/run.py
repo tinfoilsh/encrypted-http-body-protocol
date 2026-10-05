@@ -50,6 +50,11 @@ BATCH_TIMEOUT_SECONDS = 180
 # must stay far below the body size; a buffering one lands at roughly 1x-3x it.
 HEAVY_TIMEOUT_SECONDS = 900
 HEAVY_PEAK_RSS_LIMIT = 512 << 20
+# Browser runners report RSS growth over baseline, and Chromium keeps about
+# 500 MiB of page cache resident for its OPFS spool regardless of body size
+# (measured: +528 MiB at 512 MiB, +520 MiB at 256 MiB). 1 GiB still fails a
+# client that buffers the 3 GiB body.
+HEAVY_PEAK_RSS_LIMIT_BROWSER = 1 << 30
 
 CANONICAL_ERROR_CODES = {
     "INVALID_KEY_CONFIG", "UNSUPPORTED_SUITE",
@@ -621,9 +626,9 @@ def main():
             runnable = [fx for fx in fixtures
                         if fx["category"] in ("crypto", "config", "e2e")
                         and (not fx.get("runners") or n in fx["runners"])
-                        and not fx.get("heavy")
                         and fx.get("browser", {}).get("runnable", True)]
-            batch_results[n] = run_batch(adapters[n], runnable)
+            timeout = HEAVY_TIMEOUT_SECONDS if any(fx.get("heavy") for fx in runnable) else BATCH_TIMEOUT_SECONDS
+            batch_results[n] = run_batch(adapters[n], runnable, timeout)
 
     total = cells = cross_fails = skipped = 0
     diverging = []
@@ -678,7 +683,8 @@ def main():
                     label = "UNCODED" if any(f.startswith("UNCODED") for f in fails) else (
                         res.get("error_code") or res.get("outcome"))
                     line.append(f"{name}=DIVERGENT({label}){rss_note}")
-                elif fx.get("heavy") and rss is not None and rss > HEAVY_PEAK_RSS_LIMIT:
+                elif fx.get("heavy") and rss is not None and rss > (
+                        HEAVY_PEAK_RSS_LIMIT_BROWSER if name in BATCH_ADAPTERS else HEAVY_PEAK_RSS_LIMIT):
                     # The body went through, but the client buffered it.
                     div_names.add(name)
                     cells += 1

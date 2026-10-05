@@ -66,6 +66,8 @@ async function run(fx, res, oracleUrl) {
     }
     case 'token_before_response':
       return tokenBeforeResponse(fx, res, oracleUrl);
+    case 'large_body':
+      return largeBody(fx, res, oracleUrl);
     case 'request':
       return doRequest(fx, res, oracleUrl);
     default:
@@ -95,6 +97,35 @@ async function tokenBeforeResponse(fx, res, oracleUrl) {
   // The getter throws when no token is published; either way, no translation.
   try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
   const response = await pending;
+  res.status = response.status;
+  res.body_hex = await drain(response.body, res);
+}
+
+// Streams a multi-GiB patterned body (1 MiB block, block[i] = (i + seed) & 0xff)
+// as a lazily produced ReadableStream; the library spools the encrypted frames
+// to OPFS and uploads the file, so the page never holds the body.
+async function largeBody(fx, res, oracleUrl) {
+  const { size_bytes: size, block_seed: seed } = fx.inputs;
+  const { quota = 0, usage = 0 } = await navigator.storage.estimate();
+  if (quota - usage < size * 1.01) {
+    res.outcome = 'skipped';
+    res.skip_reason = 'opfs-quota-below-body-size';
+    return;
+  }
+  const base = oracleUrl.replace(/\/$/, '');
+  const transport = await createTransport(base);
+  const block = new Uint8Array(1 << 20);
+  for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
+  let remaining = size;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) { controller.close(); return; }
+      const n = Math.min(remaining, block.length);
+      controller.enqueue(block.subarray(0, n));
+      remaining -= n;
+    },
+  });
+  const response = await transport.request(base + fx.request.path, { method: fx.request.method, body });
   res.status = response.status;
   res.body_hex = await drain(response.body, res);
 }

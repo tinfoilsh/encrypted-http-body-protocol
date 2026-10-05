@@ -458,7 +458,7 @@
   },
   {
     "id": "e2e-large-body-3gib",
-    "description": "A 3 GiB request body streams through encryption and the server's streaming decryptor; the client must not buffer it. Body bytes: 1 MiB block with block[i] = (i + seed) & 0xff, repeated. The oracle replies with the raw SHA-256 of the plaintext.",
+    "description": "A 3 GiB request body streams through encryption and the server's streaming decryptor; the client must not buffer it. Body bytes: 1 MiB block with block[i] = (i + seed) & 0xff, repeated. The oracle replies with the raw SHA-256 of the plaintext. Browsers spool the frames to the Origin Private File System and upload the file; a browser whose storage quota cannot hold the body skips with the declared reason.",
     "category": "e2e",
     "operation": "large_body",
     "heavy": true,
@@ -473,13 +473,16 @@
       "headers": {}
     },
     "browser": {
-      "runnable": false,
-      "skip_reason": "browsers-cannot-stream-request-bodies-portably"
+      "runnable": true
     },
     "expect": {
       "outcome": "ok",
       "status": 200,
       "body_hex": "5bb8a0daf79ae7af2f38f80ac1ce890a741392362bfb96b37c5fe03261ab9a22"
+    },
+    "allowed_skips": {
+      "js-chromium": "opfs-quota-below-body-size",
+      "js-firefox": "opfs-quota-below-body-size"
     }
   },
   {
@@ -499,6 +502,31 @@
       "status": 200,
       "body_hex": "68656c6c6f",
       "token_before_response": true
+    }
+  },
+  {
+    "id": "e2e-large-body-256mib",
+    "description": "A 256 MiB request body streams through encryption on every runner, including browsers via the OPFS spool, so the bounded-memory upload path is exercised even where quota blocks the 3 GiB body. Same pattern and oracle route as e2e-large-body-3gib.",
+    "category": "e2e",
+    "operation": "large_body",
+    "heavy": true,
+    "inputs": {
+      "size_bytes": 268435456,
+      "block_seed": 42
+    },
+    "server_scenario": "digest",
+    "request": {
+      "method": "POST",
+      "path": "/s/digest",
+      "headers": {}
+    },
+    "browser": {
+      "runnable": true
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "f9a891ea18e0514540299aa52cc585ff94b199c11e0f1bc9cae12542893eb327"
     }
   }
 ]

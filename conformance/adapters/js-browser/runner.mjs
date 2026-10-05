@@ -7,6 +7,7 @@
 // page + browser bundle over http and shuttles fixtures in and results out.
 
 import http from 'node:http';
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,15 @@ const server = http.createServer((req, res) => {
     res.statusCode = 404; res.end();
   }
 });
+
+// Resident set of the Playwright-launched browser processes, summed.
+function browserRss() {
+  try {
+    return execSync('ps -axo rss=,command=').toString().split('\n')
+      .filter((l) => /ms-playwright/.test(l))
+      .reduce((a, l) => a + Number(l.trim().split(/\s+/)[0]), 0) * 1024;
+  } catch { return 0; }
+}
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -54,12 +64,19 @@ async function main() {
     if (!line.trim()) continue;
     const fx = JSON.parse(line);
     let res;
+    // Heavy fixtures: report the browser's RSS growth over its baseline at
+    // fixture start, sampled while the fixture runs, as peak_rss_bytes.
+    const baseline = fx.heavy ? browserRss() : 0;
+    let peak = baseline;
+    const sampler = fx.heavy ? setInterval(() => { peak = Math.max(peak, browserRss()); }, 300) : null;
     try {
       res = await page.evaluate(({ fx, oracle }) => window.runFixture(fx, oracle), { fx, oracle });
+      if (fx.heavy && res.outcome === 'ok') res.peak_rss_bytes = Math.max(peak, browserRss()) - baseline;
     } catch (err) {
       res = { fixture_id: fx.id, outcome: 'error', error_code: 'ADAPTER_CRASH',
               native_error: String(err) };
     }
+    if (sampler) clearInterval(sampler);
     res.runner = `js-browser:${engine}`;
     out.push(JSON.stringify(res));
   }

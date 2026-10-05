@@ -121,7 +121,7 @@
     "peak_rss_bytes": {
       "type": "integer",
       "minimum": 0,
-      "description": "Peak resident set size of the adapter process in bytes; reported by heavy fixtures so buffering is visible."
+      "description": "Peak resident set size in bytes, reported by heavy fixtures so buffering is visible. Native adapters report their own process; batch browser runners report the browser processes' growth over the baseline sampled at fixture start."
     },
     "runner": {
       "description": "NOT ASSERTED. Which adapter produced this (e.g. 'rust', 'js-browser:firefox'). For the report only.",
