@@ -35,8 +35,10 @@ export class Transport {
   /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
   constructor(serverIdentity: Identity, serverHost: string) {
     this.serverIdentity = serverIdentity;
-    this.serverHost = serverHost;
+    // Canonicalize (lower-case, IDNA, default port dropped) so the comparison
+    // against URL.host in request() is spelling-independent.
     this.serverOrigin = serverHost.includes('://') ? new URL(serverHost).origin : undefined;
+    this.serverHost = this.serverOrigin ? new URL(this.serverOrigin).host : new URL(`http://${serverHost}`).host;
   }
 
   getSessionRecoveryToken(): SessionRecoveryToken {
@@ -171,10 +173,9 @@ export class Transport {
     // Normalize through the platform Request constructor first so RequestInit
     // overrides a Request input with the same semantics as fetch().
     const normalizedRequest = new Request(input, init);
-    // Firefox does not expose Request.body even when payload bytes are present.
-    const requestBodyBytes = await normalizedRequest.arrayBuffer();
-    const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
 
+    // Validate before consuming the body so a rejected request never buffers
+    // or waits on a caller-supplied stream.
     const url = new URL(normalizedRequest.url);
     if (this.serverOrigin ? url.origin !== this.serverOrigin : url.host !== this.serverHost) {
       throw new InvalidInputError(`request URL must use the configured origin: ${this.serverOrigin ?? this.serverHost}`);
@@ -184,6 +185,10 @@ export class Transport {
         throw new InvalidInputError(`reserved request header cannot be set by callers: ${name}`);
       }
     }
+
+    // Firefox does not expose Request.body even when payload bytes are present.
+    const requestBodyBytes = await normalizedRequest.arrayBuffer();
+    const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
 
     const request = new Request(url.toString(), {
       ...forwardedRequestInit(normalizedRequest),

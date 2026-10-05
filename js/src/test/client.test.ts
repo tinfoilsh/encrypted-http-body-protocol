@@ -250,6 +250,27 @@ describe('Transport', () => {
         }),
         InvalidInputError,
       );
+      // Rejection happens before the body is read.
+      let bodyRead = false;
+      const body = new ReadableStream<Uint8Array>({ pull() { bodyRead = true; } }, { highWaterMark: 0 });
+      await assert.rejects(
+        transport.request('https://other.test/secure', { method: 'POST', body, duplex: 'half' } as RequestInit),
+        InvalidInputError,
+      );
+      assert.strictEqual(bodyRead, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should compare the configured host case-insensitively', async () => {
+    const transport = new Transport(serverIdentity, 'SERVER.TEST');
+    const originalFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
+    try {
+      await assert.rejects(transport.post('https://server.test/secure', 'hello'), /stop/);
+      assert.strictEqual(fetched, true);
     } finally {
       globalThis.fetch = originalFetch;
     }
