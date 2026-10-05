@@ -142,7 +142,13 @@ type StreamingDecryptReader struct {
 	recipient *hpke.Recipient
 	buffer    []byte
 	eof       bool
+	failure   error // first framing or authentication failure, sticky
 }
+
+// Err reports the first framing or authentication failure seen while
+// streaming, or nil. The middleware consults it after the handler returns to
+// decide whether the exchange may complete (SPEC 5.2).
+func (r *StreamingDecryptReader) Err() error { return r.failure }
 
 // NewStreamingDecryptReader creates a new streaming decrypt reader
 func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *StreamingDecryptReader {
@@ -154,8 +160,20 @@ func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *Str
 	}
 }
 
-// Read implements io.Reader, decrypting data as it's read
+// Read implements io.Reader, decrypting data as it's read. A protocol failure
+// is sticky: every later Read returns it and Err exposes it.
 func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
+	if r.failure != nil {
+		return 0, r.failure
+	}
+	n, err = r.read(p)
+	if err != nil && err != io.EOF {
+		r.failure = err
+	}
+	return n, err
+}
+
+func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	if r.eof {
 		return 0, io.EOF
 	}
@@ -184,7 +202,7 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
 	if chunkLen == 0 {
 		// Empty chunk, try reading next chunk
-		return r.Read(p)
+		return r.read(p)
 	}
 	if chunkLen > maxChunkBytes {
 		return 0, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
