@@ -186,6 +186,9 @@ func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
 		// Empty chunk, try reading next chunk
 		return r.Read(p)
 	}
+	if chunkLen > maxChunkBytes {
+		return 0, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
+	}
 
 	// Read encrypted chunk
 	encryptedChunk := make([]byte, chunkLen)
@@ -293,6 +296,9 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	}
 
 	// Get the encapsulated key header
+	if len(req.Header.Values(protocol.EncapsulatedKeyHeader)) > 1 {
+		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "duplicate %s header", protocol.EncapsulatedKeyHeader))
+	}
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
 	if encapKeyHex == "" {
 		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "missing %s header", protocol.EncapsulatedKeyHeader))
@@ -441,9 +447,10 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 	return DecryptResponseWithToken(resp, token)
 }
 
-// maxResponseChunkBytes bounds a single framed response chunk so a malicious or
-// tampered length prefix cannot force an unbounded allocation on the client.
-const maxResponseChunkBytes = 64 << 20
+// maxChunkBytes bounds a single framed chunk in either direction so a malicious
+// or tampered length prefix cannot force an unbounded allocation before the
+// frame is authenticated.
+const maxChunkBytes = 64 << 20
 
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
 // It emits each plaintext chunk as soon as the complete encrypted frame has
@@ -489,7 +496,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		if chunkLen == 0 {
 			continue
 		}
-		if chunkLen > maxResponseChunkBytes {
+		if chunkLen > maxChunkBytes {
 			return 0, r.fail(protocol.Errorf(protocol.ChunkTooLarge, "encrypted response chunk exceeds maximum allowed size"))
 		}
 

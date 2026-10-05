@@ -23,6 +23,8 @@ const (
 	// ExportLength is the length of the exported secret.
 	// Nk (AEAD key size) = 32 bytes for AES-256-GCM.
 	ExportLength = 32
+	// RequestEncLength is the X25519 encapsulated key size.
+	RequestEncLength = 32
 	// ResponseNonceLength is the length of the random response nonce.
 	// max(Nn, Nk) = max(12, 32) = 32 for AES-256-GCM.
 	ResponseNonceLength = 32
