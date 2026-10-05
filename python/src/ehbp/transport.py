@@ -168,11 +168,9 @@ class EHBPTransport(httpx.BaseTransport):
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        # Only an explicit Content-Length: 0 is trusted as bodyless; otherwise the
-        # stream itself decides, so a header-less Request(stream=...) is never
-        # forwarded in plaintext.
-        if request.headers.get("content-length") == "0":
-            return self._inner.handle_request(request)
+        # The stream alone decides whether a body exists: headers are caller
+        # supplied, and trusting Content-Length: 0 forwarded a non-empty
+        # stream in plaintext. Peeking an empty stream costs nothing.
         encrypted = self._identity.encrypt_request_stream(
             cast(httpx.SyncByteStream, request.stream)
         )
@@ -248,8 +246,6 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if request.headers.get("content-length") == "0":  # see handle_request
-            return await self._inner.handle_async_request(request)
         encrypted = await self._identity.encrypt_request_stream_async(
             cast(httpx.AsyncByteStream, request.stream)
         )

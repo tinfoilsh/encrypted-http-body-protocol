@@ -290,6 +290,21 @@ def test_headerless_stream_request_is_encrypted_not_passed_through(server: MockS
     assert ENCAPSULATED_KEY_HEADER in server.last_request.headers
 
 
+def test_content_length_zero_header_does_not_bypass_encryption(server: MockServer):
+    class RawStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"SECRET-PLAINTEXT"
+
+    with _sync_client(server) as client:
+        # A caller-supplied Content-Length: 0 must not make a non-empty stream
+        # bodyless: the stream decides, and the body goes out encrypted.
+        request = httpx.Request("POST", URL, stream=RawStream(), headers={"content-length": "0"})
+        response = client.send(request)
+    assert response.content == b"echo:SECRET-PLAINTEXT"
+    assert ENCAPSULATED_KEY_HEADER in server.last_request.headers
+    assert b"SECRET-PLAINTEXT" not in server.last_request.read()
+
+
 def test_empty_stream_request_passes_through_bodyless(server: MockServer):
     class EmptyStream(httpx.SyncByteStream):
         def __iter__(self):
