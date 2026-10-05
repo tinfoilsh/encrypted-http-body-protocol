@@ -296,6 +296,9 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	}
 
 	// Get the encapsulated key header
+	if len(req.Header.Values(protocol.EncapsulatedKeyHeader)) > 1 {
+		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "duplicate %s header", protocol.EncapsulatedKeyHeader))
+	}
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
 	if encapKeyHex == "" {
 		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "missing %s header", protocol.EncapsulatedKeyHeader))

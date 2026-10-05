@@ -1063,3 +1063,16 @@ func TestDerivedStreamingDecryptReaderRejectsOversizedChunk(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "maximum allowed size")
 }
+
+func TestDecryptRequestRejectsDuplicateEncapsulatedKey(t *testing.T) {
+	id, err := NewIdentity()
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/probe", strings.NewReader("secret"))
+	_, err = id.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+	req.Header.Add(protocol.EncapsulatedKeyHeader, req.Header.Get(protocol.EncapsulatedKeyHeader))
+
+	_, err = id.DecryptRequestWithContext(req)
+	assert.Equal(t, protocol.InvalidEncapsulatedKey, protocol.CodeOf(err))
+	assert.True(t, IsClientError(err))
+}
