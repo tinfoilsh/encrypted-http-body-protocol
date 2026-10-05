@@ -162,10 +162,7 @@ This derivation ensures:
   - If `Ehbp-Encapsulated-Key` is present, establish an HPKE opener using the server's private key (Section 4.4.1) and decrypt the body as a chunked stream (Section 4.3). The server retains the HPKE receiver context for response encryption. The server MAY hand each chunk's plaintext to the application as soon as it authenticates; it MUST NOT buffer the whole body merely to authenticate it first, so that bodies larger than memory can be processed.
   - If `Ehbp-Encapsulated-Key` is malformed or decapsulation fails, the server MUST reject the request before any application processing with the status in Section 5.4.2.
   - If a chunk fails to authenticate or the framing is invalid after application processing has begun, the server MUST stop delivering plaintext to the application at that chunk, and the exchange MUST NOT complete successfully: if the response has not started, the server responds with the status in Section 5.4.2; if it has, the server MUST abort the response so the client observes a transport-level failure rather than a complete message (on HTTP/1.1, close the connection without the terminating chunk; on HTTP/2 and HTTP/3, reset the stream).
-  - Error status mapping:
-    - malformed encapsulated request or cryptographic verification failure: HTTP 400
-    - key/configuration mismatch (for example, stale client key after rotation): HTTP 422 (Unprocessable Content) with optional `application/problem+json` details as defined in Section 5.4.2
-    - internal failures unrelated to client input: HTTP 500
+  - Error status mapping: as defined in Section 5.4.2.
   - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
   - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
 - Response handling:
@@ -207,8 +204,8 @@ Implementations MUST fail closed: no plaintext fallback for encrypted exchanges 
 
 Servers SHOULD return HTTP status codes as follows:
 
-- `400 Bad Request`: malformed encapsulated request or cryptographic/framing failure attributable to request input
-- `422 Unprocessable Content`: key configuration mismatch (for example, unknown/replaced key identifier or decryption failure with the selected key, including stale client configuration after key rotation)
+- `400 Bad Request`: malformed encapsulated request (`Ehbp-Encapsulated-Key` not hex or not the KEM's encapsulated-key length), HPKE setup/decapsulation failure, or a chunk framing violation
+- `422 Unprocessable Content`: key configuration mismatch, which includes every AEAD authentication failure of a request chunk, whether it is the first chunk or one that follows chunks that authenticated. The server cannot tell a stale client key from tampering, and the client's recovery is the same: refresh the key configuration and retry (Section 5.4.3)
 - `500 Internal Server Error`: server-side processing failure not attributable to client input
 
 For `422` key configuration mismatch responses, servers SHOULD use:
@@ -253,7 +250,7 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | Code | Side | Condition |
 | --- | --- | --- |
 | `INVALID_KEY_CONFIG` | client | Key config unparseable (truncated, bad public key, no suites) or discovery returned a non-2xx status or wrong media type |
-| `UNSUPPORTED_SUITE` | client | Key config advertises a KEM, KDF, or AEAD other than the suite in Section 3.2 |
+| `UNSUPPORTED_SUITE` | client | Key config advertises a KEM, KDF, or AEAD other than the suite in Section 3.2, or more than one cipher suite |
 | `INVALID_ENCAPSULATED_KEY` | server | `Ehbp-Encapsulated-Key` not hex, wrong length, or repeated; or absent where the server requires encryption (Section 5.2 pass-through is not a failure) |
 | `HPKE_SETUP_FAILED` | both | HPKE setup, seal, export, or response key derivation failed |
 | `MISSING_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` absent on a 2xx response to an encrypted request |

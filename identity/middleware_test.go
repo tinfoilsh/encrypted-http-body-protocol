@@ -649,3 +649,20 @@ func TestMiddlewareLateDecryptFailureAfterResponseStartedAbortsConnection(t *tes
 	_, err = io.ReadAll(resp.Body)
 	assert.Error(t, err, "the response must not end as a complete message")
 }
+
+func TestLateDecryptFailure422CarriesNoResponseNonce(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	framed, enc := tamperedTrailingRequest(t, serverIdentity)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body) // fails on the last frame; return without writing
+	})
+	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(framed))
+	req.Header.Set(protocol.EncapsulatedKeyHeader, enc)
+	rec := httptest.NewRecorder()
+	serverIdentity.Middleware()(handler).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Empty(t, rec.Header().Get(protocol.ResponseNonceHeader), "plaintext error must not look encrypted")
+}

@@ -200,9 +200,17 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	}
 
 	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	if chunkLen == 0 {
-		// Empty chunk, try reading next chunk
-		return r.read(p)
+	// Zero-length chunks are skipped (SPEC 4.3). Loop rather than recurse so a
+	// burst of empty frames cannot grow the stack.
+	for chunkLen == 0 {
+		if _, err := io.ReadFull(r.reader, chunkLenBytes); err != nil {
+			if err == io.EOF {
+				r.eof = true
+				return 0, io.EOF
+			}
+			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
+		}
+		chunkLen = binary.BigEndian.Uint32(chunkLenBytes)
 	}
 	if chunkLen > maxChunkBytes {
 		return 0, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
@@ -249,6 +257,7 @@ func (r *StreamingDecryptReader) Close() error {
 type ResponseContext struct {
 	recipient  *hpke.Recipient // The recipient from request decryption (has Export method)
 	RequestEnc []byte          // The encapsulated key from the request
+	decryptor  *StreamingDecryptReader
 }
 
 // DerivedResponseWriter wraps an http.ResponseWriter for streaming encryption
@@ -349,6 +358,7 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	return &ResponseContext{
 		recipient:  recipient,
 		RequestEnc: encapKey,
+		decryptor:  streamingReader,
 	}, nil
 }
 

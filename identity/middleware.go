@@ -83,8 +83,6 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			decryptor, _ := r.Body.(*StreamingDecryptReader)
-
 			// Probe one byte to force early decrypt failure detection (e.g. stale key mismatch)
 			// while preserving streaming request semantics for the remaining body.
 			probe := make([]byte, 1)
@@ -129,14 +127,16 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 			// let the exchange complete. If nothing has been sent yet this is a
 			// normal protocol error; otherwise abort so the client sees a
 			// transport failure instead of a complete message.
-			if decryptor != nil {
-				if ferr := decryptor.Err(); ferr != nil {
-					if !encryptedWriter.wroteHeader {
-						sendError(w, ferr, "failed to read decrypted request body", statusForProtocolError(ferr))
-						return
-					}
-					panic(http.ErrAbortHandler)
+			if ferr := respCtx.decryptor.Err(); ferr != nil {
+				if !encryptedWriter.wroteHeader {
+					// Nothing has been sent: answer in plaintext, so drop the
+					// response-encryption headers set up for the handler.
+					w.Header().Del(protocol.ResponseNonceHeader)
+					w.Header().Del("Transfer-Encoding")
+					sendError(w, ferr, "failed to read decrypted request body", statusForProtocolError(ferr))
+					return
 				}
+				panic(http.ErrAbortHandler)
 			}
 		})
 	}
