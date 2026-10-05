@@ -60,6 +60,8 @@ Servers MUST set for encrypted responses:
 
 For plaintext responses corresponding to requests where `Ehbp-Encapsulated-Key` is absent, the server does NOT set any EHBP headers. The absence of `Ehbp-Response-Nonce` indicates the response is plaintext.
 
+`Ehbp-Encapsulated-Key` and `Ehbp-Response-Nonce` are single-valued. A receiver MUST reject a message carrying more than one instance of either header (`INVALID_ENCAPSULATED_KEY` on the server, `DUPLICATE_RESPONSE_NONCE` on the client). Client stacks that coalesce repeated headers into one value (for example `fetch` and `URLSession`) observe a single value that is not valid hex of the required length and MUST treat it as invalid (`INVALID_RESPONSE_NONCE`).
+
 ### 4.3 Body Framing (Both Directions)
 
 Encrypted bodies are framed as a sequence of chunks:
