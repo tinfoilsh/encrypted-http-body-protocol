@@ -592,6 +592,31 @@ func TestTransportRejectsNonceLessSuccessResponse(t *testing.T) {
 	assert.Nil(t, transport.GetSessionRecoveryToken())
 }
 
+func TestTransportRejectsDuplicateResponseNonce(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := strings.Repeat("00", identity.ResponseNonceLength)
+		w.Header().Add(protocol.ResponseNonceHeader, nonce)
+		w.Header().Add(protocol.ResponseNonceHeader, nonce)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	assert.Nil(t, resp)
+	assert.Equal(t, protocol.DuplicateResponseNonce, protocol.CodeOf(err))
+}
+
 func TestTransportGetSessionRecoveryToken(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
