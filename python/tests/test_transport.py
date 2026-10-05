@@ -312,8 +312,8 @@ def test_async_content_length_zero_header_does_not_bypass_encryption(server: Moc
 
     async def run() -> httpx.Response:
         async with _async_client(server) as client:
-            request = httpx.Request("POST", URL, stream=RawStream(), headers={"content-length": "0"})
-            return await client.send(request)
+            headers = {"content-length": "0"}
+            return await client.send(httpx.Request("POST", URL, stream=RawStream(), headers=headers))
 
     response = asyncio.run(run())
     assert response.content == b"echo:SECRET-PLAINTEXT"
