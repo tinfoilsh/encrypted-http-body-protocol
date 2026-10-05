@@ -202,9 +202,16 @@ export class Transport {
       }
     }
 
-    // Firefox does not expose Request.body even when payload bytes are present.
-    const requestBodyBytes = await normalizedRequest.arrayBuffer();
-    const requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
+    // Hand the body over as a stream where the runtime exposes one so large
+    // uploads are sealed frame by frame; Firefox does not expose Request.body
+    // even when payload bytes are present, so buffer there.
+    let requestBody: BodyInit | null;
+    if (normalizedRequest.body && typeof normalizedRequest.body.getReader === 'function') {
+      requestBody = normalizedRequest.body;
+    } else {
+      const requestBodyBytes = await normalizedRequest.arrayBuffer();
+      requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
+    }
 
     const request = new Request(url.toString(), {
       ...forwardedRequestInit(normalizedRequest),

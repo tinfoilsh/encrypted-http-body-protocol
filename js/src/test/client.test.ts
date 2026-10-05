@@ -689,6 +689,51 @@ describe('Transport', () => {
     }
   });
 
+  it('should seal large bodies as a sequence of 64 KiB frames', async () => {
+    const original = new Uint8Array(200 * 1024).map((_, i) => i & 0xff);
+    const request = new Request('https://server.test/upload', { method: 'POST', body: original });
+    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+    assert(context);
+    const body = new Uint8Array(await encrypted.arrayBuffer());
+
+    const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
+    const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
+      info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+    });
+    const frameSizes: number[] = [];
+    const plain: Uint8Array[] = [];
+    for (let offset = 0; offset < body.byteLength;) {
+      const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
+      const opened = new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len)));
+      frameSizes.push(opened.byteLength);
+      plain.push(opened);
+      offset += 4 + len;
+    }
+    assert.deepStrictEqual(frameSizes, [65536, 65536, 65536, 8 * 1024]);
+    assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
+  });
+
+  it('should pull a stream body incrementally rather than buffering it', async () => {
+    let pulls = 0;
+    const chunks = 8;
+    const source = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        if (pulls > chunks) controller.close();
+        else controller.enqueue(new Uint8Array(65536).fill(pulls));
+      },
+    }, { highWaterMark: 0 });
+    const request = new Request('https://server.test/upload', { method: 'POST', body: source, duplex: 'half' } as RequestInit);
+    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
+    assert(context);
+    assert(encrypted.body, 'Node sends the encrypted frames as a stream');
+    const reader = encrypted.body.getReader();
+    const first = await reader.read();
+    assert(!first.done && first.value.byteLength === 4 + 65536 + 16, 'first frame is one sealed 64 KiB chunk');
+    assert(pulls < chunks, `source should not be drained up front (pulled ${pulls} of ${chunks})`);
+    await reader.cancel();
+  });
+
   it('should preserve request payload when Request.body is unavailable', async () => {
     const transport = new Transport(serverIdentity, 'server.test');
     const originalFetch = globalThis.fetch;

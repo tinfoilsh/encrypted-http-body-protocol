@@ -6,7 +6,7 @@ import {
   AEAD_AES_256_GCM,
 } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
-import { PROTOCOL, HPKE_CONFIG } from './protocol.js';
+import { PROTOCOL, HPKE_CONFIG, REQUEST_FRAME_BYTES } from './protocol.js';
 import {
   deriveResponseKeys,
   decryptChunk,
@@ -292,13 +292,24 @@ export class Identity {
   async encryptRequestWithContext(
     request: Request
   ): Promise<{ request: Request; context: RequestContext | null }> {
-    const body = await request.arrayBuffer();
+    // Node and Chromium expose Request.body as a stream; Firefox does not, so
+    // buffer there. Either way the body is sealed frame by frame below.
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    if (request.body) {
+      reader = request.body.getReader();
+    } else {
+      const body = new Uint8Array(await request.arrayBuffer());
+      reader = new ReadableStream<Uint8Array>({
+        start(c) { if (body.byteLength > 0) c.enqueue(body); c.close(); },
+      }).getReader();
+    }
+    const first = await firstNonEmptyChunk(reader);
 
     // Bodyless requests pass through unmodified - no HPKE context needed.
     // See SPEC.md Section 5.1: "When the request has no payload body, an encrypted
     // response is not possible (since there is no HPKE context to derive response
     // keys from). Such requests pass through unmodified."
-    if (body.byteLength === 0) {
+    if (!first) {
       return {
         request: new Request(request.url, {
           ...forwardedRequestInit(request),
@@ -326,23 +337,18 @@ export class Identity {
     const headers = new Headers(request.headers);
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
 
-    // Encrypt the body
-    const encrypted = await ctx.Seal(new Uint8Array(body));
-
-    // Create chunked format: 4-byte length header + encrypted data
-    const chunkLength = new Uint8Array(4);
-    new DataView(chunkLength.buffer).setUint32(0, encrypted.byteLength, false);
-
-    const chunkedData = new Uint8Array(4 + encrypted.byteLength);
-    chunkedData.set(chunkLength, 0);
-    chunkedData.set(encrypted, 4);
+    const frames = encryptFrames(ctx, reader, first);
+    // ponytail: only Node is trusted to stream an upload. Chromium accepts a
+    // stream body but fails it over HTTP/1.1, Firefox rejects it outright, so
+    // browsers get the frames collected into one buffer.
+    const body = canStreamUpload() ? frames : await collect(frames);
 
     return {
       request: new Request(request.url, {
         ...forwardedRequestInit(request),
         method: request.method,
         headers,
-        body: chunkedData,
+        body,
         duplex: 'half',
       } as RequestInit),
       context,
@@ -574,4 +580,78 @@ function createDecryptStream(
       return reader.cancel(reason);
     },
   });
+}
+
+/** Reads until the first non-empty chunk; null means the stream was empty. */
+async function firstNonEmptyChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>
+): Promise<Uint8Array | null> {
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return null;
+    if (value.byteLength > 0) return value;
+  }
+}
+
+/**
+ * Seals the plaintext stream into LEN || CIPHERTEXT frames of at most
+ * REQUEST_FRAME_BYTES plaintext each (SPEC 4.3), one sender context for the
+ * whole body, holding at most one frame of plaintext at a time.
+ */
+function encryptFrames(
+  ctx: SenderContext,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  first: Uint8Array
+): ReadableStream<Uint8Array> {
+  let pending = first;
+  let sourceDone = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (pending.byteLength < REQUEST_FRAME_BYTES && !sourceDone) {
+        const { done, value } = await reader.read();
+        if (done) { sourceDone = true; break; }
+        if (value.byteLength === 0) continue;
+        const joined = new Uint8Array(pending.byteLength + value.byteLength);
+        joined.set(pending, 0);
+        joined.set(value, pending.byteLength);
+        pending = joined;
+      }
+      if (pending.byteLength === 0) {
+        controller.close();
+        return;
+      }
+      const take = Math.min(pending.byteLength, REQUEST_FRAME_BYTES);
+      const plaintext = pending.slice(0, take);
+      pending = pending.subarray(take);
+      const sealed = await ctx.Seal(plaintext);
+      const frame = new Uint8Array(4 + sealed.byteLength);
+      new DataView(frame.buffer).setUint32(0, sealed.byteLength, false);
+      frame.set(sealed, 4);
+      controller.enqueue(frame);
+      if (sourceDone && pending.byteLength === 0) controller.close();
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+async function collect(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (const reader = stream.getReader(); ;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    total += value.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.byteLength; }
+  return out;
+}
+
+function canStreamUpload(): boolean {
+  const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
+  return typeof proc?.versions?.node === 'string';
 }
