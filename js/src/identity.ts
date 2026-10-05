@@ -296,12 +296,19 @@ export class Identity {
    * 3. Returns a RequestContext that must be used to decrypt the response
    */
   async encryptRequestWithContext(
-    request: Request
-  ): Promise<{ request: Request; context: RequestContext | null }> {
+    request: Request,
+    source?: ReadableStream<Uint8Array> | Blob,
+    options: { memoryOnly?: boolean } = {}
+  ): Promise<{ request: Request; context: RequestContext | null; cleanup?: () => Promise<void> }> {
+    // A caller-supplied source bypasses the Request body entirely: browsers
+    // without upload streaming cannot carry a stream in a Request (Firefox
+    // stringifies it), so the transport hands it over out of band. Otherwise
     // Node and Chromium expose Request.body as a stream; Firefox does not, so
     // buffer there. Either way the body is sealed frame by frame below.
     let reader: ReadableStreamDefaultReader<Uint8Array>;
-    if (request.body) {
+    if (source) {
+      reader = (source instanceof Blob ? source.stream() : source).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    } else if (request.body) {
       reader = request.body.getReader();
     } else {
       const body = new Uint8Array(await request.arrayBuffer());
@@ -344,22 +351,46 @@ export class Identity {
     headers.set(PROTOCOL.ENCAPSULATED_KEY_HEADER, bytesToHex(context.requestEnc));
 
     const frames = encryptFrames(ctx, reader, first);
-    // ponytail: only Node is trusted to stream an upload. Chromium accepts a
-    // stream body but fails it over HTTP/1.1, Firefox rejects it outright, so
-    // browsers hold the encrypted body once, as a Blob of frames. A size
-    // limit for the fallback is the upgrade path if that ever matters.
-    const body = canStreamUpload() ? frames : await collect(frames);
+    // Only Node is trusted to stream an upload: Chromium accepts a stream body
+    // but fails it over HTTP/1.1, Firefox stringifies it. Browsers spool the
+    // frames to a private file and upload that, which both engines stream
+    // from disk, or fall back to one Blob in memory.
+    let sink: { body: BodyInit; cleanup?: () => Promise<void> };
+    if (canStreamUpload()) {
+      sink = { body: frames as BodyInit };
+    } else if (options.memoryOnly) {
+      sink = { body: await collect(frames) };
+    } else {
+      try {
+        sink = await spool(frames, source instanceof Blob ? source.size : undefined);
+      } catch (err) {
+        // Abandoning the frame stream must release the caller's source too
+        // (encryptFrames forwards the cancel to the reader it owns).
+        await frames.cancel(err).catch(() => {});
+        // The frames are consumed. A Blob source can be re-read, so seal it
+        // again under a fresh context into the in-memory fallback; a stream
+        // cannot be replayed and the failure surfaces as is.
+        if (!(source instanceof Blob)) throw err;
+        return this.encryptRequestWithContext(request, new Blob([source]), { memoryOnly: true });
+      }
+    }
 
-    return {
-      request: new Request(request.url, {
-        ...forwardedRequestInit(request),
-        method: request.method,
-        headers,
-        body,
-        duplex: 'half',
-      } as RequestInit),
-      context,
-    };
+    try {
+      return {
+        request: new Request(request.url, {
+          ...forwardedRequestInit(request),
+          method: request.method,
+          headers,
+          body: sink.body,
+          duplex: 'half',
+        } as RequestInit),
+        context,
+        cleanup: sink.cleanup,
+      };
+    } catch (err) {
+      await sink.cleanup?.().catch(() => {});
+      throw err;
+    }
   }
 
   /**
@@ -678,6 +709,153 @@ export function encryptFrames(
   });
 }
 
+/**
+ * Browser sink for the sealed frames. Bodies up to SPOOL_THRESHOLD_BYTES stay
+ * in memory as one Blob of frames, so ordinary requests never touch disk;
+ * only a body that grows past the threshold spills to an Origin Private File
+ * System file, which both engines then stream from disk. A known-size source
+ * above the threshold spills from the first frame instead of buffering.
+ * Memory is bounded by the threshold plus one frame.
+ * ponytail: Safari exposes OPFS only through sync access handles in a worker,
+ * so it stays in memory; a worker-based spool is the upgrade path.
+ */
+async function spool(
+  frames: ReadableStream<Uint8Array>,
+  knownSize?: number
+): Promise<{ body: BodyInit; cleanup?: () => Promise<void> }> {
+  const threshold = spoolThreshold();
+  const parts: Uint8Array[] = [];
+  let buffered = 0;
+  let file: { writer: FileSystemWritableFileStream; handle: FileSystemFileHandle; cleanup: () => Promise<void> } | undefined;
+  const reader = frames.getReader();
+
+  // Opens the spool file, writes what is buffered so far in order, and drops
+  // the buffer. Returns false (and keeps buffering) when OPFS cannot take it.
+  const spill = async (remaining: number | undefined): Promise<boolean> => {
+    const opened = await openSpoolFile(remaining);
+    if (!opened) return false;
+    try {
+      for (const part of parts) await opened.writer.write(part as unknown as BufferSource);
+    } catch (err) {
+      await opened.writer.abort(err).catch(() => {});
+      await opened.cleanup().catch(() => {});
+      throw err;
+    }
+    parts.length = 0;
+    file = opened;
+    return true;
+  };
+
+  try {
+    let spillRefused = false;
+    if (knownSize !== undefined && framedSize(knownSize) > threshold) {
+      spillRefused = !(await spill(framedSize(knownSize)));
+    }
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (file) {
+        await file.writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
+        continue;
+      }
+      parts.push(value);
+      buffered += value.byteLength;
+      if (buffered > threshold && !spillRefused) spillRefused = !(await spill(undefined));
+    }
+  } catch (err) {
+    // Release the caller's source (the frame stream forwards the cancel) and
+    // abort any writable: an errored one cannot be closed, and aborting keeps
+    // the original error (quota exhausted mid-body, I/O failure) as the one
+    // that surfaces.
+    await reader.cancel(err).catch(() => {});
+    if (file) {
+      await file.writer.abort(err).catch(() => {});
+      await file.cleanup().catch(() => {});
+    }
+    throw err;
+  }
+
+  if (!file) return { body: new Blob(parts as BlobPart[]) };
+  try {
+    await file.writer.close();
+    return { body: await file.handle.getFile(), cleanup: file.cleanup };
+  } catch (err) {
+    // Finalization failed (close or getFile): same abort-and-remove path, so
+    // no spool file is left behind and the original error propagates.
+    await file.writer.abort(err).catch(() => {});
+    await file.cleanup().catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * Creates the OPFS spool file, or returns undefined when OPFS is unavailable
+ * or its quota cannot hold `expectedBytes` (twice that, since Chromium's
+ * quota tracks free disk and shrinks while the spool is written).
+ */
+async function openSpoolFile(
+  expectedBytes: number | undefined
+): Promise<{ writer: FileSystemWritableFileStream; handle: FileSystemFileHandle; cleanup: () => Promise<void> } | undefined> {
+  const storage = (globalThis as { navigator?: { storage?: StorageManager } }).navigator?.storage;
+  const canSpool =
+    typeof storage?.getDirectory === 'function' &&
+    typeof (globalThis as { FileSystemFileHandle?: { prototype: { createWritable?: unknown } } })
+      .FileSystemFileHandle?.prototype?.createWritable === 'function';
+  if (!canSpool) return undefined;
+  const root = await storage.getDirectory();
+  // Sweep first: a stale spool from a dead page could otherwise hold the
+  // quota that this upload needs and keep every later upload in memory.
+  await sweepOrphanedSpools(root);
+  if (typeof storage.estimate === 'function') {
+    const { quota = 0, usage = 0 } = await storage.estimate();
+    const need = expectedBytes ?? spoolThreshold();
+    if (quota - usage < need * 2) return undefined;
+  }
+  const name = `${SPOOL_PREFIX}${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // Removal failures propagate: a leftover file is ciphertext only, but the
+  // caller should know it is still there rather than assume it is gone.
+  const cleanup = () => root.removeEntry(name);
+  const handle = await root.getFileHandle(name, { create: true });
+  try {
+    return { writer: await handle.createWritable(), handle, cleanup };
+  } catch (err) {
+    await cleanup().catch(() => {});
+    throw err;
+  }
+}
+
+/** Framed bytes a body may reach in memory before it spills to OPFS. */
+export const SPOOL_THRESHOLD_BYTES = 64 * 1024 * 1024;
+/** @internal test hook: lower the threshold so the spill path runs on small bodies. */
+export let spoolThresholdOverride: number | undefined;
+export function setSpoolThresholdForTests(bytes: number | undefined): void { spoolThresholdOverride = bytes; }
+function spoolThreshold(): number { return spoolThresholdOverride ?? SPOOL_THRESHOLD_BYTES; }
+
+const SPOOL_PREFIX = 'ehbp-spool-';
+const SPOOL_ORPHAN_AGE_MS = 60 * 60 * 1000;
+
+/** Encrypted size of a body of `size` plaintext bytes: 4-byte length and 16-byte tag per frame. */
+function framedSize(size: number): number {
+  return size + Math.max(1, Math.ceil(size / REQUEST_FRAME_BYTES)) * 20;
+}
+
+/**
+ * A spool outlives its request only if the page died between upload and
+ * cleanup. Such files hold ciphertext, never keys, but there is no reason to
+ * keep them: remove ours that are older than an hour (younger ones may belong
+ * to a concurrent upload in another tab of the same origin).
+ */
+async function sweepOrphanedSpools(root: FileSystemDirectoryHandle): Promise<void> {
+  const entries = (root as unknown as { keys?: () => AsyncIterable<string> }).keys?.();
+  if (!entries) return;
+  const cutoff = Date.now() - SPOOL_ORPHAN_AGE_MS;
+  for await (const name of entries) {
+    if (!name.startsWith(SPOOL_PREFIX)) continue;
+    const born = Number(name.slice(SPOOL_PREFIX.length).split('-')[0]);
+    if (Number.isFinite(born) && born < cutoff) await root.removeEntry(name).catch(() => {});
+  }
+}
+
 // One copy at most: the frames go into a Blob as parts instead of being
 // concatenated into a second body-sized buffer.
 async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
@@ -690,7 +868,8 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
   return new Blob(parts as BlobPart[]);
 }
 
-function canStreamUpload(): boolean {
+/** @internal true where fetch streams a ReadableStream body (Node). */
+export function canStreamUpload(): boolean {
   const proc = (globalThis as { process?: { versions?: { node?: string } } }).process;
   return typeof proc?.versions?.node === 'string';
 }

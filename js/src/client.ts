@@ -1,5 +1,5 @@
 import { Identity } from './identity.js';
-import { extractSessionRecoveryToken, decryptResponseWithToken } from './identity.js';
+import { extractSessionRecoveryToken, decryptResponseWithToken, canStreamUpload } from './identity.js';
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
@@ -209,6 +209,29 @@ export class Transport {
       throw new InvalidInputError('request URL must not include credentials');
     }
 
+    // Where uploads cannot stream (browsers), a stream or Blob body must not
+    // reach the Request constructor (Firefox stringifies a stream); keep it
+    // aside as the source the identity seals from, and spool the frames.
+    // A GET or HEAD cannot carry a body; say so with the canonical code
+    // before any body is consumed or spooled (fetch would throw an uncoded
+    // TypeError later).
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    const hasInitBody = init?.body !== undefined && init?.body !== null;
+    if ((method === 'GET' || method === 'HEAD') && hasInitBody) {
+      throw new InvalidInputError(`request with ${method} method cannot have a body`);
+    }
+    let source: ReadableStream<Uint8Array> | Blob | undefined;
+    if (!canStreamUpload() && hasInitBody && (init!.body instanceof ReadableStream || init!.body instanceof Blob)) {
+      source = init!.body as ReadableStream<Uint8Array> | Blob;
+      // Fetch would derive Content-Type from a typed Blob; keep that behaviour
+      // for the diverted body unless the caller set one.
+      const headers = new Headers(init!.headers ?? (input instanceof Request ? input.headers : undefined));
+      if (source instanceof Blob && source.type && !headers.has('content-type')) {
+        headers.set('content-type', source.type);
+      }
+      init = { ...init, body: null, headers };
+    }
+
     // Normalize through the platform Request constructor first so RequestInit
     // overrides a Request input with the same semantics as fetch().
     const normalizedRequest = new Request(input, init);
@@ -229,7 +252,9 @@ export class Transport {
     // uploads are sealed frame by frame; Firefox does not expose Request.body
     // even when payload bytes are present, so buffer there.
     let requestBody: BodyInit | null;
-    if (normalizedRequest.body) {
+    if (source) {
+      requestBody = null;
+    } else if (normalizedRequest.body) {
       requestBody = normalizedRequest.body;
     } else {
       const requestBodyBytes = await normalizedRequest.arrayBuffer();
@@ -246,8 +271,8 @@ export class Transport {
 
     // Encrypt request (returns context for response decryption)
     // For bodyless requests, context will be null and request passes through unmodified
-    const { request: encryptedRequest, context } =
-      await this.serverIdentity.encryptRequestWithContext(request);
+    const { request: encryptedRequest, context, cleanup } =
+      await this.serverIdentity.encryptRequestWithContext(request, source);
 
     const token = context
       ? await extractSessionRecoveryToken(context)
@@ -278,6 +303,12 @@ export class Transport {
     } catch (err) {
       clearToken();
       throw err;
+    } finally {
+      // Response headers mean the upload finished; a spool file is done. A
+      // removal failure must neither fail a completed exchange nor mask the
+      // real error: the file holds ciphertext only and the orphan sweep
+      // removes it on the next large upload.
+      await cleanup?.().catch(() => {});
     }
     if (!shouldDecrypt) {
       clearToken();
