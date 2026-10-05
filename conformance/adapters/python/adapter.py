@@ -68,6 +68,8 @@ def run(fx: dict, res: dict) -> None:
         request(fx, res)
     elif op == "large_body":
         large_body(fx, res)
+    elif op == "token_before_response":
+        token_before_response(fx, res)
     elif op == "discover":
         Client.discover(discover_target(ins))  # raises on bad content type / status
     elif op in ("reject_reserved_header", "reject_cross_origin", "reject_url_credentials"):
@@ -138,6 +140,30 @@ def request(fx: dict, res: dict) -> None:
         raise
     finally:
         client.close()
+
+
+def token_before_response(fx: dict, res: dict) -> None:
+    """Read the session recovery token while the oracle still holds its reply (SPEC 6)."""
+    import threading
+    import time
+
+    base = os.environ["ORACLE_URL"].rstrip("/")
+    identity = ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
+    client = Client(base, identity)
+    req = fx["request"]
+    done: list = []
+    worker = threading.Thread(
+        target=lambda: done.append(client.post(req["path"], body=bytes.fromhex(req["body_hex"]))))
+    worker.start()
+    time.sleep(0.3)
+    try:
+        res["token_before_response"] = client.get_session_recovery_token() is not None
+    except Exception:  # noqa: BLE001 - absence of a token, however signalled, is the observation
+        res["token_before_response"] = False
+    worker.join()
+    r = done[0]
+    res["status"] = r.status_code
+    res["body_hex"] = r.content.hex()
 
 
 def pattern(size: int, seed: int):

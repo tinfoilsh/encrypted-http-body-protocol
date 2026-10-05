@@ -36,6 +36,8 @@ struct Out {
     runner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     peak_rss_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_before_response: Option<bool>,
 }
 
 #[tokio::main]
@@ -91,6 +93,7 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         }
         "request" => request(fx, out).await?,
         "large_body" => large_body(fx, out).await?,
+        "token_before_response" => token_before_response(fx, out).await?,
         "discover" => {
             Client::new(&discover_target(fx)).await?;
         }
@@ -223,6 +226,25 @@ async fn large_body(fx: &Value, out: &mut Out) -> Result<(), Error> {
     out.status = Some(resp.status().as_u16());
     out.body_hex = Some(hex::encode(resp.bytes()));
     out.peak_rss_bytes = Some(peak_rss_bytes());
+    Ok(())
+}
+
+/// Reads the session recovery token while the oracle still holds its reply (SPEC 6).
+async fn token_before_response(fx: &Value, out: &mut Out) -> Result<(), Error> {
+    let base = std::env::var("ORACLE_URL").unwrap_or_default();
+    let client = Client::new(&base).await?;
+    let req = &fx["request"];
+    let body = hex::decode(req["body_hex"].as_str().unwrap_or("")).unwrap_or_default();
+    let pending = client.post(req["path"].as_str().unwrap_or("/"))?.body(body).send();
+    let observer = client.clone();
+    let (resp, early) = tokio::join!(pending, async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        observer.get_session_recovery_token().is_some()
+    });
+    out.token_before_response = Some(early);
+    let resp = resp?;
+    out.status = Some(resp.status().as_u16());
+    out.body_hex = Some(hex::encode(resp.bytes()));
     Ok(())
 }
 
