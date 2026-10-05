@@ -34,6 +34,8 @@ struct Out {
     bytes_emitted_before_error: usize,
     native_error: Option<String>,
     runner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peak_rss_bytes: Option<u64>,
 }
 
 #[tokio::main]
@@ -88,6 +90,7 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
             out.body_hex = Some(hex::encode(id.marshal_public_config()));
         }
         "request" => request(fx, out).await?,
+        "large_body" => large_body(fx, out).await?,
         "discover" => {
             Client::new(&discover_target(fx)).await?;
         }
@@ -196,6 +199,43 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
     out.body_hex = Some(hex::encode(resp.bytes()));
     out.passthrough = no_nonce && !status.is_success();
     Ok(())
+}
+
+/// large_body streams a multi-GiB patterned body (1 MiB block, block[i] =
+/// (i + seed) & 0xff, repeated) to the oracle's digest route without ever
+/// materialising it, and reports peak RSS so buffering would be visible.
+async fn large_body(fx: &Value, out: &mut Out) -> Result<(), Error> {
+    let size = fx["inputs"]["size_bytes"].as_u64().unwrap_or(0);
+    let seed = fx["inputs"]["block_seed"].as_u64().unwrap_or(0) as usize;
+    let block: bytes::Bytes = (0..1usize << 20).map(|i| (i + seed) as u8).collect::<Vec<u8>>().into();
+    let source = futures_util::stream::unfold((block, size), |(block, remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let n = remaining.min(block.len() as u64) as usize;
+        Some((Ok::<_, std::io::Error>(block.slice(..n)), (block, remaining - n as u64)))
+    });
+
+    let base = std::env::var("ORACLE_URL").unwrap_or_default();
+    let client = Client::new(&base).await?;
+    let path = fx["request"]["path"].as_str().unwrap_or("/s/digest");
+    let resp = client.post(path)?.body_stream(source).send().await?;
+    out.status = Some(resp.status().as_u16());
+    out.body_hex = Some(hex::encode(resp.bytes()));
+    out.peak_rss_bytes = Some(peak_rss_bytes());
+    Ok(())
+}
+
+fn peak_rss_bytes() -> u64 {
+    // SAFETY: getrusage only writes into the zeroed struct we hand it.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let max = usage.ru_maxrss as u64;
+    if cfg!(target_os = "macos") {
+        max
+    } else {
+        max << 10
+    }
 }
 
 /// map_error reads the canonical code the library attached (Error::code()).
