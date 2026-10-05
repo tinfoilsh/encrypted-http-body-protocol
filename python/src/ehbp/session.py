@@ -15,7 +15,7 @@ from .derive import FrameDecryptor, decrypt_framed_response, derive_response_key
 from .errors import InvalidResponseNonceError, InvalidTokenError
 from .protocol import (
     EXPORT_LENGTH,
-    MAX_CHUNK_LENGTH,
+    MAX_RESPONSE_CHUNK_LENGTH,
     REQUEST_ENC_LENGTH,
     RESPONSE_NONCE_LENGTH,
 )
@@ -104,7 +104,7 @@ class SessionRecoveryToken:
         self,
         response_nonce: bytes,
         *,
-        max_chunk_length: int = MAX_CHUNK_LENGTH,
+        max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH,
     ) -> FrameDecryptor:
         """Create an incremental authenticated decryptor for this response.
 

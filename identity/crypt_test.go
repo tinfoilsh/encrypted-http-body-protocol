@@ -1042,6 +1042,15 @@ func TestDerivedStreamingDecryptReaderClose(t *testing.T) {
 	})
 }
 
+func TestStreamingDecryptReaderRejectsOversizedChunk(t *testing.T) {
+	// The request-side reader must apply the same bound before allocating.
+	reader := &StreamingDecryptReader{reader: bytes.NewReader([]byte{0xFF, 0xFF, 0xFF, 0xFF})}
+
+	_, err := reader.Read(make([]byte, 16))
+	assert.Equal(t, protocol.ChunkTooLarge, protocol.CodeOf(err))
+	assert.True(t, IsClientError(err))
+}
+
 func TestDerivedStreamingDecryptReaderRejectsOversizedChunk(t *testing.T) {
 	// A 4-byte length prefix declaring a ~4 GiB chunk must be rejected before the
 	// reader allocates a buffer for the unauthenticated, attacker-controlled length.
@@ -1053,4 +1062,17 @@ func TestDerivedStreamingDecryptReaderRejectsOversizedChunk(t *testing.T) {
 	_, err := reader.Read(make([]byte, 16))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "maximum allowed size")
+}
+
+func TestDecryptRequestRejectsDuplicateEncapsulatedKey(t *testing.T) {
+	id, err := NewIdentity()
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/probe", strings.NewReader("secret"))
+	_, err = id.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+	req.Header.Add(protocol.EncapsulatedKeyHeader, req.Header.Get(protocol.EncapsulatedKeyHeader))
+
+	_, err = id.DecryptRequestWithContext(req)
+	assert.Equal(t, protocol.InvalidEncapsulatedKey, protocol.CodeOf(err))
+	assert.True(t, IsClientError(err))
 }

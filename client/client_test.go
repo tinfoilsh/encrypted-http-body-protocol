@@ -429,6 +429,65 @@ func (r *firstResponseCorruptingRoundTripper) RoundTrip(req *http.Request) (*htt
 	return resp, nil
 }
 
+func TestTransportHostHeaderFollowsURL(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	cfg, err := serverIdentity.MarshalConfig()
+	assert.NoError(t, err)
+
+	var wireHost string
+	recorder := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		wireHost = req.Host
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	transport, err := NewTransportWithConfig("http://configured.example", cfg,
+		WithHTTPClient(&http.Client{Transport: recorder}))
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", "http://configured.example/probe", strings.NewReader("x"))
+	assert.NoError(t, err)
+	req.Host = "attacker.invalid"
+	_, _ = transport.RoundTrip(req)
+	// An empty Host makes net/http derive it from the URL.
+	assert.Equal(t, "", wireHost)
+}
+
+func TestTransportRejectsRequestsThatEscapeTheOrigin(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	cfg, err := serverIdentity.MarshalConfig()
+	assert.NoError(t, err)
+
+	sent := false
+	recorder := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		sent = true
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	transport, err := NewTransportWithConfig("http://configured.example", cfg,
+		WithHTTPClient(&http.Client{Transport: recorder}))
+	assert.NoError(t, err)
+
+	cases := map[string]func(*http.Request){
+		"cross origin":    func(r *http.Request) { r.URL, _ = url.Parse("http://attacker.invalid/probe") },
+		"url credentials": func(r *http.Request) { r.URL.User = url.UserPassword("user", "pass") },
+		"reserved header": func(r *http.Request) { r.Header.Set(protocol.ResponseNonceHeader, strings.Repeat("0", 64)) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			req, err := http.NewRequest("POST", "http://configured.example/probe", strings.NewReader("x"))
+			assert.NoError(t, err)
+			mutate(req)
+			resp, err := transport.RoundTrip(req)
+			assert.Nil(t, resp)
+			assert.Equal(t, protocol.InvalidInput, protocol.CodeOf(err))
+			assert.False(t, sent)
+		})
+	}
+
+	_, err = NewTransportWithConfig("http://user:pass@configured.example", cfg)
+	assert.Equal(t, protocol.InvalidInput, protocol.CodeOf(err))
+}
+
 func TestWithHTTPClient(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
@@ -590,6 +649,31 @@ func TestTransportRejectsNonceLessSuccessResponse(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.ErrorContains(t, err, protocol.ResponseNonceHeader)
 	assert.Nil(t, transport.GetSessionRecoveryToken())
+}
+
+func TestTransportRejectsDuplicateResponseNonce(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonce := strings.Repeat("00", identity.ResponseNonceLength)
+		w.Header().Add(protocol.ResponseNonceHeader, nonce)
+		w.Header().Add(protocol.ResponseNonceHeader, nonce)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	assert.Nil(t, resp)
+	assert.Equal(t, protocol.DuplicateResponseNonce, protocol.CodeOf(err))
 }
 
 func TestTransportGetSessionRecoveryToken(t *testing.T) {
@@ -915,3 +999,7 @@ func TestTransportBoundsProblemDetailsParsing(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, body, string(got))
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

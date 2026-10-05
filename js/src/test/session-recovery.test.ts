@@ -17,6 +17,7 @@ import {
   decryptResponseWithToken,
   serializeSessionRecoveryToken,
   deserializeSessionRecoveryToken,
+  InvalidTokenError,
 } from '../index.js';
 import type { SessionRecoveryToken } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
@@ -185,6 +186,13 @@ async function buildStreamingEncryptedResponse(
 
 describe('Session Recovery Token', () => {
   describe('extractSessionRecoveryToken', () => {
+    it('should reject a serialized token with short fields', () => {
+      const short = JSON.stringify({ exportedSecret: '00'.repeat(16), requestEnc: '00'.repeat(32) });
+      assert.throws(() => deserializeSessionRecoveryToken(short), InvalidTokenError);
+      const shortEnc = JSON.stringify({ exportedSecret: '00'.repeat(32), requestEnc: '00'.repeat(16) });
+      assert.throws(() => deserializeSessionRecoveryToken(shortEnc), InvalidTokenError);
+    });
+
     it('should return a token with correct field sizes', async () => {
       const { identity } = await generateTestKeys();
       const request = new Request('https://server.test/api', {
