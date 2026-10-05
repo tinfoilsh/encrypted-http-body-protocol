@@ -975,13 +975,18 @@ describe('Transport', () => {
     const f = captureFetch(); f.install(state);
     try {
       const transport = new Transport(serverIdentity, 'https://server.test');
-      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original200k()); c.close(); } });
+      let cancelled: unknown;
+      const source = new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(original200k()); },
+        cancel(reason) { cancelled = reason; },
+      });
       await assert.rejects(
         transport.request('https://server.test/upload', { method: 'POST', body: source }),
         (err: unknown) => err instanceof DOMException && err.name === 'QuotaExceededError',
       );
       assert.strictEqual(state.aborted, 1);
       assert.strictEqual(state.removed.length, 1);
+      assert.ok(cancelled instanceof DOMException, 'the caller stream is cancelled with the failure');
     } finally {
       f.restore(); restore(); restoreMode();
     }
@@ -997,6 +1002,7 @@ describe('Transport', () => {
       const transport = new Transport(serverIdentity, 'https://server.test');
       await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()]) });
       assert.ok(state.removed.includes(old), 'stale spool swept');
+      assert.ok(state.writes.length > 0, 'sweep happens before the quota check, so the upload still spools');
       assert.ok(!state.removed.includes(fresh), 'a concurrent upload\'s spool is left alone');
       assert.ok(!state.removed.includes('unrelated-file'));
     } finally {

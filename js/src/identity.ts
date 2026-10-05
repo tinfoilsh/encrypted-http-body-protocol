@@ -364,6 +364,9 @@ export class Identity {
       try {
         sink = await spool(frames, source instanceof Blob ? source.size : undefined);
       } catch (err) {
+        // Abandoning the frame stream must release the caller's source too
+        // (encryptFrames forwards the cancel to the reader it owns).
+        await frames.cancel(err).catch(() => {});
         // The frames are consumed. A Blob source can be re-read, so seal it
         // again under a fresh context into the in-memory fallback; a stream
         // cannot be replayed and the failure surfaces as is.
@@ -725,13 +728,15 @@ async function spool(
     typeof (globalThis as { FileSystemFileHandle?: { prototype: { createWritable?: unknown } } })
       .FileSystemFileHandle?.prototype?.createWritable === 'function';
   if (!canSpool) return { body: await collect(frames) };
+  const root = await storage.getDirectory();
+  // Sweep first: a stale spool from a dead page could otherwise hold the
+  // quota that this upload needs and push it into the memory fallback forever.
+  await sweepOrphanedSpools(root);
   if (knownSize !== undefined && typeof storage.estimate === 'function') {
     const { quota = 0, usage = 0 } = await storage.estimate();
     if (quota - usage < framedSize(knownSize)) return { body: await collect(frames) };
   }
 
-  const root = await storage.getDirectory();
-  await sweepOrphanedSpools(root);
   const name = `${SPOOL_PREFIX}${Date.now()}-${Math.random().toString(16).slice(2)}`;
   // Removal failures propagate: a leftover file is ciphertext only, but the
   // caller should know it is still there rather than assume it is gone.
@@ -739,15 +744,19 @@ async function spool(
   try {
     const handle = await root.getFileHandle(name, { create: true });
     const writer = await handle.createWritable();
+    const reader = frames.getReader();
     try {
-      for (const reader = frames.getReader(); ;) {
+      for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         await writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
       }
     } catch (err) {
-      // An errored writable cannot be closed; abort it so the original error
-      // (quota exhausted mid-body, I/O failure) is the one that surfaces.
+      // Release the caller's source (the frame stream forwards the cancel)
+      // and abort the writable: an errored one cannot be closed, and
+      // aborting keeps the original error (quota exhausted mid-body, I/O
+      // failure) as the one that surfaces.
+      await reader.cancel(err).catch(() => {});
       await writer.abort(err).catch(() => {});
       throw err;
     }
