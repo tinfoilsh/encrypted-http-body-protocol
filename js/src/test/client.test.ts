@@ -822,7 +822,7 @@ describe('Transport', () => {
       Object.defineProperty(process, 'versions', versions);
     };
   }
-  function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[] } = {}) {
+  function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[]; failClose?: boolean } = {}) {
     const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0, openedAtWrites: -1 };
     const chunks: Uint8Array[] = [];
     const handle = {
@@ -837,7 +837,10 @@ describe('Transport', () => {
             state.writes.push(v.byteLength); chunks.push(new Uint8Array(v));
           },
           async abort() { state.aborted++; },
-          async close() { if (errored) { state.closedAfterError++; throw new TypeError('Cannot close a ERRORED writable stream'); } },
+          async close() {
+            if (errored) { state.closedAfterError++; throw new TypeError('Cannot close a ERRORED writable stream'); }
+            if (opts.failClose) throw new DOMException('disk full at close', 'QuotaExceededError');
+          },
         };
       },
       async getFile() { return new File(chunks as BlobPart[], 'spool'); },
@@ -1105,6 +1108,24 @@ describe('Transport', () => {
       const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
       assert.strictEqual(frames, 4);
       assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should remove the spool when finalization fails and surface that error', async () => {
+    const restoreMode = browserMode(1024);
+    const { state, restore } = fakeOpfs({ failClose: true });
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original200k()); c.close(); } });
+      await assert.rejects(
+        transport.request('https://server.test/upload', { method: 'POST', body: source }),
+        (err: unknown) => err instanceof DOMException && err.message === 'disk full at close',
+      );
+      assert.strictEqual(state.removed.length, 1, 'the spool file is removed after a failed close');
+      assert.strictEqual(state.aborted, 1);
     } finally {
       f.restore(); restore(); restoreMode();
     }

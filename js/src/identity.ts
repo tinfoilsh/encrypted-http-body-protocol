@@ -710,15 +710,6 @@ export function encryptFrames(
 }
 
 /**
- * Where the runtime cannot stream an upload, write the encrypted frames to an
- * Origin Private File System file as they are produced and upload the File:
- * browsers stream a File body from disk, so memory stays one frame deep.
- * Falls back to a single in-memory Blob when OPFS is missing or its quota
- * cannot hold a body of known size.
- * ponytail: Safari exposes OPFS only through sync access handles in a worker,
- * so it takes the Blob fallback; a worker-based spool is the upgrade path.
- */
-/**
  * Browser sink for the sealed frames. Bodies up to SPOOL_THRESHOLD_BYTES stay
  * in memory as one Blob of frames, so ordinary requests never touch disk;
  * only a body that grows past the threshold spills to an Origin Private File
@@ -785,8 +776,16 @@ async function spool(
   }
 
   if (!file) return { body: new Blob(parts as BlobPart[]) };
-  await file.writer.close();
-  return { body: await file.handle.getFile(), cleanup: file.cleanup };
+  try {
+    await file.writer.close();
+    return { body: await file.handle.getFile(), cleanup: file.cleanup };
+  } catch (err) {
+    // Finalization failed (close or getFile): same abort-and-remove path, so
+    // no spool file is left behind and the original error propagates.
+    await file.writer.abort(err).catch(() => {});
+    await file.cleanup().catch(() => {});
+    throw err;
+  }
 }
 
 /**

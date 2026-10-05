@@ -304,8 +304,11 @@ export class Transport {
       clearToken();
       throw err;
     } finally {
-      // Response headers mean the upload finished; a spool file is done.
-      await cleanup?.();
+      // Response headers mean the upload finished; a spool file is done. A
+      // removal failure must neither fail a completed exchange nor mask the
+      // real error: the file holds ciphertext only and the orphan sweep
+      // removes it on the next large upload.
+      await cleanup?.().catch(() => {});
     }
     if (!shouldDecrypt) {
       clearToken();
