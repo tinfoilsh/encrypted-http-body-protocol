@@ -62,13 +62,24 @@ public struct SessionRecoveryToken: Sendable, Codable {
         self.requestEnc = requestEncData
     }
 
+    /// Parses the SPEC 6.1.1 JSON form; any malformation is `EHBPError` with code `.invalidToken`.
+    public init(json: Data) throws {
+        do {
+            self = try JSONDecoder().decode(SessionRecoveryToken.self, from: json)
+        } catch let error as DecodingError {
+            throw EHBPError(.invalidToken, "invalid session recovery token: \(error.brief)")
+        } catch {
+            throw EHBPError(.invalidToken, "invalid session recovery token: \(error)")
+        }
+    }
+
     /// Creates an incremental authenticated decryptor for this response.
     public func makeResponseDecryptor(
         responseNonce: Data,
         maxChunkLength: Int = EHBPConstants.maxResponseChunkBytes
     ) throws -> ResponseDecryptor {
         guard maxChunkLength > 0 else {
-            throw EHBPError.invalidInput("maximum chunk length must be positive")
+            throw EHBPError(.invalidInput, "maximum chunk length must be positive")
         }
         let keyMaterial = try deriveResponseKeys(
             exportedSecret: exportedSecret,
@@ -121,7 +132,7 @@ public final class Identity: Sendable {
     /// - Parameter publicKeyBytes: 32-byte X25519 public key
     public init(publicKeyBytes: Data) throws {
         guard publicKeyBytes.count == 32 else {
-            throw EHBPError.invalidInput("public key must be 32 bytes, got \(publicKeyBytes.count)")
+            throw EHBPError(.invalidKeyConfig, "public key must be 32 bytes, got \(publicKeyBytes.count)")
         }
 
         self.publicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKeyBytes)
@@ -140,7 +151,7 @@ public final class Identity: Sendable {
     /// - Parameter publicKeyHex: 64-character hex string representing a 32-byte X25519 public key
     public convenience init(publicKeyHex: String) throws {
         guard let publicKeyBytes = Data(hexString: publicKeyHex) else {
-            throw EHBPError.invalidInput("invalid hex string")
+            throw EHBPError(.invalidKeyConfig, "invalid public key hex")
         }
         try self.init(publicKeyBytes: publicKeyBytes)
     }
@@ -159,7 +170,7 @@ public final class Identity: Sendable {
     /// - Parameter config: RFC 9458 key configuration data
     public init(config: Data) throws {
         guard config.count >= 7 else {
-            throw EHBPError.invalidInput("config too short")
+            throw EHBPError(.invalidKeyConfig, "config too short")
         }
 
         var offset = 0
@@ -172,13 +183,13 @@ public final class Identity: Sendable {
         offset += 2
 
         guard kemId == HPKEConfig.kem else {
-            throw EHBPError.invalidInput("unsupported KEM: 0x\(String(kemId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported KEM: 0x\(String(kemId, radix: 16))")
         }
 
         // Public Key (32 bytes for X25519)
         let publicKeySize = 32
         guard config.count >= offset + publicKeySize else {
-            throw EHBPError.invalidInput("config too short for public key")
+            throw EHBPError(.invalidKeyConfig, "config too short for public key")
         }
 
         let publicKeyBytes = config.subdata(in: offset..<(offset + publicKeySize))
@@ -186,7 +197,7 @@ public final class Identity: Sendable {
 
         // Cipher Suites Length (2 bytes)
         guard config.count >= offset + 2 else {
-            throw EHBPError.invalidInput("config too short for cipher suites length")
+            throw EHBPError(.invalidKeyConfig, "config too short for cipher suites length")
         }
 
         let cipherSuitesLength = Int(config[offset]) << 8 | Int(config[offset + 1])
@@ -194,17 +205,17 @@ public final class Identity: Sendable {
 
         // Parse first cipher suite
         guard cipherSuitesLength >= 4, config.count >= offset + 4 else {
-            throw EHBPError.invalidInput("no cipher suites in config")
+            throw EHBPError(.invalidKeyConfig, "no cipher suites in config")
         }
 
         let kdfId = UInt16(config[offset]) << 8 | UInt16(config[offset + 1])
         let aeadId = UInt16(config[offset + 2]) << 8 | UInt16(config[offset + 3])
 
         guard kdfId == HPKEConfig.kdf else {
-            throw EHBPError.invalidInput("unsupported KDF: 0x\(String(kdfId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported KDF: 0x\(String(kdfId, radix: 16))")
         }
         guard aeadId == HPKEConfig.aead else {
-            throw EHBPError.invalidInput("unsupported AEAD: 0x\(String(aeadId, radix: 16))")
+            throw EHBPError(.unsupportedSuite, "unsupported AEAD: 0x\(String(aeadId, radix: 16))")
         }
 
         self.publicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKeyBytes)
@@ -262,5 +273,22 @@ public final class Identity: Sendable {
             requestEnc: token.requestEnc,
             responseNonce: responseNonce
         )
+    }
+}
+
+private extension DecodingError {
+    /// One-line cause without Foundation's debug dump.
+    var brief: String {
+        switch self {
+        case .keyNotFound(let key, _):
+            return "missing \(key.stringValue)"
+        case .dataCorrupted(let context):
+            return context.debugDescription
+        case .typeMismatch(_, let context), .valueNotFound(_, let context):
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+            return path.isEmpty ? "expected JSON object" : "wrong type for \(path)"
+        @unknown default:
+            return String(describing: self)
+        }
     }
 }

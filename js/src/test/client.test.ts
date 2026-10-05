@@ -5,7 +5,7 @@ import {
   Transport,
   createTransport,
   KeyConfigMismatchError,
-  ProtocolError,
+  MissingResponseNonceError,
 } from '../index.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
@@ -227,7 +227,7 @@ describe('Transport', () => {
         () => transport.post(`${serverURL}/secure`, 'hello'),
         (err: unknown) => {
           assert(err instanceof KeyConfigMismatchError, `Expected KeyConfigMismatchError, got ${(err as Error).constructor.name}`);
-          assert.strictEqual(err.title, 'key configuration mismatch');
+          assert.strictEqual(err.message, 'KEY_CONFIG_MISMATCH: key configuration mismatch');
           return true;
         }
       );
@@ -310,8 +310,8 @@ describe('Transport', () => {
       await assert.rejects(
         () => transport.post('https://server.test/secure', 'hello'),
         (err: unknown) => {
-          assert(err instanceof ProtocolError);
-          assert.match(err.message, new RegExp(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`));
+          assert(err instanceof MissingResponseNonceError);
+          assert.match(err.message, /MISSING_RESPONSE_NONCE/);
           return true;
         }
       );
@@ -390,7 +390,7 @@ describe('Transport', () => {
     try {
       await assert.rejects(
         () => transport.post('https://server.test/secure', 'hello'),
-        /Invalid response nonce length/
+        /INVALID_RESPONSE_NONCE/
       );
       assert.throws(
         () => transport.getSessionRecoveryToken(),

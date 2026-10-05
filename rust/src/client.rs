@@ -25,7 +25,7 @@ use crate::{
         PROBLEM_JSON_MEDIA_TYPE, RESPONSE_NONCE_HEADER, RESPONSE_NONCE_LENGTH,
     },
     session::SessionRecoveryToken,
-    Error, Result,
+    Code, Error, Result,
 };
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
@@ -59,15 +59,17 @@ impl Client {
         let response = http_client.get(keys_url).send().await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::Protocol(format!(
-                "server returned status {status} while fetching key configuration"
-            )));
+            return Err(Error::Coded(
+                Code::InvalidKeyConfig,
+                format!("server returned status {status} while fetching key configuration"),
+            ));
         }
         let content_type = media_type(response.headers());
         if content_type != KEYS_MEDIA_TYPE {
-            return Err(Error::Protocol(format!(
-                "server returned invalid key content type: {content_type}"
-            )));
+            return Err(Error::Coded(
+                Code::InvalidKeyConfig,
+                format!("server returned invalid key content type: {content_type}"),
+            ));
         }
 
         let config = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
@@ -312,9 +314,10 @@ impl Client {
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             if status.is_success() {
-                return Err(Error::Protocol(format!(
-                    "missing {RESPONSE_NONCE_HEADER} header"
-                )));
+                return Err(Error::Coded(
+                    Code::MissingResponseNonce,
+                    format!("missing {RESPONSE_NONCE_HEADER} header"),
+                ));
             }
 
             let body = if is_problem_json_status(status, &headers) {
@@ -356,9 +359,10 @@ impl Client {
         self.validate_request_url(request.url())?;
         for name in request.headers().keys() {
             if is_reserved_raw_request_header(name) {
-                return Err(Error::InvalidInput(format!(
-                    "reserved request header cannot be set by callers: {name}"
-                )));
+                return Err(Error::Coded(
+                    Code::InvalidInput,
+                    format!("reserved request header cannot be set by callers: {name}"),
+                ));
             }
         }
         Ok(())
@@ -500,13 +504,17 @@ impl Client {
 
     fn validate_request_url(&self, url: &Url) -> Result<()> {
         if !same_origin(&self.base_url, url) {
-            return Err(Error::InvalidInput(format!(
-                "request URL must use the configured origin: {}",
-                self.base_url.origin().ascii_serialization()
-            )));
+            return Err(Error::Coded(
+                Code::InvalidInput,
+                format!(
+                    "request URL must use the configured origin: {}",
+                    self.base_url.origin().ascii_serialization()
+                ),
+            ));
         }
         if !url.username().is_empty() || url.password().is_some() {
-            return Err(Error::InvalidInput(
+            return Err(Error::Coded(
+                Code::InvalidInput,
                 "request URL must not include credentials".into(),
             ));
         }
@@ -549,17 +557,18 @@ impl RequestBuilder {
         V: TryInto<HeaderValue>,
         V::Error: std::fmt::Display,
     {
-        let name = name
-            .try_into()
-            .map_err(|err| Error::InvalidInput(format!("invalid header name: {err}")))?;
+        let name = name.try_into().map_err(|err| {
+            Error::Coded(Code::InvalidInput, format!("invalid header name: {err}"))
+        })?;
         if is_reserved_request_header(&name) {
-            return Err(Error::InvalidInput(format!(
-                "reserved request header cannot be set by callers: {name}"
-            )));
+            return Err(Error::Coded(
+                Code::InvalidInput,
+                format!("reserved request header cannot be set by callers: {name}"),
+            ));
         }
-        let value = value
-            .try_into()
-            .map_err(|err| Error::InvalidInput(format!("invalid header value: {err}")))?;
+        let value = value.try_into().map_err(|err| {
+            Error::Coded(Code::InvalidInput, format!("invalid header value: {err}"))
+        })?;
         self.headers.insert(name, value);
         Ok(self)
     }
@@ -656,17 +665,20 @@ fn default_http_client() -> Result<reqwest::Client> {
 
 fn normalize_base_url(mut url: Url) -> Result<Url> {
     if url.cannot_be_a_base() || url.host_str().is_none() {
-        return Err(Error::InvalidInput(
+        return Err(Error::Coded(
+            Code::InvalidInput,
             "base URL must include an HTTP origin".into(),
         ));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(Error::InvalidInput(
+        return Err(Error::Coded(
+            Code::InvalidInput,
             "base URL must not include credentials".into(),
         ));
     }
     if url.scheme() != "http" && url.scheme() != "https" {
-        return Err(Error::InvalidInput(
+        return Err(Error::Coded(
+            Code::InvalidInput,
             "base URL scheme must be http or https".into(),
         ));
     }
@@ -684,8 +696,12 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 }
 
 fn header_name(name: &str) -> Result<HeaderName> {
-    HeaderName::from_bytes(name.as_bytes())
-        .map_err(|err| Error::InvalidInput(format!("invalid protocol header name: {err}")))
+    HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+        Error::Coded(
+            Code::InvalidInput,
+            format!("invalid protocol header name: {err}"),
+        )
+    })
 }
 
 fn is_reserved_request_header(name: &HeaderName) -> bool {
@@ -728,23 +744,38 @@ fn strip_encrypted_framing_headers(headers: &mut HeaderMap) {
 
 fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
     let mut values = headers.get_all(RESPONSE_NONCE_HEADER).iter();
-    let nonce = values
-        .next()
-        .ok_or_else(|| Error::Protocol(format!("missing {RESPONSE_NONCE_HEADER} header")))?;
+    let nonce = values.next().ok_or_else(|| {
+        Error::Coded(
+            Code::MissingResponseNonce,
+            format!("missing {RESPONSE_NONCE_HEADER} header"),
+        )
+    })?;
     if values.next().is_some() {
-        return Err(Error::Protocol(format!(
-            "multiple {RESPONSE_NONCE_HEADER} headers"
-        )));
+        return Err(Error::Coded(
+            Code::DuplicateResponseNonce,
+            format!("multiple {RESPONSE_NONCE_HEADER} headers"),
+        ));
     }
-    let nonce = nonce
-        .to_str()
-        .map_err(|err| Error::Protocol(format!("invalid response nonce header: {err}")))?;
-    let nonce = hex::decode(nonce)?;
+    let nonce = nonce.to_str().map_err(|err| {
+        Error::Coded(
+            Code::InvalidResponseNonce,
+            format!("invalid response nonce header: {err}"),
+        )
+    })?;
+    let nonce = hex::decode(nonce).map_err(|err| {
+        Error::Coded(
+            Code::InvalidResponseNonce,
+            format!("invalid response nonce hex: {err}"),
+        )
+    })?;
     if nonce.len() != RESPONSE_NONCE_LENGTH {
-        return Err(Error::Protocol(format!(
-            "invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {}",
-            nonce.len()
-        )));
+        return Err(Error::Coded(
+            Code::InvalidResponseNonce,
+            format!(
+                "invalid response nonce length: expected {RESPONSE_NONCE_LENGTH}, got {}",
+                nonce.len()
+            ),
+        ));
     }
     Ok(nonce)
 }
@@ -774,7 +805,7 @@ fn check_key_config_mismatch(status: StatusCode, headers: &HeaderMap, body: &[u8
             .get("title")
             .and_then(|value| value.as_str())
             .unwrap_or("key configuration mismatch");
-        return Err(Error::KeyConfigMismatch(title.to_owned()));
+        return Err(Error::Coded(Code::KeyConfigMismatch, title.to_owned()));
     }
 
     Ok(())
@@ -870,7 +901,8 @@ where
             .checked_add(chunk.len())
             .ok_or_else(|| Error::Protocol("response body size overflow".into()))?;
         if new_len > max_response_bytes {
-            return Err(Error::Protocol(
+            return Err(Error::Coded(
+                Code::ChunkTooLarge,
                 "response body exceeds maximum allowed size".into(),
             ));
         }
@@ -1134,7 +1166,7 @@ mod tests {
         assert_eq!(hex::encode(first), vector.plaintext);
         assert!(matches!(
             decrypted.next().await.unwrap(),
-            Err(Error::Crypto(_))
+            Err(Error::Coded(Code::AeadDecryptFailed, _))
         ));
     }
 
@@ -1146,10 +1178,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
-        ));
+        assert!(matches!(err, Error::Coded(Code::ChunkTooLarge, _)));
     }
 
     #[tokio::test]
@@ -1198,10 +1227,7 @@ mod tests {
             .expect("stream should yield an item")
             .unwrap_err();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("exceeds maximum allowed size")
-        ));
+        assert!(matches!(err, Error::Coded(Code::ChunkTooLarge, _)));
     }
 
     #[tokio::test]
@@ -1323,10 +1349,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
-        ));
+        assert!(matches!(err, Error::Coded(Code::MissingResponseNonce, _)));
         assert!(client.get_session_recovery_token().is_none());
     }
 
@@ -1343,10 +1366,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains(RESPONSE_NONCE_HEADER)
-        ));
+        assert!(matches!(err, Error::Coded(Code::MissingResponseNonce, _)));
         assert!(client.get_session_recovery_token().is_none());
     }
 
@@ -1592,7 +1612,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, Error::KeyConfigMismatch(title) if title == "rotate key"));
+        assert!(
+            matches!(err, Error::Coded(Code::KeyConfigMismatch, title) if title == "rotate key")
+        );
         assert!(client.get_session_recovery_token().is_none());
     }
 
@@ -1874,10 +1896,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(matches!(
-            err,
-            Error::Protocol(message) if message.contains("invalid key content type")
-        ));
+        assert!(matches!(err, Error::Coded(Code::InvalidKeyConfig, _)));
     }
 
     #[test]

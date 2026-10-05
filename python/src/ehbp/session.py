@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Any, Union
 
 from .derive import FrameDecryptor, decrypt_framed_response, derive_response_keys
-from .errors import InvalidInputError, ProtocolError
+from .errors import InvalidResponseNonceError, InvalidTokenError
 from .protocol import (
     EXPORT_LENGTH,
     MAX_CHUNK_LENGTH,
@@ -29,11 +29,11 @@ class SessionRecoveryToken:
 
     def __init__(self, exported_secret: bytes, request_enc: bytes) -> None:
         if len(exported_secret) != EXPORT_LENGTH:
-            raise InvalidInputError(
+            raise InvalidTokenError(
                 f"exported secret must be {EXPORT_LENGTH} bytes, got {len(exported_secret)}"
             )
         if len(request_enc) != REQUEST_ENC_LENGTH:
-            raise InvalidInputError(
+            raise InvalidTokenError(
                 f"request enc must be {REQUEST_ENC_LENGTH} bytes, got {len(request_enc)}"
             )
         self._exported_secret = bytes(exported_secret)
@@ -76,7 +76,7 @@ class SessionRecoveryToken:
             exported_secret = bytes.fromhex(data[_EXPORTED_SECRET_KEY])
             request_enc = bytes.fromhex(data[_REQUEST_ENC_KEY])
         except (KeyError, TypeError, ValueError) as err:
-            raise InvalidInputError(f"invalid session recovery token: {err}") from err
+            raise InvalidTokenError(f"invalid session recovery token: {err}") from err
         return cls(exported_secret, request_enc)
 
     @classmethod
@@ -84,15 +84,15 @@ class SessionRecoveryToken:
         try:
             decoded = json.loads(data)
         except (TypeError, ValueError) as err:
-            raise InvalidInputError(f"invalid session recovery token JSON: {err}") from err
+            raise InvalidTokenError(f"invalid session recovery token JSON: {err}") from err
         if not isinstance(decoded, Mapping):
-            raise InvalidInputError("invalid session recovery token: expected JSON object")
+            raise InvalidTokenError("invalid session recovery token: expected JSON object")
         return cls.from_dict(decoded)
 
     def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
         """Decrypt a complete framed response body."""
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
-            raise ProtocolError(
+            raise InvalidResponseNonceError(
                 f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
             )
         key_material = derive_response_keys(
@@ -113,7 +113,7 @@ class SessionRecoveryToken:
         chunk has been authenticated and may be consumed before source EOF.
         """
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
-            raise ProtocolError(
+            raise InvalidResponseNonceError(
                 f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
             )
         key_material = derive_response_keys(

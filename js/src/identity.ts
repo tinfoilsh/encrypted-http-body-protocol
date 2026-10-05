@@ -18,7 +18,16 @@ import {
   RESPONSE_NONCE_LENGTH,
   ResponseKeyMaterial,
 } from './derive.js';
-import { ProtocolError, DecryptionError } from './errors.js';
+import {
+  AeadDecryptFailedError,
+  ChunkTooLargeError,
+  FramingTruncatedError,
+  InvalidKeyConfigError,
+  InvalidResponseNonceError,
+  InvalidTokenError,
+  MissingResponseNonceError,
+  UnsupportedSuiteError,
+} from './errors.js';
 import { forwardedRequestInit } from './request-options.js';
 
 /**
@@ -203,7 +212,7 @@ export class Identity {
     }
 
     if (suites.length === 0) {
-      throw new ProtocolError('No cipher suites found in config');
+      throw new InvalidKeyConfigError('no cipher suites found in config');
     }
 
     // Use the first cipher suite
@@ -211,8 +220,8 @@ export class Identity {
 
     // Validate that we support this cipher suite
     if (firstSuite.kdfId !== HPKE_CONFIG.KDF || firstSuite.aeadId !== HPKE_CONFIG.AEAD) {
-      throw new ProtocolError(
-        `Unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
+      throw new UnsupportedSuiteError(
+        `unsupported cipher suite: KDF=0x${firstSuite.kdfId.toString(16)}, AEAD=0x${firstSuite.aeadId.toString(16)}`
       );
     }
 
@@ -227,9 +236,14 @@ export class Identity {
    * and don't need to fetch it.
    */
   static async fromPublicKeyHex(publicKeyHex: string): Promise<Identity> {
-    const publicKeyBytes = hexToBytes(publicKeyHex);
+    let publicKeyBytes: Uint8Array;
+    try {
+      publicKeyBytes = hexToBytes(publicKeyHex);
+    } catch (error) {
+      throw new InvalidKeyConfigError(`invalid public key hex: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
     if (publicKeyBytes.length !== 32) {
-      throw new ProtocolError(`Invalid public key length: expected 32, got ${publicKeyBytes.length}`);
+      throw new InvalidKeyConfigError(`invalid public key length: expected 32, got ${publicKeyBytes.length}`);
     }
 
     return Identity.fromPublicKeyBytes(publicKeyBytes);
@@ -367,11 +381,15 @@ export function serializeSessionRecoveryToken(token: SessionRecoveryToken): stri
  * See SPEC.md Section 6.1.1.
  */
 export function deserializeSessionRecoveryToken(json: string): SessionRecoveryToken {
-  const parsed = JSON.parse(json);
-  return {
-    exportedSecret: hexToBytes(parsed.exportedSecret),
-    requestEnc: hexToBytes(parsed.requestEnc),
-  };
+  try {
+    const parsed = JSON.parse(json);
+    return {
+      exportedSecret: hexToBytes(parsed.exportedSecret),
+      requestEnc: hexToBytes(parsed.requestEnc),
+    };
+  } catch (error) {
+    throw new InvalidTokenError(`invalid session recovery token: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
 }
 
 /**
@@ -393,12 +411,17 @@ export async function decryptResponseWithToken(
   }
 
   if (!responseNonceHex) {
-    throw new ProtocolError(`Missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
+    throw new MissingResponseNonceError(`missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
 
-  const responseNonce = hexToBytes(responseNonceHex);
+  let responseNonce: Uint8Array;
+  try {
+    responseNonce = hexToBytes(responseNonceHex);
+  } catch (error) {
+    throw new InvalidResponseNonceError(`invalid response nonce hex: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
   if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
-    throw new ProtocolError(`Invalid response nonce length`);
+    throw new InvalidResponseNonceError(`invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`);
   }
   if (!response.body) {
     onStreamComplete?.();
@@ -470,7 +493,7 @@ function createDecryptStream(
           }
 
           if (chunkLength > MAX_RESPONSE_CHUNK_BYTES) {
-            fail(new ProtocolError('response chunk exceeds maximum allowed size'));
+            fail(new ChunkTooLargeError('response chunk exceeds maximum allowed size'));
             return;
           }
 
@@ -483,7 +506,7 @@ function createDecryptStream(
               controller.enqueue(plaintext);
               return;
             } catch (error) {
-              fail(new DecryptionError(
+              fail(new AeadDecryptFailedError(
                 `Decryption failed at chunk ${seq - 1}`,
                 { cause: error }
               ));
@@ -510,7 +533,7 @@ function createDecryptStream(
             return;
           }
           if (buffer.length !== 0) {
-            fail(new ProtocolError('truncated encrypted response chunk'));
+            fail(new FramingTruncatedError('truncated encrypted response chunk'));
           } else {
             onStreamComplete?.();
             controller.close();

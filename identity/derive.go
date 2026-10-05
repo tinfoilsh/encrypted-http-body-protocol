@@ -4,9 +4,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
-	"fmt"
 	"io"
 
+	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -51,13 +51,13 @@ type ResponseKeyMaterial struct {
 //	aead_nonce = Expand(prk, "nonce", Nn)
 func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*ResponseKeyMaterial, error) {
 	if len(exportedSecret) != ExportLength {
-		return nil, fmt.Errorf("exported secret must be %d bytes, got %d", ExportLength, len(exportedSecret))
+		return nil, protocol.Errorf(protocol.InvalidInput, "exported secret must be %d bytes, got %d", ExportLength, len(exportedSecret))
 	}
 	if len(requestEnc) != 32 { // X25519 enc is 32 bytes
-		return nil, fmt.Errorf("request enc must be 32 bytes, got %d", len(requestEnc))
+		return nil, protocol.Errorf(protocol.InvalidInput, "request enc must be 32 bytes, got %d", len(requestEnc))
 	}
 	if len(responseNonce) != ResponseNonceLength {
-		return nil, fmt.Errorf("response nonce must be %d bytes, got %d", ResponseNonceLength, len(responseNonce))
+		return nil, protocol.Errorf(protocol.InvalidInput, "response nonce must be %d bytes, got %d", ResponseNonceLength, len(responseNonce))
 	}
 
 	// salt = concat(enc, response_nonce)
@@ -72,14 +72,14 @@ func DeriveResponseKeys(exportedSecret, requestEnc, responseNonce []byte) (*Resp
 	keyReader := hkdf.Expand(sha256.New, prk, []byte(ResponseKeyLabel))
 	key := make([]byte, AES256KeyLength)
 	if _, err := io.ReadFull(keyReader, key); err != nil {
-		return nil, fmt.Errorf("failed to derive response key: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to derive response key: %w", err)
 	}
 
 	// aead_nonce = Expand(prk, "nonce", Nn)
 	nonceReader := hkdf.Expand(sha256.New, prk, []byte(ResponseNonceLabel))
 	nonceBase := make([]byte, AESGCMNonceLength)
 	if _, err := io.ReadFull(nonceReader, nonceBase); err != nil {
-		return nil, fmt.Errorf("failed to derive response nonce: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to derive response nonce: %w", err)
 	}
 
 	return &ResponseKeyMaterial{
@@ -110,11 +110,11 @@ type ResponseAEAD struct {
 func (km *ResponseKeyMaterial) NewResponseAEAD() (*ResponseAEAD, error) {
 	block, err := aes.NewCipher(km.Key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AES cipher: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to create AES cipher: %w", err)
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GCM: %w", err)
+		return nil, protocol.Errorf(protocol.HPKESetupFailed, "failed to create GCM: %w", err)
 	}
 	// Copy nonceBase to avoid sharing the underlying array
 	nonceBase := make([]byte, len(km.NonceBase))
@@ -145,12 +145,12 @@ func (r *ResponseAEAD) Seal(plaintext, aad []byte) []byte {
 // Returns an error if authentication fails.
 func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
 	if r.seq == ^uint64(0) {
-		return nil, fmt.Errorf("response chunk sequence overflow")
+		return nil, protocol.Errorf(protocol.SequenceOverflow, "response chunk sequence overflow")
 	}
 	nonce := r.computeNonce()
 	plaintext, err := r.aead.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
-		return nil, err
+		return nil, protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err)
 	}
 	r.seq++
 	return plaintext, nil
@@ -161,7 +161,11 @@ func (r *ResponseAEAD) Open(ciphertext, aad []byte) ([]byte, error) {
 // Following the pattern from OHTTP's open_seq() function.
 func (r *ResponseAEAD) OpenWithSeq(seq uint64, ciphertext, aad []byte) ([]byte, error) {
 	nonce := r.nonceForSeq(seq)
-	return r.aead.Open(nil, nonce, ciphertext, aad)
+	plaintext, err := r.aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err)
+	}
+	return plaintext, nil
 }
 
 // NonceForSeq returns the nonce that would be used for the given sequence number.

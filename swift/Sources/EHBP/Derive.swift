@@ -30,13 +30,13 @@ public func deriveResponseKeys(
     responseNonce: Data
 ) throws -> ResponseKeyMaterial {
     guard exportedSecret.count == EHBPConstants.exportLength else {
-        throw EHBPError.invalidInput("exported secret must be \(EHBPConstants.exportLength) bytes, got \(exportedSecret.count)")
+        throw EHBPError(.invalidInput, "exported secret must be \(EHBPConstants.exportLength) bytes, got \(exportedSecret.count)")
     }
     guard requestEnc.count == EHBPConstants.requestEncLength else {
-        throw EHBPError.invalidInput("request enc must be \(EHBPConstants.requestEncLength) bytes, got \(requestEnc.count)")
+        throw EHBPError(.invalidInput, "request enc must be \(EHBPConstants.requestEncLength) bytes, got \(requestEnc.count)")
     }
     guard responseNonce.count == EHBPConstants.responseNonceLength else {
-        throw EHBPError.invalidInput("response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
+        throw EHBPError(.invalidInput, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(responseNonce.count)")
     }
 
     var salt = Data()
@@ -102,20 +102,23 @@ public func decryptChunk(
     let nonce = computeNonce(nonceBase: keyMaterial.nonceBase, seq: seq)
 
     guard ciphertext.count >= 16 else {
-        throw EHBPError.decryptionFailed("ciphertext too short")
+        throw EHBPError(.aeadDecryptFailed, "ciphertext too short")
     }
 
     let tagStart = ciphertext.count - 16
     let encryptedData = ciphertext.prefix(tagStart)
     let tag = ciphertext.suffix(16)
 
-    let sealedBox = try AES.GCM.SealedBox(
-        nonce: try AES.GCM.Nonce(data: nonce),
-        ciphertext: encryptedData,
-        tag: tag
-    )
-
-    return try AES.GCM.open(sealedBox, using: keyMaterial.key)
+    do {
+        let sealedBox = try AES.GCM.SealedBox(
+            nonce: try AES.GCM.Nonce(data: nonce),
+            ciphertext: encryptedData,
+            tag: tag
+        )
+        return try AES.GCM.open(sealedBox, using: keyMaterial.key)
+    } catch {
+        throw EHBPError(.aeadDecryptFailed, "failed to decrypt chunk: \(error)")
+    }
 }
 
 /// Incrementally decrypts an EHBP length-prefixed response stream.
@@ -186,13 +189,13 @@ public struct ResponseDecryptor {
                 continue
             }
             if chunkLength > maxChunkLength {
-                throw EHBPError.invalidResponse("response chunk exceeds maximum allowed size")
+                throw EHBPError(.chunkTooLarge, "response chunk exceeds maximum allowed size")
             }
             guard buffer.count - ciphertextStart >= chunkLength else {
                 return nil
             }
             guard sequence < UInt64.max else {
-                throw EHBPError.invalidResponse("response chunk sequence overflow")
+                throw EHBPError(.sequenceOverflow, "response chunk sequence overflow")
             }
 
             let frameEnd = ciphertextStart + chunkLength
@@ -219,28 +222,54 @@ public struct ResponseDecryptor {
     /// Validates that source EOF occurred on a frame boundary.
     public func finish() throws {
         guard buffer.count == readOffset else {
-            throw EHBPError.invalidResponse("truncated encrypted response chunk")
+            throw EHBPError(.framingTruncated, "truncated encrypted response chunk")
         }
     }
 }
 
-/// EHBP errors
-public enum EHBPError: Error, LocalizedError {
-    case invalidInput(String)
-    case encryptionFailed(String)
-    case decryptionFailed(String)
-    case networkError(String)
-    case invalidResponse(String)
-    case missingHeader(String)
+/// Canonical, cross-SDK error class (SPEC Section 5.5). Raw values are identical
+/// in every SDK, so a caller's handling ports between languages.
+public enum EHBPErrorCode: String, Sendable {
+    case invalidKeyConfig = "INVALID_KEY_CONFIG"
+    case unsupportedSuite = "UNSUPPORTED_SUITE"
+    case invalidEncapsulatedKey = "INVALID_ENCAPSULATED_KEY"
+    case hpkeSetupFailed = "HPKE_SETUP_FAILED"
+    case missingResponseNonce = "MISSING_RESPONSE_NONCE"
+    case invalidResponseNonce = "INVALID_RESPONSE_NONCE"
+    case duplicateResponseNonce = "DUPLICATE_RESPONSE_NONCE"
+    case keyConfigMismatch = "KEY_CONFIG_MISMATCH"
+    case framingTruncated = "FRAMING_TRUNCATED"
+    case chunkTooLarge = "CHUNK_TOO_LARGE"
+    case aeadDecryptFailed = "AEAD_DECRYPT_FAILED"
+    case sequenceOverflow = "SEQUENCE_OVERFLOW"
+    case invalidToken = "INVALID_TOKEN"
+    case invalidInput = "INVALID_INPUT"
+}
+
+/// EHBP error: a canonical code (SPEC Section 5.5) plus detail, described as
+/// "<CODE>: <detail>". Compare `code`, as with `URLError.code`. Codes are for the
+/// in-process caller only and are never sent on the wire (SPEC 5.4.4).
+public struct EHBPError: Error, LocalizedError {
+    /// `nil` for a transport failure, which carries no canonical code.
+    public let code: EHBPErrorCode?
+    public let detail: String
+
+    public init(_ code: EHBPErrorCode, _ detail: String) {
+        self.code = code
+        self.detail = detail
+    }
+
+    public static func network(_ detail: String) -> EHBPError {
+        EHBPError(code: nil, detail: detail)
+    }
+
+    private init(code: EHBPErrorCode?, detail: String) {
+        self.code = code
+        self.detail = detail
+    }
 
     public var errorDescription: String? {
-        switch self {
-        case .invalidInput(let msg): return "Invalid input: \(msg)"
-        case .encryptionFailed(let msg): return "Encryption failed: \(msg)"
-        case .decryptionFailed(let msg): return "Decryption failed: \(msg)"
-        case .networkError(let msg): return "Network error: \(msg)"
-        case .invalidResponse(let msg): return "Invalid response: \(msg)"
-        case .missingHeader(let msg): return "Missing header: \(msg)"
-        }
+        guard let code else { return detail }
+        return "\(code.rawValue): \(detail)"
     }
 }

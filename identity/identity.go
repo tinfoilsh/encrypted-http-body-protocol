@@ -5,7 +5,6 @@ import (
 	"crypto/hpke"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 
@@ -72,7 +71,7 @@ func FromPublicKeyBytes(publicKey []byte) (*Identity, error) {
 
 	pk, err := kem.NewPublicKey(publicKey)
 	if err != nil {
-		return nil, fmt.Errorf("invalid public key: %w", err)
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid public key: %w", err)
 	}
 
 	return &Identity{
@@ -89,7 +88,7 @@ func FromPublicKeyBytes(publicKey []byte) (*Identity, error) {
 func FromPublicKeyHex(publicKeyHex string) (*Identity, error) {
 	raw, err := hex.DecodeString(publicKeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid public key hex: %w", err)
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid public key hex: %w", err)
 	}
 	return FromPublicKeyBytes(raw)
 }
@@ -183,7 +182,7 @@ func kemPublicKeySize(kemID uint16) (int, error) {
 	case 0x0021: // DHKEM(X448, HKDF-SHA512)
 		return 56, nil
 	default:
-		return 0, fmt.Errorf("unknown KEM ID: 0x%04x", kemID)
+		return 0, protocol.Errorf(protocol.UnsupportedSuite, "unknown KEM ID: 0x%04x", kemID)
 	}
 }
 
@@ -197,27 +196,27 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 	var kemID uint16
 	if !s.ReadUint8(&id) ||
 		!s.ReadUint16(&kemID) {
-		return nil, fmt.Errorf("invalid config")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
 	}
 
 	kem, err := hpke.NewKEM(kemID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid KEM: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KEM: %w", err)
 	}
 
 	pkSize, err := kemPublicKeySize(kemID)
 	if err != nil {
-		return nil, fmt.Errorf("unsupported KEM: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported KEM: %w", err)
 	}
 
 	publicKeyBytes := make([]byte, pkSize)
 	if !s.ReadBytes(&publicKeyBytes, pkSize) {
-		return nil, fmt.Errorf("invalid config")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
 	}
 
 	var cipherSuites cryptobyte.String
 	if !s.ReadUint16LengthPrefixed(&cipherSuites) {
-		return nil, fmt.Errorf("invalid config")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
 	}
 
 	type cipherSuite struct {
@@ -230,16 +229,16 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 		var aeadID uint16
 		if !cipherSuites.ReadUint16(&kdfID) ||
 			!cipherSuites.ReadUint16(&aeadID) {
-			return nil, fmt.Errorf("invalid config")
+			return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
 		}
 
 		kdf, err := hpke.NewKDF(kdfID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid KDF: %w", err)
+			return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KDF: %w", err)
 		}
 		aead, err := hpke.NewAEAD(aeadID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid AEAD: %w", err)
+			return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid AEAD: %w", err)
 		}
 
 		suites = append(suites, cipherSuite{kdf: kdf, aead: aead})
@@ -247,11 +246,11 @@ func UnmarshalPublicConfig(data []byte) (*Identity, error) {
 
 	pk, err := kem.NewPublicKey(publicKeyBytes)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal public key: %v", err)
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "unmarshal public key: %w", err)
 	}
 
 	if len(suites) == 0 {
-		return nil, fmt.Errorf("no cipher suites found in config")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "no cipher suites found in config")
 	}
 
 	return &Identity{
@@ -288,20 +287,20 @@ func Import(identityJSONBytes []byte) (*Identity, error) {
 	}
 
 	if identityStore.KEM == 0 || identityStore.KDF == 0 || identityStore.AEAD == 0 {
-		return nil, fmt.Errorf("invalid identity HPKE configuration")
+		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid identity HPKE configuration")
 	}
 
 	kem, err := hpke.NewKEM(identityStore.KEM)
 	if err != nil {
-		return nil, fmt.Errorf("invalid KEM: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KEM: %w", err)
 	}
 	kdf, err := hpke.NewKDF(identityStore.KDF)
 	if err != nil {
-		return nil, fmt.Errorf("invalid KDF: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KDF: %w", err)
 	}
 	aead, err := hpke.NewAEAD(identityStore.AEAD)
 	if err != nil {
-		return nil, fmt.Errorf("invalid AEAD: %w", err)
+		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid AEAD: %w", err)
 	}
 
 	var i Identity
