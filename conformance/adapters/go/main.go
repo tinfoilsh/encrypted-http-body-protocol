@@ -493,10 +493,8 @@ func doRequest(fx *fixture, r *result) error {
 	return nil
 }
 
-// mapErr reads the canonical code the library attached (protocol.CodeOf).
-// Anything uncoded is a caller/adapter input error.
-// mapErr reads the canonical code the library attached (protocol.CodeOf);
-// it never matches message text. Uncoded errors are adapter/transport input errors.
+// mapErr reads the canonical code the library attached (protocol.CodeOf); it
+// never matches message text. Uncoded errors are adapter/transport input errors.
 func mapErr(err error) string {
 	if c := protocol.CodeOf(err); c != "" {
 		return string(c)

@@ -22,6 +22,8 @@ import json
 import os
 import re
 import subprocess
+import threading
+import queue
 import sys
 import time
 import urllib.request
@@ -342,24 +344,45 @@ def validate_fixture(fixture, source="fixture", index=0):
 
 def start_oracle():
     """Build and start the oracle; it binds 127.0.0.1:0 for all three listeners
-    and prints their addresses, so there is no port to reserve or race for."""
+    and prints their addresses, so there is no port to reserve or race for.
+    Startup is bounded: a stalled or unhealthy oracle is terminated and reaped
+    before the error propagates, so no process is orphaned."""
     global ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL
     out = ROOT / "conformance" / ".bin" / "oracle"
     out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["go", "build", "-o", str(out), "./conformance/server"], cwd=ROOT, check=True)
     proc = subprocess.Popen([str(out), "-l", "127.0.0.1:0"], cwd=ROOT,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    for _ in range(ORACLE_READY_ATTEMPTS):
-        line = proc.stdout.readline()
-        if not line:
-            break
-        m = re.search(r"listening main=(\S+) bad_ct=(\S+) non200=(\S+)", line)
-        if m:
-            ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL = (f"http://{a}" for a in m.groups())
-            urllib.request.urlopen(f"{ORACLE_URL}/health", timeout=ORACLE_POLL_SECONDS * 10).read()
-            return proc
-    proc.terminate()
-    raise RuntimeError("oracle server did not announce its listeners")
+    deadline = time.monotonic() + ORACLE_READY_ATTEMPTS * ORACLE_POLL_SECONDS
+    try:
+        # readline() blocks, so read it on a thread and wait with the deadline.
+        lines = queue.Queue()
+        threading.Thread(target=lambda: lines.put(proc.stdout.readline()), daemon=True).start()
+        try:
+            line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            raise RuntimeError("oracle server did not announce its listeners in time")
+        m = re.search(r"listening main=(\S+) bad_ct=(\S+) non200=(\S+)", line or "")
+        if not m:
+            raise RuntimeError(f"oracle server did not announce its listeners: {line!r}")
+        ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL = (f"http://{a}" for a in m.groups())
+        last = None
+        while time.monotonic() < deadline:
+            try:
+                urllib.request.urlopen(f"{ORACLE_URL}/health", timeout=ORACLE_POLL_SECONDS).read()
+                return proc
+            except Exception as err:  # noqa: BLE001 - retry until the deadline
+                last = err
+                time.sleep(ORACLE_POLL_SECONDS)
+        raise RuntimeError(f"oracle server never became healthy: {last}")
+    except BaseException:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+        raise
 
 
 def run_adapter(argv, fixture, timeout=ADAPTER_TIMEOUT_SECONDS):
