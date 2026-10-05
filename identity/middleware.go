@@ -122,6 +122,22 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 
 			// Pass with encrypted writer
 			next.ServeHTTP(encryptedWriter, r)
+
+			// SPEC 5.2: a chunk that failed after the handler started must not
+			// let the exchange complete. If nothing has been sent yet this is a
+			// normal protocol error; otherwise abort so the client sees a
+			// transport failure instead of a complete message.
+			if ferr := respCtx.decryptor.Err(); ferr != nil {
+				if !encryptedWriter.wroteHeader {
+					// Nothing has been sent: answer in plaintext, so drop the
+					// response-encryption headers set up for the handler.
+					w.Header().Del(protocol.ResponseNonceHeader)
+					w.Header().Del("Transfer-Encoding")
+					sendError(w, ferr, "failed to read decrypted request body", statusForProtocolError(ferr))
+					return
+				}
+				panic(http.ErrAbortHandler)
+			}
 		})
 	}
 }

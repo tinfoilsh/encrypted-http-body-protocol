@@ -101,6 +101,15 @@ final class IdentityTests: XCTestCase {
         }
     }
 
+    func testIdentityFromConfigWithTwoSuites() {
+        var config = Data([0, 0x00, 0x20])
+        config.append(contentsOf: Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
+        config.append(contentsOf: [0x00, 0x08, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x02])
+        XCTAssertThrowsError(try Identity(config: config)) { error in
+            XCTAssertEqual((error as? EHBPError)?.code, .unsupportedSuite)
+        }
+    }
+
     func testIdentityFromConfigWithWrongKDF() {
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let publicKeyBytes = privateKey.publicKey.rawRepresentation
@@ -234,16 +243,23 @@ final class IdentityTests: XCTestCase {
 
         let identity = try Identity(publicKeyBytes: serverPublicKeyBytes)
 
-        // 1MB of data
+        // 1MB of data: streamed as 64 KiB frames (SPEC 4.3), each LEN || CIPHERTEXT.
         let plaintext = Data(repeating: 0xAB, count: 1024 * 1024)
         let (encryptedBody, context) = try identity.encryptRequest(body: plaintext)
 
-        // Verify structure
-        let length = Int(encryptedBody[0]) << 24 |
-                     Int(encryptedBody[1]) << 16 |
-                     Int(encryptedBody[2]) << 8 |
-                     Int(encryptedBody[3])
-        XCTAssertEqual(length, encryptedBody.count - 4)
+        var offset = 0
+        var frames = 0
+        while offset < encryptedBody.count {
+            let length = Int(encryptedBody[offset]) << 24 |
+                         Int(encryptedBody[offset + 1]) << 16 |
+                         Int(encryptedBody[offset + 2]) << 8 |
+                         Int(encryptedBody[offset + 3])
+            XCTAssertLessThanOrEqual(length, RequestEncryptor.frameSize + 16)
+            offset += 4 + length
+            frames += 1
+        }
+        XCTAssertEqual(offset, encryptedBody.count)
+        XCTAssertEqual(frames, 16)
         XCTAssertEqual(context.requestEnc.count, 32)
     }
 

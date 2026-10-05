@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import struct
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
+from typing import Optional
 
 from pyhpke import AEADId, CipherSuite, KDFId, KEMId
 
@@ -31,11 +34,99 @@ def _new_suite() -> CipherSuite:
     )
 
 
+# Plaintext bytes sealed per frame (SPEC 4.3). Small enough to bound memory on
+# both ends, large enough that the per-frame tag and length are noise.
+REQUEST_FRAME_SIZE = 64 * 1024
+
+
 @dataclass(frozen=True)
 class EncryptedRequest:
     encapsulated_key: bytes
     body: bytes
     token: SessionRecoveryToken
+
+
+@dataclass(frozen=True)
+class EncryptedRequestStream:
+    """A request body encrypted frame by frame as the source is consumed.
+
+    ``frames`` is an iterator (or async iterator) of ``LEN || CIPHERTEXT``
+    frames; only one frame of plaintext is held at a time.
+    """
+
+    encapsulated_key: bytes
+    frames: Iterator[bytes] | AsyncIterator[bytes]
+    token: SessionRecoveryToken
+
+
+def _seal(sender, plaintext) -> bytes:
+    """Seal one frame; pyhpke failures surface as HPKESetupFailedError like setup does."""
+    try:
+        return frame_chunk(sender.seal(bytes(plaintext), b""))
+    except Exception as err:  # noqa: BLE001 - normalize HPKE library failures
+        raise HPKESetupFailedError(f"failed to encrypt request body: {err}") from err
+
+
+def _frame_slices(chunk, buf: bytearray) -> Iterator[memoryview]:
+    """Yield REQUEST_FRAME_SIZE views over ``chunk``; keep the tail in ``buf``.
+
+    A partial frame carried in ``buf`` is topped up first. Oversized chunks are
+    sliced in place, so at most one frame plus the current view is ever held.
+    """
+    mv = memoryview(chunk)
+    if buf:
+        take = REQUEST_FRAME_SIZE - len(buf)
+        buf += mv[:take]
+        mv = mv[take:]
+        if len(buf) < REQUEST_FRAME_SIZE:
+            return
+        yield memoryview(bytes(buf))
+        buf.clear()
+    whole = len(mv) - len(mv) % REQUEST_FRAME_SIZE
+    for off in range(0, whole, REQUEST_FRAME_SIZE):
+        yield mv[off : off + REQUEST_FRAME_SIZE]
+    buf += mv[whole:]
+
+
+def _seal_frames(sender, chunks: Iterable[bytes]) -> Iterator[bytes]:
+    buf = bytearray()
+    for chunk in chunks:
+        for piece in _frame_slices(chunk, buf):
+            yield _seal(sender, piece)
+    if buf:
+        yield _seal(sender, buf)
+
+
+async def _seal_frames_async(sender, chunks: AsyncIterable[bytes]) -> AsyncIterator[bytes]:
+    buf = bytearray()
+    async for chunk in chunks:
+        for piece in _frame_slices(chunk, buf):
+            yield _seal(sender, piece)
+    if buf:
+        yield _seal(sender, buf)
+
+
+def _first_nonempty(chunks: Iterable[bytes]) -> Optional[Iterator[bytes]]:
+    """Return the source re-headed with its first non-empty chunk, or None if empty."""
+    it = iter(chunks)
+    for first in it:
+        if len(first):
+            return itertools.chain((first,), it)
+    return None
+
+
+async def _first_nonempty_async(chunks: AsyncIterable[bytes]) -> Optional[AsyncIterator[bytes]]:
+    it = chunks.__aiter__()
+    async for first in it:
+        if len(first):
+
+            async def rest(first=first, it=it) -> AsyncIterator[bytes]:
+                yield first
+                async for chunk in it:
+                    yield chunk
+
+            return rest()
+    return None
 
 
 def _read_u16(data: bytes, offset: int, field: str) -> tuple[int, int]:
@@ -101,6 +192,10 @@ class ServerIdentity:
             raise InvalidKeyConfigError("cipher suites length must be a multiple of 4")
         if offset + suites_len > len(data):
             raise InvalidKeyConfigError("truncated cipher suites")
+        if suites_len != _CIPHER_SUITE_ENTRY_SIZE:
+            raise UnsupportedSuiteError(
+                f"expected exactly one cipher suite, got {suites_len // _CIPHER_SUITE_ENTRY_SIZE}"
+            )
 
         kdf_id, offset = _read_u16(data, offset, "KDF id")
         aead_id, offset = _read_u16(data, offset, "AEAD id")
@@ -131,24 +226,52 @@ class ServerIdentity:
     def public_key_hex(self) -> str:
         return self._public_key_bytes.hex()
 
+    def _new_sender(self):
+        try:
+            enc, sender = self._suite.create_sender_context(
+                self._public_key, info=HPKE_REQUEST_INFO
+            )
+            exported_secret = sender.export(EXPORT_LABEL, EXPORT_LENGTH)
+        except Exception as err:  # noqa: BLE001 - normalize HPKE library failures
+            raise HPKESetupFailedError(f"failed to set up request encryption: {err}") from err
+        return bytes(enc), sender, SessionRecoveryToken(exported_secret, enc)
+
     def encrypt_request_body(self, plaintext: bytes):
         """Seal a request body to the server's public key.
 
         Returns ``None`` for empty bodies: bodyless requests pass through
         unencrypted and receive a plaintext response (SPEC Section 7.4).
+        Bodies longer than ``REQUEST_FRAME_SIZE`` are emitted as several frames.
         """
-        if len(plaintext) == 0:
+        stream = self.encrypt_request_stream((bytes(plaintext),))
+        if stream is None:
             return None
-        try:
-            enc, sender = self._suite.create_sender_context(
-                self._public_key, info=HPKE_REQUEST_INFO
-            )
-            ciphertext = sender.seal(bytes(plaintext), b"")
-            exported_secret = sender.export(EXPORT_LABEL, EXPORT_LENGTH)
-        except Exception as err:  # noqa: BLE001 - normalize HPKE library failures
-            raise HPKESetupFailedError(f"failed to encrypt request body: {err}") from err
-
-        token = SessionRecoveryToken(exported_secret, enc)
         return EncryptedRequest(
-            encapsulated_key=bytes(enc), body=frame_chunk(ciphertext), token=token
+            encapsulated_key=stream.encapsulated_key,
+            body=b"".join(stream.frames),  # type: ignore[arg-type]
+            token=stream.token,
         )
+
+    def encrypt_request_stream(self, chunks: Iterable[bytes]) -> Optional[EncryptedRequestStream]:
+        """Seal a request body lazily, one frame at a time, as ``chunks`` is consumed.
+
+        The source is read up to its first non-empty chunk to decide whether a
+        body exists at all: a source that yields no bytes is a bodyless request
+        and returns ``None`` (no sender, no ``Ehbp-Encapsulated-Key``), exactly
+        like ``encrypt_request_body(b"")``. Otherwise the session recovery token
+        is available before any frame is produced.
+        """
+        source = _first_nonempty(chunks)
+        if source is None:
+            return None
+        enc, sender, token = self._new_sender()
+        return EncryptedRequestStream(enc, _seal_frames(sender, source), token)
+
+    async def encrypt_request_stream_async(
+        self, chunks: AsyncIterable[bytes]
+    ) -> Optional[EncryptedRequestStream]:
+        source = await _first_nonempty_async(chunks)
+        if source is None:
+            return None
+        enc, sender, token = self._new_sender()
+        return EncryptedRequestStream(enc, _seal_frames_async(sender, source), token)

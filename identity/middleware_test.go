@@ -573,3 +573,82 @@ func BenchmarkMiddlewareEncryption(b *testing.B) {
 		_ = clientIdentity
 	}
 }
+
+// tamperedTrailingRequest returns a framed request body of several 8 KiB
+// frames whose last frame fails authentication, plus the encapsulated key.
+func tamperedTrailingRequest(t *testing.T, serverIdentity *Identity) ([]byte, string) {
+	t.Helper()
+	template := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(bytes.Repeat([]byte("x"), 20<<10)))
+	_, err := serverIdentity.EncryptRequestWithContext(template)
+	require.NoError(t, err)
+	var framed []byte
+	buf := make([]byte, 8192)
+	for {
+		n, rerr := template.Body.Read(buf)
+		framed = append(framed, buf[:n]...)
+		if rerr == io.EOF {
+			break
+		}
+		require.NoError(t, rerr)
+	}
+	framed[len(framed)-1] ^= 1
+	return framed, template.Header.Get(protocol.EncapsulatedKeyHeader)
+}
+
+func TestMiddlewareLateDecryptFailureBeforeResponseStartsIs400(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	framed, enc := tamperedTrailingRequest(t, serverIdentity)
+
+	var delivered int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Read everything before acting; the read fails on the last frame and
+		// the handler returns without writing, so the middleware answers.
+		body, rerr := io.ReadAll(r.Body)
+		delivered = len(body)
+		if rerr != nil {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(serverIdentity.Middleware()(handler))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/probe", bytes.NewReader(framed))
+	req.Header.Set(protocol.EncapsulatedKeyHeader, enc)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	// Earlier frames authenticated, so the key is right: tampering is a 400,
+	// not a stale-key 422 (SPEC 5.4.2).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get(protocol.ResponseNonceHeader), "plaintext error must not look encrypted")
+	assert.Equal(t, 16384, delivered, "the two authenticated frames were released, nothing from the bad one")
+}
+
+func TestMiddlewareLateDecryptFailureAfterResponseStartedAbortsConnection(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	framed, enc := tamperedTrailingRequest(t, serverIdentity)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Act on the prefix before the body is complete, as a streaming
+		// handler would; the exchange must then not complete cleanly.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		_, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte("more"))
+	})
+	srv := httptest.NewServer(serverIdentity.Middleware()(handler))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/probe", bytes.NewReader(framed))
+	req.Header.Set(protocol.EncapsulatedKeyHeader, enc)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	_, err = io.ReadAll(resp.Body)
+	assert.Error(t, err, "the response must not end as a complete message")
+}

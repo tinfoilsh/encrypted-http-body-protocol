@@ -30,7 +30,7 @@ from .errors import (
     UnsupportedSuiteError,
     code_of,
 )
-from .identity import EncryptedRequest, ServerIdentity
+from .identity import EncryptedRequest, EncryptedRequestStream, ServerIdentity
 from .session import SessionRecoveryToken
 from .transport import AsyncEHBPTransport, EHBPTransport
 
@@ -44,6 +44,7 @@ __all__ = [
     "AsyncEHBPTransport",
     "ServerIdentity",
     "EncryptedRequest",
+    "EncryptedRequestStream",
     "SessionRecoveryToken",
     "FrameDecryptor",
     "ResponseKeyMaterial",

@@ -1,5 +1,6 @@
 """Client behavior tests against the in-process EHBP mock server."""
 
+import struct
 import threading
 
 import httpx
@@ -14,6 +15,7 @@ from ehbp.errors import (
     KeyConfigMismatchError,
     MissingResponseNonceError,
 )
+from ehbp.identity import REQUEST_FRAME_SIZE
 from ehbp.protocol import RESPONSE_NONCE_HEADER
 
 
@@ -100,16 +102,17 @@ def test_older_request_cannot_publish_or_clear_newer_recovery_token(
     release_older_request = threading.Event()
     newer_request_started = threading.Event()
     release_newer_request = threading.Event()
-    original_encrypt = ServerIdentity.encrypt_request_body
+    original_encrypt = ServerIdentity.encrypt_request_stream
 
-    def encrypt(identity, plaintext):
-        if plaintext == b"older":
+    def encrypt(identity, chunks):
+        # bytes bodies arrive as a one-element tuple on the streaming path.
+        if isinstance(chunks, tuple) and chunks == (b"older",):
             older_encryption_started.set()
             if not release_older_encryption.wait(5):
                 raise RuntimeError("timed out waiting to release older encryption")
-        return original_encrypt(identity, plaintext)
+        return original_encrypt(identity, chunks)
 
-    monkeypatch.setattr(ServerIdentity, "encrypt_request_body", encrypt)
+    monkeypatch.setattr(ServerIdentity, "encrypt_request_stream", encrypt)
 
     def handler(request):
         if request.url.path == "/older":
@@ -300,3 +303,106 @@ def test_custom_client_cannot_reenable_redirects(server: MockServer):
     )
     response = client.get("/redirect")
     assert response.status_code == 302
+
+
+def _install_seal_counter(monkeypatch):
+    """Record the plaintext length of every frame sealed; returns the list."""
+    import ehbp.identity as identity_module
+
+    seals = []
+    original = identity_module._seal
+
+    def counting_seal(sender, plaintext):
+        seals.append(len(plaintext))
+        return original(sender, plaintext)
+
+    monkeypatch.setattr(identity_module, "_seal", counting_seal)
+    return seals
+
+
+def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
+    seals = _install_seal_counter(monkeypatch)
+    seen_at_wire = []
+
+    class Inner(httpx.BaseTransport):
+        def handle_request(self, request):
+            body = bytearray()
+            for chunk in request.stream:
+                seen_at_wire.append(len(seals))
+                body += chunk
+            headers = httpx.Headers(request.headers)
+            del headers["transfer-encoding"]
+            return server.handler(
+                httpx.Request(request.method, request.url, headers=headers, content=bytes(body))
+            )
+
+    client = Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=Inner()),
+    )
+    payload = bytes(range(256)) * 800  # 200 KiB -> 4 frames
+    assert client.post("/v1/echo", body=payload).content == b"echo:" + payload
+    assert len(seals) == 4
+    # Only one frame had been sealed when the first one went out: no up-front copy.
+    assert seen_at_wire[0] == 1
+
+
+def test_oversized_chunk_is_sliced_into_frames(server: MockServer, monkeypatch):
+    seals = _install_seal_counter(monkeypatch)
+    one_mib = b"\x5a" * (1024 * 1024)
+    client = server.make_client()
+    assert client.post("/v1/echo", body=iter([one_mib])).content == b"echo:" + one_mib
+    assert seals == [REQUEST_FRAME_SIZE] * 16
+
+
+def test_oversized_chunk_is_sliced_into_frames_async(server: MockServer):
+    import asyncio
+
+    one_mib = b"\x5a" * (1024 * 1024)
+
+    async def source():
+        yield b"ab"  # a partial frame already buffered when the big chunk arrives
+        yield one_mib
+
+    async def run():
+        identity = ServerIdentity.from_public_key_bytes(server.public_key_bytes)
+        stream = await identity.encrypt_request_stream_async(source())
+        sizes = []
+        async for frame in stream.frames:
+            sizes.append(struct.unpack_from(">I", frame)[0] - 16)
+        return sizes
+
+    sizes = asyncio.run(run())
+    assert sum(sizes) == 1024 * 1024 + 2
+    assert max(sizes) == REQUEST_FRAME_SIZE
+    assert len(sizes) == 17
+
+
+def test_empty_iterable_body_is_bodyless(server: MockServer):
+    client = server.make_client()
+    response = client.post("/v1/echo", body=iter([b"", b""]))
+    assert response.content == b"plaintext ok"
+    assert "ehbp-encapsulated-key" not in server.last_request.headers
+
+
+def test_generator_body_is_stream_encrypted(server: MockServer):
+    pulled = []
+
+    def source():
+        for i in range(3):
+            pulled.append(i)
+            yield b"chunk-%d;" % i
+
+    client = server.make_client()
+    response = client.post("/v1/echo", body=source())
+    assert response.content == b"echo:chunk-0;chunk-1;chunk-2;"
+    assert pulled == [0, 1, 2]
+
+
+def test_file_body_is_stream_encrypted(server: MockServer):
+    import io
+
+    client = server.make_client()
+    response = client.post("/v1/echo", body=io.BytesIO(b"from a file"))
+    assert response.content == b"echo:from a file"
