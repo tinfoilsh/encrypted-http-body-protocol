@@ -89,6 +89,10 @@ public final class EHBPClient: @unchecked Sendable {
         let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
         defer { prepared.cleanup() }
         let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
+        // SPEC 6: the token is obtainable before the request is sent. Any
+        // outcome of this exchange consumes it.
+        if let token { publishToken(token, for: generation) }
+        defer { clearToken(for: generation) }
 
         let (data, response) = try await session.data(for: request)
 
@@ -113,8 +117,6 @@ public final class EHBPClient: @unchecked Sendable {
             responseNonce: responseNonce,
             encryptedData: data
         )
-
-        clearToken(for: generation)
 
         return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
     }
@@ -155,18 +157,22 @@ public final class EHBPClient: @unchecked Sendable {
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
         let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
         let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
+        // SPEC 6: the token is obtainable before the request is sent.
+        if let token { publishToken(token, for: generation) }
 
         let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
         do {
             (asyncBytes, response) = try await session.bytes(for: request)
         } catch {
             prepared.cleanup()
+            clearToken(for: generation)
             throw error
         }
         // Response headers mean the upload finished; the spool is no longer needed.
         prepared.cleanup()
 
         guard let httpResponse = response as? HTTPURLResponse else {
+            clearToken(for: generation)
             throw EHBPError.network("expected HTTP response")
         }
         var iterator = asyncBytes.makeAsyncIterator()
@@ -180,6 +186,7 @@ public final class EHBPClient: @unchecked Sendable {
             }
             if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: prefetched) {
                 asyncBytes.task.cancel()
+                clearToken(for: generation)
                 throw mismatch
             }
         }
@@ -188,6 +195,8 @@ public final class EHBPClient: @unchecked Sendable {
             from: httpResponse,
             requestWasEncrypted: requestContext != nil
         ) else {
+            // A nonce-less pass-through consumes the token (SPEC 5.1).
+            clearToken(for: generation)
             let chunker = PullDrivenByteChunker(
                 iterator: iterator,
                 prefix: prefetched,
@@ -205,13 +214,16 @@ public final class EHBPClient: @unchecked Sendable {
             return (stream, httpResponse)
         }
 
-        let responseNonce = try parseResponseNonce(responseNonceHex)
-
-        let responseDecryptor = try token!.makeResponseDecryptor(
-            responseNonce: responseNonce
-        )
-
-        publishToken(token!, for: generation)
+        let responseDecryptor: ResponseDecryptor
+        do {
+            responseDecryptor = try token!.makeResponseDecryptor(
+                responseNonce: try parseResponseNonce(responseNonceHex)
+            )
+        } catch {
+            asyncBytes.task.cancel()
+            clearToken(for: generation)
+            throw error
+        }
 
         let decryptor = PullDrivenResponseDecryptor(
             iterator: iterator,
