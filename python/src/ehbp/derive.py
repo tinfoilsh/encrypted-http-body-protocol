@@ -36,6 +36,7 @@ from .protocol import (
     EXPORT_LENGTH,
     LENGTH_PREFIX_SIZE,
     MAX_CHUNK_LENGTH,
+    MAX_RESPONSE_CHUNK_LENGTH,
     MAX_SEQUENCE,
     REQUEST_ENC_LENGTH,
     RESPONSE_KEY_LABEL,
@@ -139,7 +140,7 @@ class FrameDecryptor:
     """
 
     def __init__(
-        self, km: ResponseKeyMaterial, max_chunk_length: int = MAX_CHUNK_LENGTH
+        self, km: ResponseKeyMaterial, max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH
     ) -> None:
         self._km = km
         self._buffer = bytearray()

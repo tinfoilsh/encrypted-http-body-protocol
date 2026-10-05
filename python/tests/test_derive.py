@@ -88,10 +88,16 @@ def test_streaming_decryptor_rejects_oversized_chunk_length():
         decryptor.push(oversized_prefix)
 
 
-def test_default_chunk_cap_is_64_mib():
+def test_default_response_chunk_cap_is_64_mib():
     decryptor = FrameDecryptor(_key_material())
     with pytest.raises(ChunkTooLargeError):
         decryptor.push((0xFFFFFFFF).to_bytes(4, "big"))
+
+
+def test_send_path_framing_is_not_capped_at_64_mib():
+    # Only the receive side is bounded; a sender may still frame up to u32.
+    framed = frame_chunk(b"x" * (64 * 1024 * 1024 + 1))
+    assert framed[:4] == (64 * 1024 * 1024 + 1).to_bytes(4, "big")
 
 
 def test_token_decryptor_delivers_before_source_eof():
