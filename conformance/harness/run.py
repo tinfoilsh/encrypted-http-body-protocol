@@ -21,7 +21,6 @@ import html
 import json
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -37,12 +36,11 @@ BATCH_ADAPTERS = {"js-chromium", "js-firefox"}
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = ROOT / "test-vectors" / "conformance"
-ORACLE_ADDR = "127.0.0.1:8087"
-ORACLE_URL = f"http://{ORACLE_ADDR}"
-_HOST, _PORT = ORACLE_ADDR.split(":")
-# Auxiliary key-config endpoints for discovery-robustness fixtures (see the oracle).
-ORACLE_BAD_CT_URL = f"http://{_HOST}:{int(_PORT) + 1}"
-ORACLE_NON200_URL = f"http://{_HOST}:{int(_PORT) + 2}"
+# The oracle binds 127.0.0.1:0 for its three listeners and prints their
+# addresses; start_oracle() fills these in. No port is chosen by the harness.
+ORACLE_URL = ""
+ORACLE_BAD_CT_URL = ""
+ORACLE_NON200_URL = ""
 
 ADAPTER_TIMEOUT_SECONDS = 30
 BATCH_TIMEOUT_SECONDS = 180
@@ -50,11 +48,22 @@ BATCH_TIMEOUT_SECONDS = 180
 # must stay far below the body size; a buffering one lands at roughly 1x-3x it.
 HEAVY_TIMEOUT_SECONDS = 900
 HEAVY_PEAK_RSS_LIMIT = 512 << 20
-# Browser runners report RSS growth over baseline, and Chromium keeps about
+# Browser runners report RSS growth over baseline. Chromium keeps roughly
 # 500 MiB of page cache resident for its OPFS spool regardless of body size
-# (measured: +528 MiB at 512 MiB, +520 MiB at 256 MiB). 1 GiB still fails a
-# client that buffers the 3 GiB body.
-HEAVY_PEAK_RSS_LIMIT_BROWSER = 1 << 30
+# (measured +528 MiB at 512 MiB, +520 MiB at 256 MiB), while a buffering
+# client lands at 3-4x the body. 600 MiB + size/2 therefore passes a spooled
+# run at any size and fails a buffered one from 256 MiB up.
+HEAVY_PEAK_RSS_LIMIT_BROWSER_BASE = 600 << 20
+ORACLE_READY_ATTEMPTS = 100          # x ORACLE_POLL_SECONDS = startup budget
+ORACLE_POLL_SECONDS = 0.1
+OBSERVATION_TIMEOUT_SECONDS = 2
+DIAGNOSTIC_MAX_CHARS = 500           # native_error kept from a crashed adapter
+
+def browser_rss_limit(fixture):
+    """Browser RSS-over-baseline bound for a heavy fixture, see the constants."""
+    size = int((fixture.get("inputs") or {}).get("size_bytes", 0))
+    return HEAVY_PEAK_RSS_LIMIT_BROWSER_BASE + size // 2
+
 
 CANONICAL_ERROR_CODES = {
     "INVALID_KEY_CONFIG", "UNSUPPORTED_SUITE",
@@ -104,6 +113,11 @@ ASSERTED = [
     "plaintext_emitted_before_error", "bytes_emitted_before_error",
     "token_before_response",
 ]
+# Of the normalised response headers only the nonce's presence is compared
+# across languages (names, never values: the nonce is random per exchange).
+# content-length / transfer-encoding stay observational: HTTP stacks legitimately
+# differ in how they frame the same body, which the shape-* fixtures record.
+CROSS_COMPARED_HEADERS = ("ehbp-response-nonce",)
 
 
 def build_adapters(names):
@@ -153,11 +167,24 @@ def build_adapters(names):
 def adapter_failure(fixture_id, message):
     return {
         "fixture_id": fixture_id, "outcome": "error",
-        "error_code": "ADAPTER_CRASH", "native_error": message[:500],
+        "error_code": "ADAPTER_CRASH", "native_error": message[:DIAGNOSTIC_MAX_CHARS],
         "status": None, "body_hex": None, "passthrough": False,
         "plaintext_emitted_before_error": False,
         "bytes_emitted_before_error": 0,
     }
+
+
+def _check_hex(value, what):
+    """None if value is absent or lowercase hex, else a reason."""
+    if value is not None and (not isinstance(value, str)
+                              or re.fullmatch(r"[0-9a-f]*", value) is None):
+        return f"{what} is not lowercase hex"
+    return None
+
+
+def _check_code(code, what):
+    """None if code is a canonical error code, else a reason."""
+    return None if code in CANONICAL_ERROR_CODES else f"{what} {code!r} is not a canonical error code"
 
 
 def validate_result(result, fixture_id):
@@ -173,17 +200,15 @@ def validate_result(result, fixture_id):
     if outcome not in {"ok", "error", "skipped"}:
         return f"invalid outcome {outcome!r}"
     code = result.get("error_code")
-    if outcome == "error" and code not in CANONICAL_ERROR_CODES:
-        return f"error result has invalid error_code {code!r}"
+    if outcome == "error" and (reason := _check_code(code, "error_code")):
+        return reason
     if outcome != "error" and code is not None:
         return f"{outcome} result must not carry error_code {code!r}"
     if outcome == "skipped" and (not isinstance(result.get("skip_reason"), str)
                                  or not result["skip_reason"]):
         return "skipped result lacks skip_reason"
-    body_hex = result.get("body_hex")
-    if body_hex is not None and (not isinstance(body_hex, str)
-                                 or re.fullmatch(r"[0-9a-f]*", body_hex) is None):
-        return "body_hex is not lowercase hex"
+    if reason := _check_hex(result.get("body_hex"), "body_hex"):
+        return reason
     status = result.get("status")
     if status is not None and (type(status) is not int or not 100 <= status <= 599):
         return f"invalid HTTP status {status!r}"
@@ -208,15 +233,17 @@ def run_batch(argv, fixtures, timeout=BATCH_TIMEOUT_SECONDS):
     """Run a batch adapter once over all fixtures; return {fixture_id: result}."""
     payload = "\n".join(json.dumps(fx) for fx in fixtures)
     fixture_ids = [fx["id"] for fx in fixtures]
+
+    def all_failed(message):
+        return {fid: adapter_failure(fid, message) for fid in fixture_ids}
+
     try:
         proc = subprocess.run(argv, input=payload, capture_output=True, text=True,
                               env=adapter_env(), timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {fid: adapter_failure(fid, f"batch adapter timed out after {timeout}s")
-                for fid in fixture_ids}
+        return all_failed(f"batch adapter timed out after {timeout}s")
     if proc.returncode != 0:
-        message = f"batch adapter exited {proc.returncode}: {(proc.stderr or '').strip()}"
-        return {fid: adapter_failure(fid, message) for fid in fixture_ids}
+        return all_failed(f"batch adapter exited {proc.returncode}: {(proc.stderr or '').strip()}")
     results = {}
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -224,15 +251,12 @@ def run_batch(argv, fixtures, timeout=BATCH_TIMEOUT_SECONDS):
             try:
                 r = json.loads(line)
             except json.JSONDecodeError as err:
-                message = f"batch adapter emitted malformed JSON: {err}"
-                return {fid: adapter_failure(fid, message) for fid in fixture_ids}
+                return all_failed(f"batch adapter emitted malformed JSON: {err}")
             fid = r.get("fixture_id") if isinstance(r, dict) else None
             if fid not in fixture_ids:
-                message = f"batch adapter emitted unknown fixture_id {fid!r}"
-                return {expected: adapter_failure(expected, message) for expected in fixture_ids}
+                return all_failed(f"batch adapter emitted unknown fixture_id {fid!r}")
             if fid in results:
-                message = f"batch adapter emitted duplicate result for {fid}"
-                return {expected: adapter_failure(expected, message) for expected in fixture_ids}
+                return all_failed(f"batch adapter emitted duplicate result for {fid}")
             invalid = validate_result(r, fid)
             results[fid] = adapter_failure(fid, invalid) if invalid else r
     for fid in fixture_ids:
@@ -279,14 +303,12 @@ def validate_fixture(fixture, source="fixture", index=0):
     unknown_expect = set(expect) - EXPECT_FIELDS
     if unknown_expect:
         raise ValueError(f"{where}: unknown expectation fields: {', '.join(sorted(unknown_expect))}")
-    if expect["outcome"] == "error" and expect.get("error_code") not in CANONICAL_ERROR_CODES:
-        raise ValueError(f"{where}: error expectation needs a canonical error_code")
+    if expect["outcome"] == "error" and (reason := _check_code(expect.get("error_code"), "expected error_code")):
+        raise ValueError(f"{where}: {reason}")
     if expect["outcome"] == "ok" and expect.get("error_code") is not None:
         raise ValueError(f"{where}: ok expectation cannot carry an error code")
-    body_hex = expect.get("body_hex")
-    if body_hex is not None and (not isinstance(body_hex, str)
-                                 or re.fullmatch(r"[0-9a-f]*", body_hex) is None):
-        raise ValueError(f"{where}: expected body_hex is not lowercase hex")
+    if reason := _check_hex(expect.get("body_hex"), "expected body_hex"):
+        raise ValueError(f"{where}: {reason}")
     if "inputs" in fixture and not isinstance(fixture["inputs"], dict):
         raise ValueError(f"{where}: inputs must be an object")
     if "heavy" in fixture and type(fixture["heavy"]) is not bool:
@@ -294,9 +316,13 @@ def validate_fixture(fixture, source="fixture", index=0):
     if fixture["operation"] == "large_body" and fixture.get("heavy") is not True:
         raise ValueError(f"{where}: large_body fixtures must be heavy")
     browser = fixture.get("browser", {})
-    if not isinstance(browser, dict) or (browser.get("runnable") is False
-                                         and not isinstance(browser.get("skip_reason"), str)):
-        raise ValueError(f"{where}: a non-runnable browser fixture needs a skip_reason")
+    if not isinstance(browser, dict):
+        raise ValueError(f"{where}: browser must be an object")
+    if "runnable" in browser and type(browser["runnable"]) is not bool:
+        raise ValueError(f"{where}: browser.runnable must be boolean")
+    if browser.get("runnable") is False and not (isinstance(browser.get("skip_reason"), str)
+                                                 and browser["skip_reason"]):
+        raise ValueError(f"{where}: a non-runnable browser fixture needs a non-empty skip_reason")
     if "chunking" in fixture and (not isinstance(fixture["chunking"], list)
                                   or any(type(v) is not int or v < 1
                                          for v in fixture["chunking"])):
@@ -314,49 +340,26 @@ def validate_fixture(fixture, source="fixture", index=0):
         raise ValueError(f"{where}: e2e fixture lacks server_scenario/request")
 
 
-def configure_oracle_addresses():
-    """Choose three consecutive loopback ports without killing other processes."""
-    global ORACLE_ADDR, ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL
-    for _ in range(100):
-        sockets = []
-        try:
-            first = socket.socket()
-            first.bind(("127.0.0.1", 0))
-            sockets.append(first)
-            port = first.getsockname()[1]
-            if port > 65533:
-                continue
-            for candidate in (port + 1, port + 2):
-                probe = socket.socket()
-                probe.bind(("127.0.0.1", candidate))
-                sockets.append(probe)
-            ORACLE_ADDR = f"127.0.0.1:{port}"
-            ORACLE_URL = f"http://{ORACLE_ADDR}"
-            ORACLE_BAD_CT_URL = f"http://127.0.0.1:{port + 1}"
-            ORACLE_NON200_URL = f"http://127.0.0.1:{port + 2}"
-            return
-        except OSError:
-            pass
-        finally:
-            for bound in sockets:
-                bound.close()
-    raise RuntimeError("could not reserve three consecutive loopback ports")
-
-
 def start_oracle():
+    """Build and start the oracle; it binds 127.0.0.1:0 for all three listeners
+    and prints their addresses, so there is no port to reserve or race for."""
+    global ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL
     out = ROOT / "conformance" / ".bin" / "oracle"
     out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["go", "build", "-o", str(out), "./conformance/server"], cwd=ROOT, check=True)
-    proc = subprocess.Popen([str(out), "-l", ORACLE_ADDR], cwd=ROOT,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
-        try:
-            urllib.request.urlopen(f"{ORACLE_URL}/health", timeout=0.5).read()
+    proc = subprocess.Popen([str(out), "-l", "127.0.0.1:0"], cwd=ROOT,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    for _ in range(ORACLE_READY_ATTEMPTS):
+        line = proc.stdout.readline()
+        if not line:
+            break
+        m = re.search(r"listening main=(\S+) bad_ct=(\S+) non200=(\S+)", line)
+        if m:
+            ORACLE_URL, ORACLE_BAD_CT_URL, ORACLE_NON200_URL = (f"http://{a}" for a in m.groups())
+            urllib.request.urlopen(f"{ORACLE_URL}/health", timeout=ORACLE_POLL_SECONDS * 10).read()
             return proc
-        except Exception:
-            time.sleep(0.1)
     proc.terminate()
-    raise RuntimeError("oracle server did not become ready")
+    raise RuntimeError("oracle server did not announce its listeners")
 
 
 def run_adapter(argv, fixture, timeout=ADAPTER_TIMEOUT_SECONDS):
@@ -391,8 +394,10 @@ def check_expect(result, expect):
     # to decrypt response: CODE: ...'), so the code must appear, not lead. A
     # native message without it was raised uncoded and only looks classified
     # because of the adapter's INVALID_INPUT fallback.
-    if result.get("outcome") == "error":
-        code = result.get("error_code") or ""
+    # ADAPTER_CRASH is synthesised by the harness, already a failure, and
+    # carries a diagnostic rather than a library message: not subject to this.
+    code = result.get("error_code") or ""
+    if result.get("outcome") == "error" and code != "ADAPTER_CRASH":
         native = str(result.get("native_error") or "")
         if f"{code}:" not in native:
             fails.append(f"UNCODED: native_error does not carry {code}:")
@@ -433,7 +438,11 @@ def cross_equal(results):
     """Return True if all adapter results agree on the asserted subset."""
     def key(r):
         fields = ERROR_ASSERTED if r.get("outcome") == "error" else ASSERTED
-        return tuple(_hashable(r.get(f)) for f in fields)
+        values = [_hashable(r.get(f)) for f in fields]
+        if r.get("outcome") != "error":
+            headers = {k.lower() for k in (r.get("response_headers") or {})}
+            values += [h in headers for h in CROSS_COMPARED_HEADERS]
+        return tuple(values)
     return len({key(r) for r in results.values()}) <= 1
 
 
@@ -584,7 +593,8 @@ def observe(fx, adapters):
         fxc["request"].setdefault("headers", {})["X-Conformance-Marker"] = marker
         run_adapter(argv, fxc)
         try:
-            raw = urllib.request.urlopen(f"{ORACLE_URL}/observations/{marker}", timeout=2).read()
+            raw = urllib.request.urlopen(f"{ORACLE_URL}/observations/{marker}",
+                                         timeout=OBSERVATION_TIMEOUT_SECONDS).read()
             o = json.loads(raw)
             summary = "  ".join(f"{f}={o.get(f)}" for f in OBS_FIELDS)
         except Exception as e:
@@ -614,8 +624,6 @@ def main():
         for fid in not_run:
             print(f"[heavy] {fid:<38} not run (pass --heavy to include it)")
     needs_oracle = any(fx["category"] in ("e2e", "shape", "client-api") for fx in fixtures)
-    if needs_oracle:
-        configure_oracle_addresses()
     oracle = start_oracle() if needs_oracle else None
 
     batch_names = [n for n in adapters if n in BATCH_ADAPTERS]
@@ -684,7 +692,7 @@ def main():
                         res.get("error_code") or res.get("outcome"))
                     line.append(f"{name}=DIVERGENT({label}){rss_note}")
                 elif fx.get("heavy") and rss is not None and rss > (
-                        HEAVY_PEAK_RSS_LIMIT_BROWSER if name in BATCH_ADAPTERS else HEAVY_PEAK_RSS_LIMIT):
+                        browser_rss_limit(fx) if name in BATCH_ADAPTERS else HEAVY_PEAK_RSS_LIMIT):
                     # The body went through, but the client buffered it.
                     div_names.add(name)
                     cells += 1

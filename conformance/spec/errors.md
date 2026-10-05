@@ -46,11 +46,13 @@ Names are the code in each language's casing; acronyms follow the language
 ## Coded messages
 
 Every SDK prefixes an error's message with its canonical code (`CODE: detail`,
-SPEC 5.5). The harness enforces this on every `error` result: a `native_error`
-that does not contain `error_code` followed by `:` (transports may wrap it with context) marks the cell divergent
-with the label `UNCODED`. That is the signature of an error the library raised
-uncoded and the adapter's `INVALID_INPUT` fallback masked, so it can never pass
-by coincidence.
+SPEC 5.5). The harness enforces this on every library-produced `error` result: a
+`native_error` that does not carry `error_code` followed by `:` marks the cell
+divergent with the label `UNCODED`. That is the signature of an error the
+library raised uncoded and the adapter's `INVALID_INPUT` fallback masked, so it
+can never pass by coincidence. `ADAPTER_CRASH` results are synthesised by the
+harness, are already failures, and carry a diagnostic instead of a library
+message, so they are exempt.
 
 ## Fail-closed
 

@@ -57,7 +57,6 @@ The suite splits the protocol into three surfaces.
 ```
 test-vectors/conformance/*.json     fixtures (source of truth)
 conformance/spec/errors.md          canonical error enum
-conformance/spec/error-mapping.md   native error -> code, per language
 conformance/schema/*.schema.json    result and fixture formats
 conformance/server/                 Go oracle server
 conformance/adapters/{go,js,python,rust,swift}/   CLI runners (public API only)

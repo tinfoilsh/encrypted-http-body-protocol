@@ -15,7 +15,7 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 | `compute_nonce` | `nonceBase` (12), `seqHex` | nonce (12) | `INVALID_INPUT` |
 | `token_roundtrip` | `json` (token JSON string) | decoded `exportedSecret` (32) `\|\|` `requestEnc` (32) | `INVALID_TOKEN` |
 | `parse_config` | `config` (RFC 9458 key config) | parsed public key (32) | `INVALID_KEY_CONFIG`, `UNSUPPORTED_SUITE` |
-| `marshal_config` | `publicKey` (32), optional `keyId` | marshaled config bytes | `INVALID_INPUT` |
+| `marshal_config` | `publicKey` (32), optional `keyId` | marshaled config bytes | `INVALID_KEY_CONFIG` (a public key that is not 32 bytes; verified identical in Go, Python, JS and Rust, Swift has no config marshal) |
 | `decrypt_request` | `mutation`, optional mutation parameters | decrypted request plaintext | `INVALID_ENCAPSULATED_KEY`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `KEY_CONFIG_MISMATCH` |
 | `middleware_request` | `mutation` | no body; the handler reads the request body to EOF and success means that read completed | `AEAD_DECRYPT_FAILED` (a later frame failed inside the handler's read; the authenticated prefix was delivered and is reported in `bytes_emitted_before_error`), `KEY_CONFIG_MISMATCH`, `INVALID_ENCAPSULATED_KEY` |
 | `request` | top-level `request` {`method`, `path`, `headers`, `body_hex`} against the oracle `server_scenario` | decrypted response body; `status`, `response_headers`, `passthrough` also reported | any client-side code: `MISSING_RESPONSE_NONCE`, `INVALID_RESPONSE_NONCE`, `DUPLICATE_RESPONSE_NONCE`, `KEY_CONFIG_MISMATCH`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `AEAD_DECRYPT_FAILED` |

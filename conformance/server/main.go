@@ -15,12 +15,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -92,25 +92,30 @@ func main() {
 		_ = json.NewEncoder(w).Encode(o)
 	}))
 
-	// Two auxiliary key-config endpoints on port+1 and port+2 let discovery
-	// robustness be tested without disturbing the valid config on the main port.
-	// Bind them before the main listener so /health never reports ready while
-	// a discovery fixture could still get connection refused.
-	if host, portStr, err := net.SplitHostPort(*addr); err == nil {
-		if port, err := strconv.Atoi(portStr); err == nil {
-			serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+1)), id, "bad-ct")
-			serveBadConfig(net.JoinHostPort(host, strconv.Itoa(port+2)), id, "non200")
-		}
+	// Two auxiliary key-config endpoints let discovery robustness be tested
+	// without disturbing the valid config on the main listener. All three bind
+	// synchronously (":0" picks free ports, no reservation race) and are
+	// announced on one stdout line before anything is served; the harness
+	// reads its URLs from that line.
+	host, _, err := net.SplitHostPort(*addr)
+	if err != nil {
+		log.Fatalf("oracle: listen address: %v", err)
 	}
-
-	log.Printf("oracle: listening on %s, public key %s", *addr, id.MarshalPublicKeyHex())
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	mainLn, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("oracle: main listener %s: %v", *addr, err)
+	}
+	badCT := serveBadConfig(net.JoinHostPort(host, "0"), id, "bad-ct")
+	non200 := serveBadConfig(net.JoinHostPort(host, "0"), id, "non200")
+	fmt.Printf("listening main=%s bad_ct=%s non200=%s\n", mainLn.Addr(), badCT, non200)
+	log.Printf("oracle: public key %s", id.MarshalPublicKeyHex())
+	log.Fatal(http.Serve(mainLn, mux))
 }
 
 // serveBadConfig answers /.well-known/hpke-keys with a malformed discovery
 // response: "bad-ct" returns the valid config bytes under the wrong content type;
 // "non200" returns a 500.
-func serveBadConfig(addr string, id *identity.Identity, mode string) {
+func serveBadConfig(addr string, id *identity.Identity, mode string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.KeysPath, cors(func(w http.ResponseWriter, r *http.Request) {
 		if mode == "non200" {
@@ -126,6 +131,7 @@ func serveBadConfig(addr string, id *identity.Identity, mode string) {
 		log.Fatalf("oracle: auxiliary listener %s: %v", addr, err)
 	}
 	go func() { _ = http.Serve(ln, mux) }()
+	return ln.Addr().String()
 }
 
 // cors allows the browser adapter (a cross-origin page) to reach the oracle and
@@ -318,11 +324,10 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 	}
 }
 
-// sealResponse derives a correct EHBP response for the request context and
-// returns its nonce header value and framed ciphertext, using only the public
-// identity API via an in-memory recorder.
-// sealAndWrite seals body for the request's context and writes it as a 200
-// encrypted response; the one place a plain echo is finalised.
+// sealAndWrite seals body under the request's response context and writes it
+// as an encrypted 200. Used by every scenario that answers with an unmodified
+// encrypted reply (echo, shape, digest); mutating scenarios call sealResponse
+// and writeEncrypted themselves.
 func sealAndWrite(w http.ResponseWriter, id *identity.Identity, respCtx *identity.ResponseContext, body []byte) {
 	nonce, framed, err := sealResponse(id, respCtx, body)
 	if err != nil {
@@ -332,6 +337,9 @@ func sealAndWrite(w http.ResponseWriter, id *identity.Identity, respCtx *identit
 	writeEncrypted(w, nonce, framed, http.StatusOK)
 }
 
+// sealResponse derives a correct EHBP response for the request context and
+// returns its nonce header value and framed ciphertext, using only the public
+// identity API via an in-memory recorder.
 func sealResponse(id *identity.Identity, respCtx *identity.ResponseContext, body []byte) (string, []byte, error) {
 	rec := httptest.NewRecorder()
 	dw, err := id.SetupDerivedResponseEncryption(rec, respCtx)

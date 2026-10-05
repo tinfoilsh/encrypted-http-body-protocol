@@ -21,10 +21,10 @@ extensible: to add a language you copy this shape and fill in the public-API cal
 3. Call only the library's public API — the entrypoints the README documents.
 4. Byte outputs go to `body_hex` (lowercase hex).
 5. On any library error, translate it in one place: a single `map_error` function
-   that returns a canonical code from `../spec/errors.md`. Put the raw error in
-   `native_error`; never assert on it. Each arm names the concrete native
-   type/message it matches, and the mapping is mirrored in
-   `../spec/error-mapping.md`.
+   that returns a canonical code from `../spec/errors.md` by reading the code
+   the library attached to its error; never match on message text. Put the raw
+   error in `native_error`; the harness checks it carries the code (`CODE:`),
+   so an uncoded error can never pass as classified.
 6. Track fail-closed honestly: `plaintext_emitted_before_error` and
    `bytes_emitted_before_error` reflect bytes actually delivered before an error.
 7. Return `skipped` only when the fixture authorizes that runner and exact reason
