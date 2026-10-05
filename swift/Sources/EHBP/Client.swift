@@ -324,12 +324,18 @@ public final class EHBPClient: @unchecked Sendable {
                 request.httpBody = encryptedBody
             }
         case .source(let next):
-            let encryptor = try identity.makeRequestEncryptor()
-            requestContext = encryptor.context
-            // The token exists before a single byte is read or sent (SPEC 6).
-            token = try extractSessionRecoveryToken(context: encryptor.context)
-            spool = try EHBPClient.spoolEncrypted(from: next, with: encryptor)
-            request.httpBodyStream = InputStream(url: spool!)
+            // A source that yields no bytes is a bodyless request: same path as
+            // `.data(nil)`, no HPKE context and no encapsulated-key header.
+            var first = try next()
+            while let chunk = first, chunk.isEmpty { first = try next() }
+            if let first {
+                let encryptor = try identity.makeRequestEncryptor()
+                requestContext = encryptor.context
+                // The token exists before a single byte is read or sent (SPEC 6).
+                token = try extractSessionRecoveryToken(context: encryptor.context)
+                spool = try EHBPClient.spoolEncrypted(first: first, then: next, with: encryptor)
+                request.httpBodyStream = InputStream(url: spool!)
+            }
         }
         if let context = requestContext {
             request.setValue(
@@ -345,7 +351,7 @@ public final class EHBPClient: @unchecked Sendable {
     /// memory stays O(frame) while URLSession gets a body it can upload.
     // ponytail: temp-file spool costs O(size) disk; replace with a custom
     // InputStream that seals on demand if disk becomes the constraint.
-    private static func spoolEncrypted(from next: RequestBodySource, with encryptor: RequestEncryptor) throws -> URL {
+    private static func spoolEncrypted(first: Data, then next: RequestBodySource, with encryptor: RequestEncryptor) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("ehbp-\(UUID().uuidString)")
         guard FileManager.default.createFile(atPath: url.path, contents: nil),
@@ -354,9 +360,17 @@ public final class EHBPClient: @unchecked Sendable {
         }
         defer { try? handle.close() }
         do {
-            while let chunk = try next() {
-                if chunk.isEmpty { continue }
-                try handle.write(contentsOf: try encryptor.seal(chunk))
+            var chunk: Data? = first
+            while let current = chunk {
+                // Seal and write one frame at a time so a large pull never
+                // materialises all of its ciphertext at once.
+                var offset = current.startIndex
+                while offset < current.endIndex {
+                    let end = min(offset + RequestEncryptor.frameSize, current.endIndex)
+                    try handle.write(contentsOf: try encryptor.seal(current[offset..<end]))
+                    offset = end
+                }
+                chunk = try next()
             }
         } catch {
             try? FileManager.default.removeItem(at: url)
