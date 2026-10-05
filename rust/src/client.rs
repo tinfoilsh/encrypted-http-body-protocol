@@ -240,15 +240,19 @@ impl Client {
         let mut encryptor = self.identity.request_encryptor()?;
         let encapsulated_key = hex::encode(&encryptor.encapsulated_key);
         let token = encryptor.token.clone();
+        // One frame per yield: an oversized source item is sliced here so the
+        // encryptor never holds more than REQUEST_FRAME_SIZE of plaintext.
         let encrypted: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> =
             Box::pin(async_stream::try_stream! {
-                yield Bytes::from(encryptor.encrypt_chunk(&first_chunk)?);
+                for piece in first_chunk.chunks(crate::identity::REQUEST_FRAME_SIZE) {
+                    yield Bytes::from(encryptor.encrypt_frame(piece)?);
+                }
                 while let Some(chunk) =
                     std::future::poll_fn(|cx| plaintext.as_mut().poll_next(cx)).await
                 {
                     let chunk = chunk?;
-                    if !chunk.is_empty() {
-                        yield Bytes::from(encryptor.encrypt_chunk(&chunk)?);
+                    for piece in chunk.chunks(crate::identity::REQUEST_FRAME_SIZE) {
+                        yield Bytes::from(encryptor.encrypt_frame(piece)?);
                     }
                 }
             });
@@ -567,10 +571,16 @@ pub struct RequestBuilder {
     body: Option<BodySource>,
 }
 
+/// Caller stream errors are passed to reqwest unchanged, so they surface as
+/// `Error::Http` with the caller's error as source, exactly like a failing
+/// response stream; they carry no protocol code.
+#[cfg(not(target_arch = "wasm32"))]
+type BodyStreamError = Box<dyn std::error::Error + Send + Sync>;
+
 enum BodySource {
     Bytes(Bytes),
     #[cfg(not(target_arch = "wasm32"))]
-    Stream(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>),
+    Stream(Pin<Box<dyn Stream<Item = std::result::Result<Bytes, BodyStreamError>> + Send>>),
 }
 
 type Dispatched = (
@@ -645,8 +655,7 @@ impl RequestBuilder {
         let mut body = Box::pin(body);
         self.body = Some(BodySource::Stream(Box::pin(async_stream::try_stream! {
             while let Some(chunk) = std::future::poll_fn(|cx| body.as_mut().poll_next(cx)).await {
-                let chunk = chunk
-                    .map_err(|err| Error::Protocol(format!("request body stream failed: {err}")))?;
+                let chunk: Bytes = chunk.map_err(|err| Box::new(err) as BodyStreamError)?;
                 yield chunk;
             }
         })));
@@ -2136,8 +2145,12 @@ mod tests {
         assert!(request.contains("ehbp-encapsulated-key:"));
     }
 
-    #[tokio::test]
-    async fn body_stream_is_encrypted_lazily_into_bounded_frames() {
+    /// Sends `source` through `body_stream` to a raw TCP listener and returns
+    /// the captured request bytes plus the server private key.
+    async fn capture_body_stream<S>(source: S) -> (Vec<u8>, TestPrivateKey)
+    where
+        S: Stream<Item = std::result::Result<Bytes, std::io::Error>> + Send + 'static,
+    {
         let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2155,6 +2168,15 @@ mod tests {
                 if bytes.ends_with(b"0\r\n\r\n") {
                     break;
                 }
+                // A bodyless request has no chunked body: stop at the header end.
+                if let Some(pos) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&bytes[..pos]).to_ascii_lowercase();
+                    if !head.contains("transfer-encoding: chunked")
+                        && !head.contains("content-length:")
+                    {
+                        break;
+                    }
+                }
             }
             *captured_for_task.lock().unwrap() = bytes;
             socket
@@ -2170,7 +2192,32 @@ mod tests {
             reqwest::Client::new(),
         )
         .unwrap();
+        let _ = client
+            .post("/secure")
+            .unwrap()
+            .body_stream(source)
+            .send()
+            .await;
+        let raw = captured.lock().unwrap().clone();
+        (raw, private_key)
+    }
 
+    fn captured_frames(raw: &[u8], private_key: &TestPrivateKey) -> (String, Vec<Vec<u8>>, usize) {
+        let text = String::from_utf8_lossy(raw).to_ascii_lowercase();
+        let enc_hex = text
+            .lines()
+            .find_map(|l| l.strip_prefix("ehbp-encapsulated-key: "))
+            .unwrap()
+            .trim()
+            .to_string();
+        let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let (framed, http_chunks) = dechunk_counting(&raw[body_start..]);
+        let frames = decrypt_request_frames(private_key, &hex::decode(enc_hex).unwrap(), &framed);
+        (text, frames, http_chunks)
+    }
+
+    #[tokio::test]
+    async fn body_stream_is_encrypted_lazily_into_bounded_frames() {
         // Three source chunks, one larger than a frame: the encryptor must
         // re-frame it and consume the source as it goes.
         let pulls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2186,26 +2233,10 @@ mod tests {
                 pulls_for_stream.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
 
-        let _ = client
-            .post("/secure")
-            .unwrap()
-            .body_stream(source)
-            .send()
-            .await;
-
-        let raw = captured.lock().unwrap().clone();
-        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        let (raw, private_key) = capture_body_stream(source).await;
+        let (text, frames, _) = captured_frames(&raw, &private_key);
         assert!(text.contains("transfer-encoding: chunked"));
         assert!(!text.contains("content-length:"));
-        let enc_hex = text
-            .lines()
-            .find_map(|l| l.strip_prefix("ehbp-encapsulated-key: "))
-            .unwrap()
-            .trim()
-            .to_string();
-        let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-        let framed = dechunk(&raw[body_start..]);
-        let frames = decrypt_request_frames(&private_key, &hex::decode(enc_hex).unwrap(), &framed);
         assert_eq!(frames.len(), 4, "5 B, 64 KiB + 36 KiB, 4 B");
         assert!(frames
             .iter()
@@ -2214,9 +2245,40 @@ mod tests {
         assert_eq!(pulls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
-    /// Decodes an HTTP/1.1 chunked transfer encoding body.
-    fn dechunk(mut body: &[u8]) -> Vec<u8> {
+    #[tokio::test]
+    async fn body_stream_emits_one_frame_per_yield_for_oversized_items() {
+        // A single 1 MiB item must leave the encryptor as 16 separate frames,
+        // each its own HTTP chunk, never as one body-sized buffer.
+        let item = Bytes::from(vec![0x5Au8; 1024 * 1024]);
+        let source = stream::iter(vec![Ok::<Bytes, std::io::Error>(item.clone())]);
+
+        let (raw, private_key) = capture_body_stream(source).await;
+        let (_, frames, http_chunks) = captured_frames(&raw, &private_key);
+        assert_eq!(frames.len(), 16);
+        assert!(frames
+            .iter()
+            .all(|f| f.len() == crate::identity::REQUEST_FRAME_SIZE));
+        assert_eq!(frames.concat(), item.as_ref());
+        assert!(
+            http_chunks >= 16,
+            "frames were coalesced before hitting the wire: {http_chunks} chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_body_stream_is_a_bodyless_request() {
+        let source = stream::iter(Vec::<std::result::Result<Bytes, std::io::Error>>::new());
+        let (raw, _) = capture_body_stream(source).await;
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(text.starts_with("post /secure"));
+        assert!(!text.contains("ehbp-encapsulated-key:"), "{text}");
+        assert!(!text.contains("transfer-encoding: chunked"), "{text}");
+    }
+
+    /// Decodes an HTTP/1.1 chunked transfer encoding body, counting chunks.
+    fn dechunk_counting(mut body: &[u8]) -> (Vec<u8>, usize) {
         let mut out = Vec::new();
+        let mut chunks = 0;
         loop {
             let line_end = body.windows(2).position(|w| w == b"\r\n").unwrap();
             let size =
@@ -2224,8 +2286,9 @@ mod tests {
                     .unwrap();
             body = &body[line_end + 2..];
             if size == 0 {
-                return out;
+                return (out, chunks);
             }
+            chunks += 1;
             out.extend_from_slice(&body[..size]);
             body = &body[size + 2..];
         }

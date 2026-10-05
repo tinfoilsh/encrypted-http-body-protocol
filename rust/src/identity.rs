@@ -226,15 +226,22 @@ impl RequestEncryptor {
             plaintext.len() + 20 * plaintext.len().div_ceil(REQUEST_FRAME_SIZE).max(1),
         );
         for piece in plaintext.chunks(REQUEST_FRAME_SIZE) {
-            let ciphertext = self.sender.seal(piece, &[]).map_err(|err| {
-                Error::Coded(
-                    Code::HpkeSetupFailed,
-                    format!("failed to seal request body: {err:?}"),
-                )
-            })?;
-            out.extend_from_slice(&frame_chunk(&ciphertext)?);
+            out.extend_from_slice(&self.encrypt_frame(piece)?);
         }
         Ok(out)
+    }
+
+    /// Seals one frame. `piece` must be at most `REQUEST_FRAME_SIZE` bytes;
+    /// streaming callers slice their input so memory never exceeds one frame.
+    pub fn encrypt_frame(&mut self, piece: &[u8]) -> Result<Vec<u8>> {
+        debug_assert!(piece.len() <= REQUEST_FRAME_SIZE);
+        let ciphertext = self.sender.seal(piece, &[]).map_err(|err| {
+            Error::Coded(
+                Code::HpkeSetupFailed,
+                format!("failed to seal request body: {err:?}"),
+            )
+        })?;
+        frame_chunk(&ciphertext)
     }
 }
 
