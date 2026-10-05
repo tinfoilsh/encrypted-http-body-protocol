@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { Identity } from '../identity.js';
+import { UnsupportedSuiteError, InvalidKeyConfigError } from '../errors.js';
 
 describe('Identity', () => {
   it('should generate a new identity', async () => {
@@ -42,5 +43,14 @@ describe('Identity', () => {
     const originalHex = await identity.getPublicKeyHex();
     const restoredHex = await restored.getPublicKeyHex();
     assert(restoredHex === originalHex, 'Public keys should match');
+  });
+
+  it('should reject a config advertising a non-X25519 KEM', async () => {
+    const config = await (await Identity.generate()).marshalConfig();
+    config[2] = 0x10; // DHKEM(P-256)
+    await assert.rejects(Identity.unmarshalPublicConfig(config), UnsupportedSuiteError);
+    // A config too short to hold a KEM id is malformed, not an unsupported suite.
+    await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, 2)), InvalidKeyConfigError);
+    await assert.rejects(Identity.unmarshalPublicConfig(new Uint8Array(0)), InvalidKeyConfigError);
   });
 });

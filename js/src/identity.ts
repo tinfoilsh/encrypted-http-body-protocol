@@ -188,11 +188,19 @@ export class Identity {
   static async unmarshalPublicConfig(data: Uint8Array): Promise<Identity> {
     let offset = 0;
 
+    // Fixed header: key id (1) || KEM id (2) || X25519 key (32) || suites length (2)
+    if (data.length < 37) {
+      throw new InvalidKeyConfigError('truncated key config');
+    }
+
     // Read Key ID
     const keyId = data[offset++];
 
     // Read KEM ID
     const kemId = (data[offset++] << 8) | data[offset++];
+    if (kemId !== HPKE_CONFIG.KEM) {
+      throw new UnsupportedSuiteError(`unsupported KEM: 0x${kemId.toString(16).padStart(4, '0')}`);
+    }
 
     // Read Public Key (32 bytes for X25519)
     const publicKeySize = 32;
