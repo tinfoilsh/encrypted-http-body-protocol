@@ -9,7 +9,7 @@ final class ReservedHeaderTests: XCTestCase {
             baseURL: "https://server.test",
             publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
         )
-        for name in [EHBPProtocol.encapsulatedKeyHeader, "ehbp-response-nonce", "Content-Length", "Host"] {
+        for name in [EHBPProtocol.encapsulatedKeyHeader, "ehbp-response-nonce", "Content-Length", "Transfer-Encoding", "Host"] {
             do {
                 _ = try await client.request(method: "POST", path: "/secure", headers: [name: "x"], body: Data("hi".utf8))
                 XCTFail("\(name) must be rejected")

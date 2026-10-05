@@ -63,30 +63,9 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let url = try resolveURL(path)
-        let generation = beginRequest()
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-
-        for (key, value) in try EHBPClient.callerHeaders(headers) {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        var requestContext: RequestContext?
-        var token: SessionRecoveryToken?
-
-        if let body = body, !body.isEmpty {
-            let (encryptedBody, context) = try identity.encryptRequest(body: body)
-            requestContext = context
-            token = try extractSessionRecoveryToken(context: context)
-
-            request.setValue(
-                context.requestEnc.hexString,
-                forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
-            )
-            request.httpBody = encryptedBody
-        }
+        let (request, generation, requestContext, token) = try prepareRequest(
+            method: method, path: path, headers: headers, body: body
+        )
 
         let (data, response) = try await session.data(for: request)
 
@@ -132,30 +111,9 @@ public final class EHBPClient: @unchecked Sendable {
         headers: [String: String] = [:],
         body: Data?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let url = try resolveURL(path)
-        let generation = beginRequest()
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-
-        for (key, value) in try EHBPClient.callerHeaders(headers) {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        var requestContext: RequestContext?
-        var token: SessionRecoveryToken?
-
-        if let body = body, !body.isEmpty {
-            let (encryptedBody, context) = try identity.encryptRequest(body: body)
-            requestContext = context
-            token = try extractSessionRecoveryToken(context: context)
-
-            request.setValue(
-                context.requestEnc.hexString,
-                forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
-            )
-            request.httpBody = encryptedBody
-        }
+        let (request, generation, requestContext, token) = try prepareRequest(
+            method: method, path: path, headers: headers, body: body
+        )
 
         let (asyncBytes, response) = try await session.bytes(for: request)
 
@@ -264,8 +222,48 @@ public final class EHBPClient: @unchecked Sendable {
         return headers
     }
 
+    /// Everything that happens before the request leaves the client, shared by
+    /// the buffered and streaming paths so the two cannot diverge: URL
+    /// resolution against the configured origin, generation tracking,
+    /// reserved-header validation, and body encryption.
+    private func prepareRequest(
+        method: String,
+        path: String,
+        headers: [String: String],
+        body: Data?
+    ) throws -> (URLRequest, UInt64, RequestContext?, SessionRecoveryToken?) {
+        let url = try resolveURL(path)
+        let generation = beginRequest()
+
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+
+        for (key, value) in try EHBPClient.callerHeaders(headers) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        var requestContext: RequestContext?
+        var token: SessionRecoveryToken?
+
+        if let body = body, !body.isEmpty {
+            let (encryptedBody, context) = try identity.encryptRequest(body: body)
+            requestContext = context
+            token = try extractSessionRecoveryToken(context: context)
+
+            request.setValue(
+                context.requestEnc.hexString,
+                forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
+            )
+            request.httpBody = encryptedBody
+        }
+        return (request, generation, requestContext, token)
+    }
+
     static func mayBeKeyConfigMismatch(_ response: HTTPURLResponse) -> Bool {
+        // A problem document is plaintext. A 422 carrying a response nonce is
+        // an encrypted body and must reach the decryptor untouched.
         guard response.statusCode == 422,
+              response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) == nil,
               let contentType = response.value(forHTTPHeaderField: "Content-Type"),
               let mediaType = contentType.split(separator: ";", maxSplits: 1).first else {
             return false

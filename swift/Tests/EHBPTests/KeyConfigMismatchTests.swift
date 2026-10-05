@@ -56,4 +56,18 @@ final class KeyConfigMismatchTests: XCTestCase {
         XCTAssertEqual(response.statusCode, 422)
         XCTAssertEqual(String(data: data, encoding: .utf8), #"{"type":"about:blank"}"#)
     }
+
+    func testEncrypted422IsNotInspectedAsProblemDocument() {
+        // A response nonce means the body is ciphertext; it must reach the
+        // decryptor untouched rather than being prefetched as plaintext.
+        let response = HTTPURLResponse(
+            url: URL(string: "https://server.test/secure")!, statusCode: 422, httpVersion: nil,
+            headerFields: [
+                "Content-Type": "application/problem+json",
+                EHBPProtocol.responseNonceHeader: String(repeating: "0", count: 64),
+            ]
+        )!
+        XCTAssertFalse(EHBPClient.mayBeKeyConfigMismatch(response))
+        XCTAssertNil(EHBPClient.keyConfigMismatch(response, body: Data(#"{"type":"\#(EHBPProtocol.keyConfigProblemType)"}"#.utf8)))
+    }
 }
