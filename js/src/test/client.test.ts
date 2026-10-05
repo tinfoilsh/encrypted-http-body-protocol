@@ -8,7 +8,7 @@ import {
   KeyConfigMismatchError,
   MissingResponseNonceError,
 } from '../index.js';
-import { encryptFrames, type SessionRecoveryToken } from '../identity.js';
+import { encryptFrames, setSpoolThresholdForTests, type SessionRecoveryToken } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
 import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
 import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
@@ -811,16 +811,23 @@ describe('Transport', () => {
   });
 
   // Browser-mode helpers: force the no-upload-streaming path and fake OPFS.
-  function browserMode() {
+  function browserMode(thresholdBytes: number | null = 100 * 1024) {
+    // Default: a 100 KiB framed threshold so 200 KiB bodies cross it and the
+    // spill path runs; pass null to test the real 64 MiB default.
+    setSpoolThresholdForTests(thresholdBytes ?? undefined);
     const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
     Object.defineProperty(process, 'versions', { value: {}, configurable: true });
-    return () => Object.defineProperty(process, 'versions', versions);
+    return () => {
+      setSpoolThresholdForTests(undefined);
+      Object.defineProperty(process, 'versions', versions);
+    };
   }
   function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[] } = {}) {
-    const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0 };
+    const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0, openedAtWrites: -1 };
     const chunks: Uint8Array[] = [];
     const handle = {
       async createWritable() {
+        state.openedAtWrites = state.writes.length;
         let errored = false;
         return {
           async write(v: Uint8Array) {
@@ -1027,6 +1034,79 @@ describe('Transport', () => {
       assert.strictEqual(captured.contentType, 'application/octet-stream');
     } finally {
       globalThis.fetch = originalFetch; restore(); restoreMode();
+    }
+  });
+
+  it('should keep bodies under the 64 MiB threshold in memory and never touch OPFS', async () => {
+    const restoreMode = browserMode(null);
+    const { state, restore } = fakeOpfs();
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(state.openedAtWrites, -1, 'no spool file was created');
+      assert.strictEqual(state.writes.length, 0);
+      assert.strictEqual(state.removed.length, 0, 'no sweep, no cleanup');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should spill a stream only once it crosses the threshold, writing the buffered prefix first', async () => {
+    const restoreMode = browserMode(100 * 1024); // crossed after the second 64 KiB frame
+    const { state, restore } = fakeOpfs();
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original); c.close(); } });
+      await transport.request('https://server.test/upload', { method: 'POST', body: source });
+      assert.strictEqual(state.openedAtWrites, 0, 'file opened once the buffer exceeded the threshold');
+      assert.deepStrictEqual(state.writes.map((n) => n - 20), [65536, 65536, 65536, 8192], 'buffered frames first, in order, then the rest');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should spill a known-size Blob above the threshold from the first frame', async () => {
+    const restoreMode = browserMode(1024);
+    const { state, restore } = fakeOpfs();
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(state.openedAtWrites, 0);
+      assert.strictEqual(state.writes.length, 4);
+      const { plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
+    }
+  });
+
+  it('should stay in memory when the quota cannot take the spill', async () => {
+    const restoreMode = browserMode(1024);
+    const { state, restore } = fakeOpfs({ quota: 1500 }); // below twice the 1 KiB threshold estimate
+    const f = captureFetch(); f.install(state);
+    try {
+      const transport = new Transport(serverIdentity, 'https://server.test');
+      const original = original200k();
+      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original); c.close(); } });
+      await transport.request('https://server.test/upload', { method: 'POST', body: source });
+      assert.strictEqual(state.writes.length, 0, 'spill refused once, then buffered to the end');
+      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    } finally {
+      f.restore(); restore(); restoreMode();
     }
   });
 

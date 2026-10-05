@@ -718,55 +718,119 @@ export function encryptFrames(
  * ponytail: Safari exposes OPFS only through sync access handles in a worker,
  * so it takes the Blob fallback; a worker-based spool is the upgrade path.
  */
+/**
+ * Browser sink for the sealed frames. Bodies up to SPOOL_THRESHOLD_BYTES stay
+ * in memory as one Blob of frames, so ordinary requests never touch disk;
+ * only a body that grows past the threshold spills to an Origin Private File
+ * System file, which both engines then stream from disk. A known-size source
+ * above the threshold spills from the first frame instead of buffering.
+ * Memory is bounded by the threshold plus one frame.
+ * ponytail: Safari exposes OPFS only through sync access handles in a worker,
+ * so it stays in memory; a worker-based spool is the upgrade path.
+ */
 async function spool(
   frames: ReadableStream<Uint8Array>,
   knownSize?: number
 ): Promise<{ body: BodyInit; cleanup?: () => Promise<void> }> {
+  const threshold = spoolThreshold();
+  const parts: Uint8Array[] = [];
+  let buffered = 0;
+  let file: { writer: FileSystemWritableFileStream; handle: FileSystemFileHandle; cleanup: () => Promise<void> } | undefined;
+  const reader = frames.getReader();
+
+  // Opens the spool file, writes what is buffered so far in order, and drops
+  // the buffer. Returns false (and keeps buffering) when OPFS cannot take it.
+  const spill = async (remaining: number | undefined): Promise<boolean> => {
+    const opened = await openSpoolFile(remaining);
+    if (!opened) return false;
+    try {
+      for (const part of parts) await opened.writer.write(part as unknown as BufferSource);
+    } catch (err) {
+      await opened.writer.abort(err).catch(() => {});
+      await opened.cleanup().catch(() => {});
+      throw err;
+    }
+    parts.length = 0;
+    file = opened;
+    return true;
+  };
+
+  try {
+    let spillRefused = false;
+    if (knownSize !== undefined && framedSize(knownSize) > threshold) {
+      spillRefused = !(await spill(framedSize(knownSize)));
+    }
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (file) {
+        await file.writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
+        continue;
+      }
+      parts.push(value);
+      buffered += value.byteLength;
+      if (buffered > threshold && !spillRefused) spillRefused = !(await spill(undefined));
+    }
+  } catch (err) {
+    // Release the caller's source (the frame stream forwards the cancel) and
+    // abort any writable: an errored one cannot be closed, and aborting keeps
+    // the original error (quota exhausted mid-body, I/O failure) as the one
+    // that surfaces.
+    await reader.cancel(err).catch(() => {});
+    if (file) {
+      await file.writer.abort(err).catch(() => {});
+      await file.cleanup().catch(() => {});
+    }
+    throw err;
+  }
+
+  if (!file) return { body: new Blob(parts as BlobPart[]) };
+  await file.writer.close();
+  return { body: await file.handle.getFile(), cleanup: file.cleanup };
+}
+
+/**
+ * Creates the OPFS spool file, or returns undefined when OPFS is unavailable
+ * or its quota cannot hold `expectedBytes` (twice that, since Chromium's
+ * quota tracks free disk and shrinks while the spool is written).
+ */
+async function openSpoolFile(
+  expectedBytes: number | undefined
+): Promise<{ writer: FileSystemWritableFileStream; handle: FileSystemFileHandle; cleanup: () => Promise<void> } | undefined> {
   const storage = (globalThis as { navigator?: { storage?: StorageManager } }).navigator?.storage;
   const canSpool =
     typeof storage?.getDirectory === 'function' &&
     typeof (globalThis as { FileSystemFileHandle?: { prototype: { createWritable?: unknown } } })
       .FileSystemFileHandle?.prototype?.createWritable === 'function';
-  if (!canSpool) return { body: await collect(frames) };
+  if (!canSpool) return undefined;
   const root = await storage.getDirectory();
   // Sweep first: a stale spool from a dead page could otherwise hold the
-  // quota that this upload needs and push it into the memory fallback forever.
+  // quota that this upload needs and keep every later upload in memory.
   await sweepOrphanedSpools(root);
-  if (knownSize !== undefined && typeof storage.estimate === 'function') {
+  if (typeof storage.estimate === 'function') {
     const { quota = 0, usage = 0 } = await storage.estimate();
-    if (quota - usage < framedSize(knownSize)) return { body: await collect(frames) };
+    const need = expectedBytes ?? spoolThreshold();
+    if (quota - usage < need * 2) return undefined;
   }
-
   const name = `${SPOOL_PREFIX}${Date.now()}-${Math.random().toString(16).slice(2)}`;
   // Removal failures propagate: a leftover file is ciphertext only, but the
   // caller should know it is still there rather than assume it is gone.
   const cleanup = () => root.removeEntry(name);
+  const handle = await root.getFileHandle(name, { create: true });
   try {
-    const handle = await root.getFileHandle(name, { create: true });
-    const writer = await handle.createWritable();
-    const reader = frames.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await writer.write(value as unknown as BufferSource); // awaited per frame: backpressure keeps memory at one frame
-      }
-    } catch (err) {
-      // Release the caller's source (the frame stream forwards the cancel)
-      // and abort the writable: an errored one cannot be closed, and
-      // aborting keeps the original error (quota exhausted mid-body, I/O
-      // failure) as the one that surfaces.
-      await reader.cancel(err).catch(() => {});
-      await writer.abort(err).catch(() => {});
-      throw err;
-    }
-    await writer.close();
-    return { body: await handle.getFile(), cleanup };
+    return { writer: await handle.createWritable(), handle, cleanup };
   } catch (err) {
     await cleanup().catch(() => {});
     throw err;
   }
 }
+
+/** Framed bytes a body may reach in memory before it spills to OPFS. */
+export const SPOOL_THRESHOLD_BYTES = 64 * 1024 * 1024;
+/** @internal test hook: lower the threshold so the spill path runs on small bodies. */
+export let spoolThresholdOverride: number | undefined;
+export function setSpoolThresholdForTests(bytes: number | undefined): void { spoolThresholdOverride = bytes; }
+function spoolThreshold(): number { return spoolThresholdOverride ?? SPOOL_THRESHOLD_BYTES; }
 
 const SPOOL_PREFIX = 'ehbp-spool-';
 const SPOOL_ORPHAN_AGE_MS = 60 * 60 * 1000;
