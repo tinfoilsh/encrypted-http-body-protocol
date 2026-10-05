@@ -8,8 +8,7 @@ use std::io::Read;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tinfoil_ehbp::{
-    Code,
-    compute_nonce, derive_response_keys, Client, Error, ServerIdentity, SessionRecoveryToken,
+    compute_nonce, derive_response_keys, Client, Code, Error, ServerIdentity, SessionRecoveryToken,
     RESPONSE_NONCE_HEADER,
 };
 
@@ -67,13 +66,19 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
     let ins = &fx["inputs"];
     match op {
         "derive_keys" => {
-            let km = derive_response_keys(&h(ins, "exportedSecret"), &h(ins, "requestEnc"), &h(ins, "responseNonce"))?;
-            out.body_hex = Some(hex::encode([km.key.as_slice(), km.nonce_base.as_slice()].concat()));
+            let km = derive_response_keys(
+                &h(ins, "exportedSecret")?,
+                &h(ins, "requestEnc")?,
+                &h(ins, "responseNonce")?,
+            )?;
+            out.body_hex = Some(hex::encode(
+                [km.key.as_slice(), km.nonce_base.as_slice()].concat(),
+            ));
         }
         "compute_nonce" => {
-            let base: [u8; 12] = h(ins, "nonceBase")
-                .try_into()
-                .map_err(|_| Error::Coded(Code::InvalidInput, "nonce base must be 12 bytes".into()))?;
+            let base: [u8; 12] = h(ins, "nonceBase")?.try_into().map_err(|_| {
+                Error::Coded(Code::InvalidInput, "nonce base must be 12 bytes".into())
+            })?;
             let seq = u64::from_str_radix(ins["seqHex"].as_str().unwrap_or(""), 16)
                 .map_err(|e| Error::Coded(Code::InvalidInput, e.to_string()))?;
             out.body_hex = Some(hex::encode(compute_nonce(&base, seq)));
@@ -81,14 +86,16 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         "decrypt_response" | "decrypt_response_streaming" => decrypt(fx, out)?,
         "token_roundtrip" => {
             let t = SessionRecoveryToken::from_json(ins["json"].as_str().unwrap_or(""))?;
-            out.body_hex = Some(hex::encode([t.exported_secret.as_slice(), t.request_enc.as_slice()].concat()));
+            out.body_hex = Some(hex::encode(
+                [t.exported_secret.as_slice(), t.request_enc.as_slice()].concat(),
+            ));
         }
         "parse_config" => {
-            let id = ServerIdentity::unmarshal_public_config(&h(ins, "config"))?;
+            let id = ServerIdentity::unmarshal_public_config(&h(ins, "config")?)?;
             out.body_hex = Some(hex::encode(id.public_key_bytes()));
         }
         "marshal_config" => {
-            let id = ServerIdentity::from_public_key_bytes(&h(ins, "publicKey"))?;
+            let id = ServerIdentity::from_public_key_bytes(&h(ins, "publicKey")?)?;
             out.body_hex = Some(hex::encode(id.marshal_public_config()));
         }
         "request" => request(fx, out).await?,
@@ -100,7 +107,12 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         "reject_reserved_header" | "reject_cross_origin" | "reject_url_credentials" => {
             harden(op).await?;
         }
-        other => return Err(Error::Coded(Code::InvalidInput, format!("unknown operation {other}"))),
+        other => {
+            return Err(Error::Coded(
+                Code::InvalidInput,
+                format!("unknown operation {other}"),
+            ))
+        }
     }
     Ok(())
 }
@@ -119,7 +131,9 @@ async fn harden(op: &str) -> Result<(), Error> {
     let client = Client::new(&base).await?;
     match op {
         "reject_reserved_header" => {
-            client.post("/s/echo")?.header("ehbp-encapsulated-key", "x")?;
+            client
+                .post("/s/echo")?
+                .header("ehbp-encapsulated-key", "x")?;
         }
         "reject_cross_origin" => {
             client.get("http://other.example/x")?;
@@ -133,9 +147,9 @@ async fn harden(op: &str) -> Result<(), Error> {
 
 fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
     let ins = &fx["inputs"];
-    let token = SessionRecoveryToken::new(h(ins, "exportedSecret"), h(ins, "requestEnc"))?;
-    let mut dec = token.response_decryptor(&h(ins, "responseNonce"))?;
-    let framed = h(ins, "encryptedResponse");
+    let token = SessionRecoveryToken::new(h(ins, "exportedSecret")?, h(ins, "requestEnc")?)?;
+    let mut dec = token.response_decryptor(&h(ins, "responseNonce")?)?;
+    let framed = h(ins, "encryptedResponse")?;
     let segments = if fx["operation"].as_str() == Some("decrypt_response_streaming") {
         split_at(&framed, fx.get("chunking"))
     } else {
@@ -172,19 +186,26 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
     let req = &fx["request"];
     let path = req["path"].as_str().unwrap_or("/");
 
+    // Reject rather than silently downgrade an unexpected method to POST.
     let mut builder = match req["method"].as_str().unwrap_or("POST") {
         "GET" => client.get(path)?,
         "PUT" => client.put(path)?,
         "DELETE" => client.delete(path)?,
-        _ => client.post(path)?,
+        "POST" => client.post(path)?,
+        other => {
+            return Err(Error::Coded(
+                Code::InvalidInput,
+                format!("unsupported fixture method {other}"),
+            ))
+        }
     };
     if let Some(headers) = req["headers"].as_object() {
         for (k, v) in headers {
             builder = builder.header(k.as_str(), v.as_str().unwrap_or(""))?;
         }
     }
-    if let Some(body_hex) = req["body_hex"].as_str() {
-        builder = builder.body(hex::decode(body_hex).unwrap_or_default());
+    if req["body_hex"].is_string() {
+        builder = builder.body(h(req, "body_hex")?);
     }
 
     let resp = builder.send().await?;
@@ -210,13 +231,19 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
 async fn large_body(fx: &Value, out: &mut Out) -> Result<(), Error> {
     let size = fx["inputs"]["size_bytes"].as_u64().unwrap_or(0);
     let seed = fx["inputs"]["block_seed"].as_u64().unwrap_or(0) as usize;
-    let block: bytes::Bytes = (0..1usize << 20).map(|i| (i + seed) as u8).collect::<Vec<u8>>().into();
+    let block: bytes::Bytes = (0..1usize << 20)
+        .map(|i| (i + seed) as u8)
+        .collect::<Vec<u8>>()
+        .into();
     let source = futures_util::stream::unfold((block, size), |(block, remaining)| async move {
         if remaining == 0 {
             return None;
         }
         let n = remaining.min(block.len() as u64) as usize;
-        Some((Ok::<_, std::io::Error>(block.slice(..n)), (block, remaining - n as u64)))
+        Some((
+            Ok::<_, std::io::Error>(block.slice(..n)),
+            (block, remaining - n as u64),
+        ))
     });
 
     let base = std::env::var("ORACLE_URL").unwrap_or_default();
@@ -234,11 +261,14 @@ async fn token_before_response(fx: &Value, out: &mut Out) -> Result<(), Error> {
     let base = std::env::var("ORACLE_URL").unwrap_or_default();
     let client = Client::new(&base).await?;
     let req = &fx["request"];
-    let body = hex::decode(req["body_hex"].as_str().unwrap_or("")).unwrap_or_default();
-    let pending = client.post(req["path"].as_str().unwrap_or("/"))?.body(body).send();
+    let body = h(req, "body_hex")?;
+    let pending = client
+        .post(req["path"].as_str().unwrap_or("/"))?
+        .body(body)
+        .send();
     let observer = client.clone();
     let (resp, early) = tokio::join!(pending, async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // oracle holds 5 s
         observer.get_session_recovery_token().is_some()
     });
     out.token_before_response = Some(early);
@@ -268,14 +298,19 @@ fn map_error(_op: &str, err: &Error) -> String {
         .unwrap_or_else(|| "INVALID_INPUT".to_string())
 }
 
-fn h(ins: &Value, key: &str) -> Vec<u8> {
-    hex::decode(ins[key].as_str().unwrap_or("")).unwrap_or_default()
+fn h(ins: &Value, key: &str) -> Result<Vec<u8>, Error> {
+    hex::decode(ins[key].as_str().unwrap_or(""))
+        .map_err(|e| Error::Coded(Code::InvalidInput, format!("fixture field {key}: {e}")))
 }
 
 fn split_at(data: &[u8], offsets: Option<&Value>) -> Vec<Vec<u8>> {
     let offsets: Vec<usize> = offsets
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64().map(|n| n as usize))
+                .collect()
+        })
         .unwrap_or_default();
     if offsets.is_empty() {
         return vec![data.to_vec()];

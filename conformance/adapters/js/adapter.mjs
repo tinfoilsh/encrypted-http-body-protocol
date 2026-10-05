@@ -88,7 +88,7 @@ async function run(fx, res) {
 // The alternate origin is another loopback oracle port, so this remains
 // network-safe even if host-rewrite behavior changes.
 async function hardening(op) {
-  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const base = oracleBase();
   const transport = await createTransport(base);
   let target = `${base}/s/echo`;
   const init = { method: 'POST', body: 'x', headers: {} };
@@ -128,11 +128,11 @@ async function decrypt(fx, res) {
 // Reads the session recovery token while the oracle is still holding its
 // reply, then completes the exchange (SPEC 6: token before send).
 async function tokenBeforeResponse(fx, res) {
-  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const base = oracleBase();
   const transport = await createTransport(base);
   const req = fx.request;
   const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => setTimeout(r, 500)); // oracle holds 5 s
   // The getter throws when no token is published; either way, no translation.
   try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
   const response = await pending;
@@ -140,8 +140,12 @@ async function tokenBeforeResponse(fx, res) {
   res.body_hex = await drain(response.body, res);
 }
 
+function oracleBase() {
+  return process.env.ORACLE_URL.replace(/\/$/, '');
+}
+
 async function doRequest(fx, res) {
-  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const base = oracleBase();
   const transport = await createTransport(base);
   const req = fx.request;
   const init = { method: req.method, headers: req.headers || {} };
@@ -158,7 +162,7 @@ async function doRequest(fx, res) {
 // Streams a multi-GiB patterned body (1 MiB block, block[i] = (i + seed) & 0xff)
 // through the transport to the oracle's digest route; peak RSS shows buffering.
 async function largeBody(fx, res) {
-  const base = process.env.ORACLE_URL.replace(/\/$/, '');
+  const base = oracleBase();
   const transport = await createTransport(base);
   const { size_bytes: size, block_seed: seed } = fx.inputs;
   const block = new Uint8Array(1 << 20);

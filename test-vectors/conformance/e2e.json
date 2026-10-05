@@ -484,7 +484,7 @@
   },
   {
     "id": "e2e-token-before-response",
-    "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. The oracle holds its reply for 1.5 s; the client reads the token 300 ms after sending, while the response is pending, then completes the exchange.",
+    "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. Timing-based with a 10x margin: the oracle holds its reply for 5 s; the adapter reads the token 500 ms after sending, while the response is pending, then completes the exchange.",
     "category": "e2e",
     "operation": "token_before_response",
     "server_scenario": "hold",

@@ -63,7 +63,7 @@ def run(fx: dict, res: dict) -> None:
     elif op == "parse_config":
         res["body_hex"] = ServerIdentity.unmarshal_public_config(b(ins, "config")).public_key_bytes().hex()
     elif op == "marshal_config":
-        res["body_hex"] = ServerIdentity.from_public_key_bytes(b(ins, "publicKey")).marshal_public_config().hex()
+        res["body_hex"] = ServerIdentity(b(ins, "publicKey"), int(ins.get("keyId", 0))).marshal_public_config().hex()
     elif op == "request":
         request(fx, res)
     elif op == "large_body":
@@ -115,10 +115,14 @@ def decrypt(fx: dict, res: dict) -> None:
     res["body_hex"] = bytes(out).hex()
 
 
-def request(fx: dict, res: dict) -> None:
+def oracle() -> tuple[str, ServerIdentity]:
+    """(base URL, discovered identity): the one bootstrap for every oracle-bound op."""
     base = os.environ["ORACLE_URL"].rstrip("/")
-    keys = httpx.get(base + KEYS_PATH).content
-    identity = ServerIdentity.unmarshal_public_config(keys)
+    return base, ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
+
+
+def request(fx: dict, res: dict) -> None:
+    base, identity = oracle()
     req = fx["request"]
     content = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
 
@@ -147,21 +151,25 @@ def token_before_response(fx: dict, res: dict) -> None:
     import threading
     import time
 
-    base = os.environ["ORACLE_URL"].rstrip("/")
-    identity = ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
+    base, identity = oracle()
     client = Client(base, identity)
     req = fx["request"]
-    done: list = []
-    worker = threading.Thread(
-        target=lambda: done.append(client.post(req["path"], body=bytes.fromhex(req["body_hex"]))))
+    done: list = []  # [Response] or [BaseException]
+
+    def send() -> None:
+        try:
+            done.append(client.post(req["path"], body=bytes.fromhex(req["body_hex"])))
+        except BaseException as err:  # noqa: BLE001 - re-raised on the main thread below
+            done.append(err)
+
+    worker = threading.Thread(target=send)
     worker.start()
-    time.sleep(0.3)
-    try:
-        res["token_before_response"] = client.get_session_recovery_token() is not None
-    except Exception:  # noqa: BLE001 - absence of a token, however signalled, is the observation
-        res["token_before_response"] = False
+    time.sleep(0.5)  # oracle holds 5 s: 10x margin
+    res["token_before_response"] = client.get_session_recovery_token() is not None
     worker.join()
     r = done[0]
+    if isinstance(r, BaseException):
+        raise r
     res["status"] = r.status_code
     res["body_hex"] = r.content.hex()
 
@@ -179,8 +187,7 @@ def large_body(fx: dict, res: dict) -> None:
     import resource
     import sys as _sys
 
-    base = os.environ["ORACLE_URL"].rstrip("/")
-    identity = ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
+    base, identity = oracle()
     ins = fx["inputs"]
     client = httpx.Client(transport=EHBPTransport(identity), base_url=base, timeout=600)
     try:

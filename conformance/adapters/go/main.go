@@ -241,13 +241,14 @@ func decryptRequest(fx *fixture, r *result) error {
 		if v, ok := fx.Inputs["zeroFrameCount"].(float64); ok {
 			count = int(v)
 		}
+		if count < 0 || count > 1_000_000 {
+			return fmt.Errorf("zeroFrameCount out of range: %d", count)
+		}
 		body = append(make([]byte, count*4), framed...)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(body))
-	for _, value := range template.Header.Values(protocol.EncapsulatedKeyHeader) {
-		req.Header.Add(protocol.EncapsulatedKeyHeader, value)
-	}
+	copyEncapsulatedKey(req, template)
 	if mutation == "duplicate_encapsulated_key" {
 		req.Header.Add(protocol.EncapsulatedKeyHeader, strings.Repeat("0", 64))
 	}
@@ -282,9 +283,7 @@ func middlewareRequest(fx *fixture, r *result) error {
 	}
 	framed[len(framed)-1] ^= 1
 	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(framed))
-	for _, value := range template.Header.Values(protocol.EncapsulatedKeyHeader) {
-		req.Header.Add(protocol.EncapsulatedKeyHeader, value)
-	}
+	copyEncapsulatedKey(req, template)
 
 	var readErr error
 	var delivered int
@@ -331,7 +330,7 @@ func tokenBeforeResponse(fx *fixture, r *result) error {
 		resp, err := (&http.Client{Transport: tr}).Do(req)
 		done <- outcome{resp, err}
 	}()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond) // oracle holds 5 s: 10x margin
 	early := tr.GetSessionRecoveryToken() != nil
 	r.TokenEarly = &early
 	out := <-done
@@ -347,6 +346,14 @@ func tokenBeforeResponse(fx *fixture, r *result) error {
 	}
 	setBody(r, plain)
 	return nil
+}
+
+// copyEncapsulatedKey carries the encrypted template's key header onto the
+// probe request, preserving repeats so duplicate-header probes stay exact.
+func copyEncapsulatedKey(dst, src *http.Request) {
+	for _, value := range src.Header.Values(protocol.EncapsulatedKeyHeader) {
+		dst.Header.Add(protocol.EncapsulatedKeyHeader, value)
+	}
 }
 
 // patternReader yields size bytes of a 1 MiB block with block[i] = (i+seed)&0xff,
@@ -401,8 +408,9 @@ func largeBody(fx *fixture, r *result) error {
 	r.Status = &status
 	plain, _, rerr := readTracked(resp.Body)
 	_ = resp.Body.Close()
-	rss := peakRSSBytes()
-	r.PeakRSS = &rss
+	if rss, ok := peakRSSBytes(); ok {
+		r.PeakRSS = &rss
+	}
 	if rerr != nil {
 		return rerr
 	}

@@ -91,7 +91,7 @@ async function tokenBeforeResponse(fx, res, oracleUrl) {
   const transport = await createTransport(base);
   const req = fx.request;
   const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => setTimeout(r, 500)); // oracle holds 5 s
   // The getter throws when no token is published; either way, no translation.
   try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
   const response = await pending;

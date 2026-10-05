@@ -85,7 +85,7 @@ func hardeningOp(_ operation: String) async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [GuardProbeURLProtocol.self]
     let session = URLSession(configuration: configuration)
-    let publicKey = Data(repeating: 7, count: 32)
+    let publicKey = Data(repeating: 7, count: EHBPConstants.requestEncLength)
 
     var base = "http://configured.example"
     var path = "/probe"
@@ -96,7 +96,7 @@ func hardeningOp(_ operation: String) async throws {
     } else if operation == "reject_url_credentials" {
         base = "http://user:pass@configured.example"
     } else {
-        headers[EHBPProtocol.responseNonceHeader] = String(repeating: "0", count: 64)
+        headers[EHBPProtocol.responseNonceHeader] = String(repeating: "0", count: EHBPConstants.responseNonceLength * 2)
     }
 
     let client = try EHBPClient(baseURL: base, publicKey: publicKey, session: session)
@@ -128,10 +128,16 @@ func decryptOp(_ ins: [String: Any]) throws {
     setBody(acc)
 }
 
-func requestOp() async throws {
+/// Discovers the oracle's key config and binds a client to its origin: the one
+/// bootstrap shared by every oracle-bound operation.
+func oracleClient() async throws -> EHBPClient {
     let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
     let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
-    let client = try EHBPClient(baseURL: base, config: config)
+    return try EHBPClient(baseURL: base, config: config)
+}
+
+func requestOp() async throws {
+    let client = try await oracleClient()
 
     let req = fx["request"] as? [String: Any] ?? [:]
     var headers = [String: String]()
@@ -160,9 +166,7 @@ func requestOp() async throws {
 // tokenBeforeResponseOp sends the fixture request to the holding oracle route
 // and reads the session recovery token while the response is still pending.
 func tokenBeforeResponseOp() async throws {
-    let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
-    let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
-    let client = try EHBPClient(baseURL: base, config: config)
+    let client = try await oracleClient()
     let req = fx["request"] as? [String: Any] ?? [:]
     let body = Data(hexString: (req["body_hex"] as? String) ?? "")
 
@@ -172,7 +176,7 @@ func tokenBeforeResponseOp() async throws {
             path: (req["path"] as? String) ?? "/",
             body: body)
     }
-    try await Task.sleep(nanoseconds: 300_000_000)
+    try await Task.sleep(nanoseconds: 500_000_000) // oracle holds 5 s
     res["token_before_response"] = (try? client.getSessionRecoveryToken()) != nil
     let (data, response) = try await pending.value
     res["status"] = response.statusCode
@@ -185,9 +189,7 @@ func tokenBeforeResponseOp() async throws {
 func largeBodyOp(_ ins: [String: Any]) async throws {
     let size = Int64((ins["size_bytes"] as? NSNumber)?.int64Value ?? 0)
     let seed = Int((ins["block_seed"] as? NSNumber)?.intValue ?? 0)
-    let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
-    let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
-    let client = try EHBPClient(baseURL: base, config: config)
+    let client = try await oracleClient()
     let req = fx["request"] as? [String: Any] ?? [:]
 
     // 1 MiB block with block[i] = (i + seed) & 0xff, repeated; never materialised.
