@@ -266,11 +266,16 @@ describe('Transport', () => {
   it('should keep an explicit port when configured host-only', async () => {
     const transport = new Transport(serverIdentity, 'server.test:80');
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
     try {
       // https on 443 is not the configured port 80.
       await assert.rejects(transport.post('https://server.test/secure', 'hello'), InvalidInputError);
       await assert.rejects(transport.post('http://server.test:8080/secure', 'hello'), InvalidInputError);
+      assert.strictEqual(fetched, false);
+      // http's default port is the configured 80, so this one is dispatched.
+      await assert.rejects(transport.post('http://server.test/secure', 'hello'), /stop/);
+      assert.strictEqual(fetched, true);
     } finally {
       globalThis.fetch = originalFetch;
     }
