@@ -15,6 +15,7 @@ import {
   HPKE_REQUEST_INFO,
   EXPORT_LABEL,
   EXPORT_LENGTH,
+  REQUEST_ENC_LENGTH,
   RESPONSE_NONCE_LENGTH,
   ResponseKeyMaterial,
 } from './derive.js';
@@ -397,10 +398,17 @@ export function serializeSessionRecoveryToken(token: SessionRecoveryToken): stri
 export function deserializeSessionRecoveryToken(json: string): SessionRecoveryToken {
   try {
     const parsed = JSON.parse(json);
-    return {
+    const token = {
       exportedSecret: hexToBytes(parsed.exportedSecret),
       requestEnc: hexToBytes(parsed.requestEnc),
     };
+    if (token.exportedSecret.length !== EXPORT_LENGTH) {
+      throw new Error(`exported secret must be ${EXPORT_LENGTH} bytes, got ${token.exportedSecret.length}`);
+    }
+    if (token.requestEnc.length !== REQUEST_ENC_LENGTH) {
+      throw new Error(`request enc must be ${REQUEST_ENC_LENGTH} bytes, got ${token.requestEnc.length}`);
+    }
+    return token;
   } catch (error) {
     throw new InvalidTokenError(`invalid session recovery token: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
