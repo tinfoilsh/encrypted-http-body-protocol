@@ -48,6 +48,15 @@ func (t *SessionRecoveryToken) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return protocol.Errorf(protocol.InvalidToken, "invalid requestEnc hex: %w", err)
 	}
+	// Missing fields, null, and {} all decode to empty slices; SPEC 6.1.1
+	// fixes both fields at 32 bytes, so reject them here rather than at key
+	// derivation (matches Python, Rust, and Swift).
+	if len(t.ExportedSecret) != ExportLength {
+		return protocol.Errorf(protocol.InvalidToken, "exportedSecret must be %d bytes, got %d", ExportLength, len(t.ExportedSecret))
+	}
+	if len(t.RequestEnc) != RequestEncLength {
+		return protocol.Errorf(protocol.InvalidToken, "requestEnc must be %d bytes, got %d", RequestEncLength, len(t.RequestEnc))
+	}
 	return nil
 }
 

@@ -505,6 +505,24 @@ func TestDecryptResponseWithTokenErrors(t *testing.T) {
 	})
 }
 
+func TestSessionRecoveryTokenUnmarshalRejectsMalformedFields(t *testing.T) {
+	short := strings.Repeat("ab", 16)
+	full := strings.Repeat("ab", 32)
+	for name, data := range map[string]string{
+		"null":          `null`,
+		"empty object":  `{}`,
+		"missing field": `{"exportedSecret":"` + full + `"}`,
+		"short secret":  `{"exportedSecret":"` + short + `","requestEnc":"` + full + `"}`,
+		"short enc":     `{"exportedSecret":"` + full + `","requestEnc":"` + short + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var tok SessionRecoveryToken
+			err := json.Unmarshal([]byte(data), &tok)
+			assert.Equal(t, protocol.InvalidToken, protocol.CodeOf(err))
+		})
+	}
+}
+
 func TestSessionRecoveryTokenJSONRoundTrip(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
