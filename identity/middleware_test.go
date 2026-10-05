@@ -595,7 +595,7 @@ func tamperedTrailingRequest(t *testing.T, serverIdentity *Identity) ([]byte, st
 	return framed, template.Header.Get(protocol.EncapsulatedKeyHeader)
 }
 
-func TestMiddlewareLateDecryptFailureBeforeResponseStartsIs422(t *testing.T) {
+func TestMiddlewareLateDecryptFailureBeforeResponseStartsIs400(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 	framed, enc := tamperedTrailingRequest(t, serverIdentity)
@@ -619,7 +619,9 @@ func TestMiddlewareLateDecryptFailureBeforeResponseStartsIs422(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+	// Earlier frames authenticated, so the key is right: tampering is a 400,
+	// not a stale-key 422 (SPEC 5.4.2).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, 16384, delivered, "the two authenticated frames were released, nothing from the bad one")
 }
 
@@ -650,7 +652,7 @@ func TestMiddlewareLateDecryptFailureAfterResponseStartedAbortsConnection(t *tes
 	assert.Error(t, err, "the response must not end as a complete message")
 }
 
-func TestLateDecryptFailure422CarriesNoResponseNonce(t *testing.T) {
+func TestLateDecryptFailurePlaintextErrorCarriesNoResponseNonce(t *testing.T) {
 	serverIdentity, err := NewIdentity()
 	require.NoError(t, err)
 	framed, enc := tamperedTrailingRequest(t, serverIdentity)
@@ -663,6 +665,6 @@ func TestLateDecryptFailure422CarriesNoResponseNonce(t *testing.T) {
 	rec := httptest.NewRecorder()
 	serverIdentity.Middleware()(handler).ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, rec.Header().Get(protocol.ResponseNonceHeader), "plaintext error must not look encrypted")
 }

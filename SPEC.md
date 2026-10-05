@@ -202,11 +202,13 @@ Implementations MUST fail closed: no plaintext fallback for encrypted exchanges 
 
 #### 5.4.2 HTTP Error Signaling
 
-Servers SHOULD return HTTP status codes as follows:
+Servers MUST return HTTP status codes for request failures as follows:
 
-- `400 Bad Request`: malformed encapsulated request (`Ehbp-Encapsulated-Key` not hex or not the KEM's encapsulated-key length), HPKE setup/decapsulation failure, or a chunk framing violation
-- `422 Unprocessable Content`: key configuration mismatch, which includes every AEAD authentication failure of a request chunk, whether it is the first chunk or one that follows chunks that authenticated. The server cannot tell a stale client key from tampering, and the client's recovery is the same: refresh the key configuration and retry (Section 5.4.3)
+- `400 Bad Request`: malformed encapsulated request (`Ehbp-Encapsulated-Key` not hex or not the KEM's encapsulated-key length), a chunk framing violation, or an AEAD authentication failure of a chunk after at least one earlier chunk of the same body authenticated. Once a chunk has authenticated the client's key is known to be correct, so a later failure is corruption or tampering, not a configuration problem.
+- `422 Unprocessable Content`: key configuration mismatch: HPKE setup/decapsulation failure, or an AEAD authentication failure of the first chunk. The server cannot tell a stale client key from tampering at that point, and the client's recovery is the same: refresh the key configuration and retry (Section 5.4.3)
 - `500 Internal Server Error`: server-side processing failure not attributable to client input
+
+A 422 is only ever sent before any plaintext has been released to the application, so the client can replay safely (Section 5.4.3). A 400 or an aborted response for a later chunk means the application may already have acted on an authenticated prefix; whether to re-send is an application decision, not a protocol one.
 
 For `422` key configuration mismatch responses, servers SHOULD use:
 
@@ -219,7 +221,7 @@ This mirrors OHTTP key-management guidance while keeping EHBP-specific error typ
 
 #### 5.4.3 Key-Configuration Mismatch Recovery
 
-On receiving a key-configuration mismatch (Section 5.4.2), the client knows the server rejected the request before application processing completed (per Section 5.2). It is safe to:
+On receiving a key-configuration mismatch (Section 5.4.2), the client knows the server rejected the request before any plaintext reached the application (Section 5.4.2 only signals 422 for setup or first-chunk failures). It is safe to:
 
 1. Refresh server key configuration (e.g., by refetching `/.well-known/hpke-keys` or through a trusted out-of-band channel per Section 7.3).
 2. Recreate the EHBP transport with the new key.

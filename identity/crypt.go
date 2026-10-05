@@ -143,6 +143,7 @@ type StreamingDecryptReader struct {
 	buffer    []byte
 	eof       bool
 	failure   error // first framing or authentication failure, sticky
+	opened    bool  // at least one chunk authenticated under this key
 }
 
 // Err reports the first framing or authentication failure seen while
@@ -228,8 +229,15 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	if err != nil {
 		// Decryption failure at this stage typically indicates request/receiver key mismatch
 		// (for example stale client key after server key rotation).
-		return 0, NewKeyConfigError(protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err))
+		perr := protocol.Errorf(protocol.AEADDecryptFailed, "failed to decrypt chunk: %w", err)
+		if r.opened {
+			// An earlier chunk authenticated, so the key is right: this is
+			// corruption or tampering (400), not a stale key (422). SPEC 5.4.2.
+			return 0, NewClientError(perr)
+		}
+		return 0, NewKeyConfigError(perr)
 	}
+	r.opened = true
 
 	// Return as much as fits in p, buffer the rest
 	n = copy(p, decryptedChunk)
