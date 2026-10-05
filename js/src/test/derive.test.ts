@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { InvalidInputError, SequenceOverflowError } from '../errors.js';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,12 +108,12 @@ describe('computeNonce', () => {
     assert.strictEqual(nonce.length, 12);
   });
 
-  it('should reject sequence number overflow', () => {
+  it('should XOR all 64 bits of the sequence and reject 2^64', () => {
     const nonceBase = new Uint8Array(12).fill(0);
-    assert.throws(
-      () => computeNonce(nonceBase, 0x100000000),
-      /sequence number must be an integer in range/,
-    );
+    const nonce = computeNonce(nonceBase, 0x0102030405060708n);
+    assert.strictEqual(bytesToHex(nonce), '000000000102030405060708');
+    assert.throws(() => computeNonce(nonceBase, 1n << 64n), SequenceOverflowError);
+    assert.throws(() => computeNonce(nonceBase, 2 ** 53), InvalidInputError);
   });
 });
 

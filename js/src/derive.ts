@@ -11,7 +11,7 @@
  */
 
 import { type KDF, type AEAD, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
-import { InvalidInputError } from './errors.js';
+import { InvalidInputError, SequenceOverflowError } from './errors.js';
 
 // Response bodies are decrypted chunk by chunk on the client, so the AEAD is
 // the hot path. The Web Cryptography implementations run at native speed in
@@ -92,28 +92,29 @@ export async function deriveResponseKeys(
  * Computes the nonce for a specific sequence number.
  * nonce = nonceBase XOR sequence_number (big-endian in last 8 bytes)
  */
-export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
+export function computeNonce(nonceBase: Uint8Array, seq: number | bigint): Uint8Array {
   if (nonceBase.length !== AES_GCM_NONCE_LENGTH) {
     throw new InvalidInputError(`nonce base must be ${AES_GCM_NONCE_LENGTH} bytes`);
   }
 
-  // Validate seq to prevent nonce reuse from integer overflow.
-  // JavaScript's >>> operator only works correctly for 32-bit unsigned integers.
-  // Values >= 2^32 wrap around (e.g., 2^32 >>> 0 === 0), causing nonce reuse.
-  // In practice, 2^32 chunks per response is impossible (~4PB minimum), but we validate defensively.
-  if (!Number.isInteger(seq) || seq < 0 || seq >= 0x100000000) {
-    throw new InvalidInputError(`sequence number must be an integer in range [0, 2^32): got ${seq}`);
+  // Numbers above 2^53 are lossy; callers that far along must pass a bigint.
+  if (typeof seq === 'number' && !Number.isSafeInteger(seq)) {
+    throw new InvalidInputError(`sequence number must be a safe integer or bigint: got ${seq}`);
+  }
+  const s = BigInt(seq);
+  if (s < 0n) {
+    throw new InvalidInputError(`sequence number must not be negative: got ${s}`);
+  }
+  if (s >= 1n << 64n) {
+    throw new SequenceOverflowError(`sequence number exceeds 2^64 - 1: got ${s}`);
   }
 
   const nonce = new Uint8Array(AES_GCM_NONCE_LENGTH);
   nonce.set(nonceBase);
 
-  // XOR with sequence number in the last 8 bytes (big-endian)
+  // XOR with the 64-bit sequence number in the last 8 bytes (big-endian)
   for (let i = 0; i < 8; i++) {
-    const shift = i * 8;
-    if (shift < 32) {
-      nonce[AES_GCM_NONCE_LENGTH - 1 - i] ^= (seq >>> shift) & 0xff;
-    }
+    nonce[AES_GCM_NONCE_LENGTH - 1 - i] ^= Number((s >> BigInt(i * 8)) & 0xffn);
   }
 
   return nonce;
@@ -124,7 +125,7 @@ export function computeNonce(nonceBase: Uint8Array, seq: number): Uint8Array {
  */
 export async function encryptChunk(
   km: ResponseKeyMaterial,
-  seq: number,
+  seq: number | bigint,
   plaintext: Uint8Array
 ): Promise<Uint8Array> {
   const nonce = computeNonce(km.nonceBase, seq);
@@ -139,7 +140,7 @@ export async function encryptChunk(
  */
 export async function decryptChunk(
   km: ResponseKeyMaterial,
-  seq: number,
+  seq: number | bigint,
   ciphertext: Uint8Array
 ): Promise<Uint8Array> {
   const nonce = computeNonce(km.nonceBase, seq);
