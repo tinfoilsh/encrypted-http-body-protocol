@@ -457,6 +457,25 @@
     }
   },
   {
+    "id": "e2e-token-before-response",
+    "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. Timing-based with a 10x margin: the oracle holds its reply for 5 s; the adapter reads the token 500 ms after sending, while the response is pending, then completes the exchange.",
+    "category": "e2e",
+    "operation": "token_before_response",
+    "server_scenario": "hold",
+    "request": {
+      "method": "POST",
+      "path": "/s/hold",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "68656c6c6f",
+      "token_before_response": true
+    }
+  },
+  {
     "id": "e2e-large-body-3gib",
     "description": "A 3 GiB request body streams through encryption and the server's streaming decryptor; the client must not buffer it. Body bytes: 1 MiB block with block[i] = (i + seed) & 0xff, repeated. The oracle replies with the raw SHA-256 of the plaintext. Browsers spool the frames to the Origin Private File System and upload the file; a browser whose storage quota cannot hold the body skips with the declared reason.",
     "category": "e2e",
@@ -483,25 +502,6 @@
     "allowed_skips": {
       "js-chromium": "opfs-quota-below-body-size",
       "js-firefox": "opfs-quota-below-body-size"
-    }
-  },
-  {
-    "id": "e2e-token-before-response",
-    "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. Timing-based with a 10x margin: the oracle holds its reply for 5 s; the adapter reads the token 500 ms after sending, while the response is pending, then completes the exchange.",
-    "category": "e2e",
-    "operation": "token_before_response",
-    "server_scenario": "hold",
-    "request": {
-      "method": "POST",
-      "path": "/s/hold",
-      "body_hex": "68656c6c6f",
-      "headers": {}
-    },
-    "expect": {
-      "outcome": "ok",
-      "status": 200,
-      "body_hex": "68656c6c6f",
-      "token_before_response": true
     }
   },
   {

@@ -520,7 +520,24 @@ def main() -> None:
             "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
         }
 
-    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None):
+    cfg.append({
+        "id": "parse-config-two-suites",
+        "description": "The suites list declares two entries, both the pinned pair. SPEC 3.2 requires exactly one suite.",
+        "category": "config",
+        "operation": "parse_config",
+        "inputs": {
+            "config": "000020070707070707070707070707070707070707070707070707070707070707070700080001000200010002"
+        },
+        "expect": {
+            "outcome": "error",
+            "error_code": "UNSUPPORTED_SUITE"
+        },
+        "allowed_skips": {
+            "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+        }
+    })
+
+    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None, runners=None):
         fx = {
             "id": fid, "description": desc, "category": "e2e", "operation": "request",
             "server_scenario": scenario,
@@ -530,6 +547,8 @@ def main() -> None:
         }
         if browser is not None:
             fx["browser"] = browser
+        if runners:
+            fx["runners"] = runners
         return fx
 
     e2e_list = [
@@ -560,7 +579,14 @@ def main() -> None:
         e2e("e2e-duplicate-nonce", "duplicate_nonce",
             {"outcome": "error", "error_code": "DUPLICATE_RESPONSE_NONCE"},
             "Two nonce headers MUST fail closed.",
-            browser={"runnable": False, "skip_reason": "browser-coalesces-duplicate-headers"}),
+            browser={"runnable": False, "skip_reason": "browser-coalesces-duplicate-headers"},
+            runners=["go", "python", "rust"]),
+        e2e("e2e-duplicate-nonce-coalesced", "duplicate_nonce",
+            {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
+            "fetch and URLSession coalesce repeated headers; the merged value is not valid hex "
+            "of the required length and is rejected as malformed (SPEC 4.2).",
+            browser={"runnable": False, "skip_reason": "browser-coalesces-duplicate-headers"},
+            runners=["js", "swift"]),
         e2e("e2e-tampered-tag", "tamper_tag",
             {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
@@ -619,6 +645,85 @@ def main() -> None:
             "Bodyless request is unencrypted; its plaintext response is returned as-is (SPEC 7.4).",
             body=None, method="GET"),
     ]
+
+    # Hand-specified e2e fixtures: timing and heavy streaming cases.
+    e2e_list.append({
+        "id": "e2e-token-before-response",
+        "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. Timing-based with a 10x margin: the oracle holds its reply for 5 s; the adapter reads the token 500 ms after sending, while the response is pending, then completes the exchange.",
+        "category": "e2e",
+        "operation": "token_before_response",
+        "server_scenario": "hold",
+        "request": {
+            "method": "POST",
+            "path": "/s/hold",
+            "body_hex": "68656c6c6f",
+            "headers": {}
+        },
+        "expect": {
+            "outcome": "ok",
+            "status": 200,
+            "body_hex": "68656c6c6f",
+            "token_before_response": True
+        }
+    }),
+    e2e_list.append({
+        "id": "e2e-large-body-3gib",
+        "description": "A 3 GiB request body streams through encryption and the server's streaming decryptor; the client must not buffer it. Body bytes: 1 MiB block with block[i] = (i + seed) & 0xff, repeated. The oracle replies with the raw SHA-256 of the plaintext. Browsers spool the frames to the Origin Private File System and upload the file; a browser whose storage quota cannot hold the body skips with the declared reason.",
+        "category": "e2e",
+        "operation": "large_body",
+        "heavy": True,
+        "inputs": {
+            "size_bytes": 3221225472,
+            "block_seed": 42
+        },
+        "server_scenario": "digest",
+        "request": {
+            "method": "POST",
+            "path": "/s/digest",
+            "headers": {}
+        },
+        "browser": {
+            "runnable": True
+        },
+        "expect": {
+            "outcome": "ok",
+            "status": 200,
+            "body_hex": "5bb8a0daf79ae7af2f38f80ac1ce890a741392362bfb96b37c5fe03261ab9a22"
+        },
+        "allowed_skips": {
+            "js-chromium": "opfs-quota-below-body-size",
+            "js-firefox": "opfs-quota-below-body-size"
+        }
+    }),
+    e2e_list.append({
+        "id": "e2e-large-body-256mib",
+        "description": "A 256 MiB request body streams through encryption on every runner, including browsers via the OPFS spool, so the bounded-memory upload path is exercised even where quota blocks the 3 GiB body. Same pattern and oracle route as e2e-large-body-3gib.",
+        "category": "e2e",
+        "operation": "large_body",
+        "heavy": True,
+        "inputs": {
+            "size_bytes": 268435456,
+            "block_seed": 42
+        },
+        "server_scenario": "digest",
+        "request": {
+            "method": "POST",
+            "path": "/s/digest",
+            "headers": {}
+        },
+        "browser": {
+            "runnable": True
+        },
+        "expect": {
+            "outcome": "ok",
+            "status": 200,
+            "body_hex": "f9a891ea18e0514540299aa52cc585ff94b199c11e0f1bc9cae12542893eb327"
+        },
+        "allowed_skips": {
+            "js-chromium": "opfs-quota-below-body-size",
+            "js-firefox": "opfs-quota-below-body-size"
+        }
+    })
 
     def shape(fid, body, desc):
         return {
@@ -707,8 +812,8 @@ def main() -> None:
         server_fx(
             "server-middleware-trailing-tamper",
             "middleware_request", "trailing_tamper",
-            {"outcome": "error", "error_code": "KEY_CONFIG_MISMATCH"},
-            "The application handler must not run before the complete request body authenticates."),
+            {"outcome": "error", "error_code": "AEAD_DECRYPT_FAILED", "plaintext_emitted_before_error": True, "bytes_emitted_before_error": 16384},
+            "Request frames authenticate and are released one at a time (SPEC 4.3). A tampered trailing frame fails in the handler's read: the authenticated prefix (two 8 KiB frames) was delivered, nothing from the bad frame is."),
     ]
 
     OUT.mkdir(parents=True, exist_ok=True)
