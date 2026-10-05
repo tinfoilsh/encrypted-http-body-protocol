@@ -666,7 +666,6 @@ export function encryptFrames(
         new DataView(frame.buffer).setUint32(0, sealed.byteLength, false);
         frame.set(sealed, 4);
         controller.enqueue(frame);
-        if (sourceDone && offset >= chunk.byteLength && staged === 0) controller.close();
       } catch (err) {
         // Mirror createDecryptStream: a failed pull releases the source.
         reader.cancel(err).catch(() => {});
@@ -688,9 +687,7 @@ async function collect(stream: ReadableStream<Uint8Array>): Promise<Blob> {
     if (done) break;
     parts.push(value);
   }
-  const blob = new Blob(parts as BlobPart[]);
-  parts.length = 0;
-  return blob;
+  return new Blob(parts as BlobPart[]);
 }
 
 function canStreamUpload(): boolean {

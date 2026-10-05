@@ -88,8 +88,7 @@ public final class EHBPClient: @unchecked Sendable {
     ) async throws -> (data: Data, response: HTTPURLResponse) {
         let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
         defer { prepared.cleanup() }
-        let (request, generation, requestContext, token) =
-            (prepared.request, prepared.generation, prepared.context, prepared.token)
+        let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
 
         let (data, response) = try await session.data(for: request)
 
@@ -155,8 +154,7 @@ public final class EHBPClient: @unchecked Sendable {
         body: RequestBody
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
         let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
-        let (request, generation, requestContext, token) =
-            (prepared.request, prepared.generation, prepared.context, prepared.token)
+        let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
 
         let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
         do {
@@ -366,13 +364,10 @@ public final class EHBPClient: @unchecked Sendable {
         do {
             var chunk: Data? = first
             while let current = chunk {
-                // Seal and write one frame at a time so a large pull never
-                // materialises all of its ciphertext at once.
-                var offset = current.startIndex
-                while offset < current.endIndex {
-                    let end = min(offset + RequestEncryptor.frameSize, current.endIndex)
-                    try handle.write(contentsOf: try encryptor.seal(current[offset..<end]))
-                    offset = end
+                // One frame per write so a large pull never materialises all
+                // of its ciphertext at once.
+                for start in stride(from: current.startIndex, to: current.endIndex, by: RequestEncryptor.frameSize) {
+                    try handle.write(contentsOf: try encryptor.seal(current[start..<min(start + RequestEncryptor.frameSize, current.endIndex)]))
                 }
                 chunk = try next()
             }

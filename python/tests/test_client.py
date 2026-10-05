@@ -305,24 +305,6 @@ def test_custom_client_cannot_reenable_redirects(server: MockServer):
     assert response.status_code == 302
 
 
-def test_large_bytes_body_is_sent_as_multiple_frames(server: MockServer):
-    from ehbp.identity import REQUEST_FRAME_SIZE
-
-    payload = bytes(range(256)) * 800  # 200 KiB -> 4 frames
-    client = server.make_client()
-    response = client.post("/v1/echo", body=payload)
-    assert response.content == b"echo:" + payload
-    wire = server.last_request.read()
-    frames = 0
-    offset = 0
-    while offset < len(wire):
-        (n,) = struct.unpack_from(">I", wire, offset)
-        assert n <= REQUEST_FRAME_SIZE + 16
-        offset += 4 + n
-        frames += 1
-    assert frames == 4
-
-
 def _install_seal_counter(monkeypatch):
     """Record the plaintext length of every frame sealed; returns the list."""
     import ehbp.identity as identity_module

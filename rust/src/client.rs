@@ -382,9 +382,7 @@ impl Client {
         headers: HeaderMap,
         body: Option<BodySource>,
     ) -> Result<Dispatched> {
-        // The guard is armed before the send so a transport failure clears
-        // the published token; callers disarm it once the exchange completes.
-        match body {
+        let (request, token, generation) = match body {
             #[cfg(not(target_arch = "wasm32"))]
             Some(BodySource::Stream(stream)) => {
                 let request = self
@@ -393,34 +391,29 @@ impl Client {
                     .headers(headers)
                     .body(reqwest::Body::wrap_stream(stream))
                     .build()?;
-                let PreparedRawRequest {
-                    request,
-                    token,
-                    generation,
-                } = self.prepare_raw_request(request).await?;
-                let guard = token
-                    .as_ref()
-                    .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
-                let response = self.http_client.execute(request).await?;
-                Ok((response, token, generation, guard))
+                let prepared = self.prepare_raw_request(request).await?;
+                (prepared.request, prepared.token, prepared.generation)
             }
             other => {
                 let bytes = match other {
                     Some(BodySource::Bytes(bytes)) => Some(bytes),
                     _ => None,
                 };
-                let PreparedRequest {
-                    request,
-                    token,
-                    generation,
-                } = self.prepare_request_builder(method, url, headers, bytes)?;
-                let guard = token
-                    .as_ref()
-                    .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
-                let response = request.send().await?;
-                Ok((response, token, generation, guard))
+                let prepared = self.prepare_request_builder(method, url, headers, bytes)?;
+                (
+                    prepared.request.build()?,
+                    prepared.token,
+                    prepared.generation,
+                )
             }
-        }
+        };
+        // The guard is armed before the send so a transport failure clears
+        // the published token; callers disarm it once the exchange completes.
+        let guard = token
+            .as_ref()
+            .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+        let response = self.http_client.execute(request).await?;
+        Ok((response, token, generation, guard))
     }
 
     async fn send_parts(
@@ -2218,13 +2211,13 @@ mod tests {
 
     #[tokio::test]
     async fn body_stream_is_encrypted_lazily_into_bounded_frames() {
-        // Three source chunks, one larger than a frame: the encryptor must
-        // re-frame it and consume the source as it goes.
+        // Three source items, one of 1 MiB: the encryptor re-frames it into
+        // 64 KiB frames, each its own HTTP chunk, and pulls the source as it goes.
         let pulls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pulls_for_stream = Arc::clone(&pulls);
         let chunks = vec![
             Bytes::from_static(b"first"),
-            Bytes::from(vec![0xABu8; 100 * 1024]),
+            Bytes::from(vec![0x5Au8; 1024 * 1024]),
             Bytes::from_static(b"last"),
         ];
         let expected: Vec<u8> = chunks.concat();
@@ -2234,33 +2227,17 @@ mod tests {
             });
 
         let (raw, private_key) = capture_body_stream(source).await;
-        let (text, frames, _) = captured_frames(&raw, &private_key);
+        let (text, frames, http_chunks) = captured_frames(&raw, &private_key);
         assert!(text.contains("transfer-encoding: chunked"));
         assert!(!text.contains("content-length:"));
-        assert_eq!(frames.len(), 4, "5 B, 64 KiB + 36 KiB, 4 B");
+        assert_eq!(frames.len(), 18, "5 B, 16 x 64 KiB, 4 B");
         assert!(frames
             .iter()
             .all(|f| f.len() <= crate::identity::REQUEST_FRAME_SIZE));
         assert_eq!(frames.concat(), expected);
         assert_eq!(pulls.load(std::sync::atomic::Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn body_stream_emits_one_frame_per_yield_for_oversized_items() {
-        // A single 1 MiB item must leave the encryptor as 16 separate frames,
-        // each its own HTTP chunk, never as one body-sized buffer.
-        let item = Bytes::from(vec![0x5Au8; 1024 * 1024]);
-        let source = stream::iter(vec![Ok::<Bytes, std::io::Error>(item.clone())]);
-
-        let (raw, private_key) = capture_body_stream(source).await;
-        let (_, frames, http_chunks) = captured_frames(&raw, &private_key);
-        assert_eq!(frames.len(), 16);
-        assert!(frames
-            .iter()
-            .all(|f| f.len() == crate::identity::REQUEST_FRAME_SIZE));
-        assert_eq!(frames.concat(), item.as_ref());
         assert!(
-            http_chunks >= 16,
+            http_chunks >= 18,
             "frames were coalesced before hitting the wire: {http_chunks} chunks"
         );
     }

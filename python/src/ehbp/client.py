@@ -30,7 +30,7 @@ from ._http import (
     response_nonce_for_status as _response_nonce_for_status,
 )
 from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
-from .identity import REQUEST_FRAME_SIZE, ServerIdentity
+from .identity import REQUEST_FRAME_SIZE, EncryptedRequestStream, ServerIdentity
 from .protocol import (
     ENCAPSULATED_KEY_HEADER,
     KEYS_MEDIA_TYPE,
@@ -203,15 +203,15 @@ class Client:
                 raw = self._read_body_capped(resp)
                 return Response(resp.status_code, resp.headers, raw)
 
-        encapsulated_key, token, content = encrypted
-        request_headers[ENCAPSULATED_KEY_HEADER] = encapsulated_key.hex()
+        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
+        token = encrypted.token
         self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
                 url,
                 headers=request_headers,
-                content=content,
+                content=encrypted.frames,
                 follow_redirects=False,
             ) as resp:
                 status = resp.status_code
@@ -277,15 +277,15 @@ class Client:
                 yield StreamingResponse(resp.status_code, resp.headers, resp.iter_bytes())
             return
 
-        encapsulated_key, token, content = encrypted
-        request_headers[ENCAPSULATED_KEY_HEADER] = encapsulated_key.hex()
+        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
+        token = encrypted.token
         self._publish_token(generation, token)
         try:
             with self._http.stream(
                 method,
                 url,
                 headers=request_headers,
-                content=content,
+                content=encrypted.frames,
                 follow_redirects=False,
             ) as resp:
                 status = resp.status_code
@@ -344,20 +344,10 @@ class Client:
             return request_headers, json.dumps(json_body).encode("utf-8")
         return request_headers, _as_body_source(body)
 
-    def _encrypt(
-        self, source: Union[bytes, Iterable[bytes]]
-    ) -> Optional[tuple[bytes, SessionRecoveryToken, Iterator[bytes]]]:
-        """Return (encapsulated_key, token, framed content iterator), or None for bodyless.
-
-        bytes go through the same lazy path as iterables, so the encrypted copy
-        is produced one frame at a time rather than materialised up front.
-        """
-        if isinstance(source, bytes):
-            source = (source,)
-        stream = self._identity.encrypt_request_stream(source)
-        if stream is None:
-            return None
-        return stream.encapsulated_key, stream.token, stream.frames  # type: ignore[return-value]
+    def _encrypt(self, source: Union[bytes, Iterable[bytes]]) -> Optional[EncryptedRequestStream]:
+        """Frame-by-frame encryption for bytes and iterables alike; None when bodyless."""
+        chunks = (source,) if isinstance(source, bytes) else source
+        return self._identity.encrypt_request_stream(chunks)
 
     def _prepare_headers(self, headers: HeadersInput) -> httpx.Headers:
         prepared = httpx.Headers(headers or {})

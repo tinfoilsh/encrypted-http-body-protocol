@@ -622,6 +622,7 @@ func TestMiddlewareLateDecryptFailureBeforeResponseStartsIs400(t *testing.T) {
 	// Earlier frames authenticated, so the key is right: tampering is a 400,
 	// not a stale-key 422 (SPEC 5.4.2).
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get(protocol.ResponseNonceHeader), "plaintext error must not look encrypted")
 	assert.Equal(t, 16384, delivered, "the two authenticated frames were released, nothing from the bad one")
 }
 
@@ -650,21 +651,4 @@ func TestMiddlewareLateDecryptFailureAfterResponseStartedAbortsConnection(t *tes
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	_, err = io.ReadAll(resp.Body)
 	assert.Error(t, err, "the response must not end as a complete message")
-}
-
-func TestLateDecryptFailurePlaintextErrorCarriesNoResponseNonce(t *testing.T) {
-	serverIdentity, err := NewIdentity()
-	require.NoError(t, err)
-	framed, enc := tamperedTrailingRequest(t, serverIdentity)
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body) // fails on the last frame; return without writing
-	})
-	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(framed))
-	req.Header.Set(protocol.EncapsulatedKeyHeader, enc)
-	rec := httptest.NewRecorder()
-	serverIdentity.Middleware()(handler).ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Empty(t, rec.Header().Get(protocol.ResponseNonceHeader), "plaintext error must not look encrypted")
 }

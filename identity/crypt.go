@@ -187,27 +187,18 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	}
 
 	// Read chunk length (4 bytes)
+	// Read the length prefix, skipping zero-length chunks (SPEC 4.3) in a
+	// loop so a burst of empty frames cannot grow the stack.
 	chunkLenBytes := make([]byte, 4)
-	_, err = io.ReadFull(r.reader, chunkLenBytes)
-	if err != nil {
-		if err == io.EOF {
-			r.eof = true
-			return 0, io.EOF
-		}
-		if err == io.ErrUnexpectedEOF {
-			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
-		}
-		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
-	}
-
-	chunkLen := binary.BigEndian.Uint32(chunkLenBytes)
-	// Zero-length chunks are skipped (SPEC 4.3). Loop rather than recurse so a
-	// burst of empty frames cannot grow the stack.
+	var chunkLen uint32
 	for chunkLen == 0 {
 		if _, err := io.ReadFull(r.reader, chunkLenBytes); err != nil {
 			if err == io.EOF {
 				r.eof = true
 				return 0, io.EOF
+			}
+			if err == io.ErrUnexpectedEOF {
+				return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
 			}
 			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
 		}

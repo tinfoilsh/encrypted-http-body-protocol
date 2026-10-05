@@ -222,9 +222,7 @@ impl RequestEncryptor {
     /// Seals `plaintext` as one or more consecutive frames of at most
     /// `REQUEST_FRAME_SIZE` plaintext bytes each, reusing the sender context.
     pub fn encrypt_chunk(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(
-            plaintext.len() + 20 * plaintext.len().div_ceil(REQUEST_FRAME_SIZE).max(1),
-        );
+        let mut out = Vec::new();
         for piece in plaintext.chunks(REQUEST_FRAME_SIZE) {
             out.extend_from_slice(&self.encrypt_frame(piece)?);
         }
