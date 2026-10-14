@@ -457,6 +457,7 @@ func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext
 	}
 	req.Body = streamingReader
 	req.ContentLength = -1
+	req.GetBody = nil
 
 	return &RequestContext{
 		Sender:     sender,

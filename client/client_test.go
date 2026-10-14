@@ -2,10 +2,12 @@ package client
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -1037,3 +1039,108 @@ func TestTransportBoundsProblemDetailsParsing(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// refusingH2CServer speaks just enough prior-knowledge HTTP/2 to refuse the
+// first stream it sees, as a TLS-terminating gateway may, and reset every later
+// one. It returns the request body received on each stream.
+func refusingH2CServer(t *testing.T) (string, func() [][]byte) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+
+	var mu sync.Mutex
+	var bodies [][]byte
+	refused := false
+
+	serve := func(c net.Conn) {
+		defer c.Close()
+		writeFrame := func(typ, flags byte, stream uint32, payload []byte) {
+			hdr := []byte{byte(len(payload) >> 16), byte(len(payload) >> 8), byte(len(payload)), typ, flags, 0, 0, 0, 0}
+			binary.BigEndian.PutUint32(hdr[5:], stream)
+			_, _ = c.Write(append(hdr, payload...))
+		}
+		if _, err := io.ReadFull(c, make([]byte, len("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))); err != nil {
+			return
+		}
+		writeFrame(0x4, 0, 0, nil) // SETTINGS
+		streams := map[uint32][]byte{}
+		hdr := make([]byte, 9)
+		for {
+			if _, err := io.ReadFull(c, hdr); err != nil {
+				return
+			}
+			payload := make([]byte, int(hdr[0])<<16|int(hdr[1])<<8|int(hdr[2]))
+			if _, err := io.ReadFull(c, payload); err != nil {
+				return
+			}
+			typ, flags, stream := hdr[3], hdr[4], binary.BigEndian.Uint32(hdr[5:])&0x7fffffff
+			switch {
+			case typ == 0x4 && flags&0x1 == 0:
+				writeFrame(0x4, 0x1, 0, nil) // SETTINGS ACK
+			case typ == 0x0:
+				streams[stream] = append(streams[stream], payload...)
+				if flags&0x1 == 0 {
+					continue
+				}
+				mu.Lock()
+				bodies = append(bodies, streams[stream])
+				code := uint32(0x2) // INTERNAL_ERROR, not retryable
+				if !refused {
+					refused, code = true, 0x7 // REFUSED_STREAM
+				}
+				mu.Unlock()
+				writeFrame(0x3, 0, stream, binary.BigEndian.AppendUint32(nil, code))
+			}
+		}
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+			go serve(c)
+		}
+	}()
+
+	return "http://" + ln.Addr().String(), func() [][]byte {
+		mu.Lock()
+		defer mu.Unlock()
+		return bodies
+	}
+}
+
+func TestTransportDoesNotReplayPlaintextOnRefusedStream(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	serverURL, bodies := refusingH2CServer(t)
+
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	h2c := &http.Transport{Protocols: &protocols}
+	defer h2c.CloseIdleConnections()
+	transport, err := NewTransportWithIdentity(pubIdentity, WithHTTPClient(&http.Client{Transport: h2c}))
+	assert.NoError(t, err)
+
+	const secret = "plaintext that only the enclave may read"
+	// bytes.Reader makes http.NewRequest set GetBody, as most SDKs do.
+	req, err := http.NewRequest("POST", serverURL+"/secure", bytes.NewReader([]byte(secret)))
+	assert.NoError(t, err)
+	assert.NotNil(t, req.GetBody)
+
+	resp, err := (&http.Client{Transport: transport}).Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+	assert.Error(t, err)
+
+	got := bodies()
+	assert.NotEmpty(t, got, "server must have received the encrypted request")
+	for i, body := range got {
+		assert.NotContains(t, string(body), secret, "stream %d carried the plaintext body", i)
+	}
+}
