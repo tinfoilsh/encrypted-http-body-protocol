@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import IO, Any, Optional, Union
 
 import httpx
+from httpx._client import UseClientDefault
+from httpx._types import TimeoutTypes
 
 from ._http import (
     DEFAULT_MAX_RESPONSE_BYTES,
@@ -53,6 +55,9 @@ _RESERVED_REQUEST_HEADERS = frozenset(
 # stream-encrypted frame by frame without ever being held in memory.
 Body = Union[bytes, bytearray, str, Iterable[bytes], IO[bytes], None]
 HeadersInput = Optional[Mapping[str, str]]
+# Per-request timeout: anything httpx accepts, or USE_CLIENT_DEFAULT to keep
+# the http_client's.
+TimeoutInput = Union[TimeoutTypes, UseClientDefault]
 
 
 @dataclass
@@ -190,7 +195,14 @@ class Client:
         body: Body = None,
         json_body: Any = None,
         headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
     ) -> Response:
+        """Send a request and return the whole decrypted response.
+
+        ``timeout`` applies to this request only and overrides the
+        ``http_client``'s timeout. httpx's read timeout is an idle timeout:
+        it bounds each wait between reads, not the whole response.
+        """
         url = self._resolve_url(path_or_url)
         request_headers, source = self._prepare_body(headers, body, json_body)
         generation = self._begin_request()
@@ -198,7 +210,12 @@ class Client:
 
         if encrypted is None:
             with self._http.stream(
-                method, url, headers=request_headers, content=None, follow_redirects=False
+                method,
+                url,
+                headers=request_headers,
+                content=None,
+                follow_redirects=False,
+                timeout=timeout,
             ) as resp:
                 raw = self._read_body_capped(resp)
                 return Response(resp.status_code, resp.headers, raw)
@@ -213,6 +230,7 @@ class Client:
                 headers=request_headers,
                 content=encrypted.frames,
                 follow_redirects=False,
+                timeout=timeout,
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers
@@ -229,11 +247,23 @@ class Client:
         self._clear_token_if_current(generation)
         return Response(status, response_headers, decrypted)
 
-    def get(self, path_or_url: str, *, headers: HeadersInput = None) -> Response:
-        return self.request("GET", path_or_url, headers=headers)
+    def get(
+        self,
+        path_or_url: str,
+        *,
+        headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
+    ) -> Response:
+        return self.request("GET", path_or_url, headers=headers, timeout=timeout)
 
-    def delete(self, path_or_url: str, *, headers: HeadersInput = None) -> Response:
-        return self.request("DELETE", path_or_url, headers=headers)
+    def delete(
+        self,
+        path_or_url: str,
+        *,
+        headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
+    ) -> Response:
+        return self.request("DELETE", path_or_url, headers=headers, timeout=timeout)
 
     def post(
         self,
@@ -242,8 +272,11 @@ class Client:
         body: Body = None,
         json_body: Any = None,
         headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
     ) -> Response:
-        return self.request("POST", path_or_url, body=body, json_body=json_body, headers=headers)
+        return self.request(
+            "POST", path_or_url, body=body, json_body=json_body, headers=headers, timeout=timeout
+        )
 
     def put(
         self,
@@ -252,8 +285,11 @@ class Client:
         body: Body = None,
         json_body: Any = None,
         headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
     ) -> Response:
-        return self.request("PUT", path_or_url, body=body, json_body=json_body, headers=headers)
+        return self.request(
+            "PUT", path_or_url, body=body, json_body=json_body, headers=headers, timeout=timeout
+        )
 
     @contextmanager
     def stream(
@@ -264,7 +300,14 @@ class Client:
         body: Body = None,
         json_body: Any = None,
         headers: HeadersInput = None,
+        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
     ) -> Iterator[StreamingResponse]:
+        """Send a request and yield its response, decrypted as it is read.
+
+        ``timeout`` behaves as in :meth:`request`; its read timeout bounds
+        each gap between response chunks, so a long-lived stream that goes
+        quiet needs a read timeout longer than its longest silence.
+        """
         url = self._resolve_url(path_or_url)
         request_headers, source = self._prepare_body(headers, body, json_body)
         generation = self._begin_request()
@@ -272,7 +315,12 @@ class Client:
 
         if encrypted is None:
             with self._http.stream(
-                method, url, headers=request_headers, content=None, follow_redirects=False
+                method,
+                url,
+                headers=request_headers,
+                content=None,
+                follow_redirects=False,
+                timeout=timeout,
             ) as resp:
                 yield StreamingResponse(resp.status_code, resp.headers, resp.iter_bytes())
             return
@@ -287,6 +335,7 @@ class Client:
                 headers=request_headers,
                 content=encrypted.frames,
                 follow_redirects=False,
+                timeout=timeout,
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers

@@ -15,6 +15,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
+    time::Duration,
 };
 
 use crate::{
@@ -167,6 +168,7 @@ impl Client {
             url: self.resolve_url(path_or_url.as_ref())?,
             headers: HeaderMap::new(),
             body: None,
+            timeout: None,
         })
     }
 
@@ -381,8 +383,9 @@ impl Client {
         url: Url,
         headers: HeaderMap,
         body: Option<BodySource>,
+        timeout: Option<Duration>,
     ) -> Result<Dispatched> {
-        let (request, token, generation) = match body {
+        let (mut request, token, generation) = match body {
             #[cfg(not(target_arch = "wasm32"))]
             Some(BodySource::Stream(stream)) => {
                 let request = self
@@ -407,6 +410,9 @@ impl Client {
                 )
             }
         };
+        if timeout.is_some() {
+            *request.timeout_mut() = timeout;
+        }
         // The guard is armed before the send so a transport failure clears
         // the published token; callers disarm it once the exchange completes.
         let guard = token
@@ -422,9 +428,10 @@ impl Client {
         url: Url,
         headers: HeaderMap,
         body: Option<BodySource>,
+        timeout: Option<Duration>,
     ) -> Result<Response> {
         let (response, token, generation, mut guard) =
-            self.dispatch(method, url, headers, body).await?;
+            self.dispatch(method, url, headers, body, timeout).await?;
         let status = response.status();
         let headers = response.headers().clone();
         let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
@@ -470,9 +477,10 @@ impl Client {
         url: Url,
         headers: HeaderMap,
         body: Option<BodySource>,
+        timeout: Option<Duration>,
     ) -> Result<StreamingResponse> {
         let (response, token, generation, mut guard) =
-            self.dispatch(method, url, headers, body).await?;
+            self.dispatch(method, url, headers, body, timeout).await?;
 
         let Some(token) = token else {
             return Ok(StreamingResponse {
@@ -562,6 +570,7 @@ pub struct RequestBuilder {
     url: Url,
     headers: HeaderMap,
     body: Option<BodySource>,
+    timeout: Option<Duration>,
 }
 
 /// Caller stream errors are passed to reqwest unchanged, so they surface as
@@ -663,15 +672,25 @@ impl RequestBuilder {
         Ok(self)
     }
 
+    /// Sets a total deadline for this request, from connecting until the
+    /// response body has been read, overriding the reqwest client's
+    /// `timeout`. It is not an idle timeout: a stream that runs longer than
+    /// this fails even if bytes keep arriving. reqwest's idle `read_timeout`
+    /// can only be set for the whole client.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
     pub async fn send(self) -> Result<Response> {
         self.client
-            .send_parts(self.method, self.url, self.headers, self.body)
+            .send_parts(self.method, self.url, self.headers, self.body, self.timeout)
             .await
     }
 
     pub async fn send_stream(self) -> Result<StreamingResponse> {
         self.client
-            .send_stream_parts(self.method, self.url, self.headers, self.body)
+            .send_stream_parts(self.method, self.url, self.headers, self.body, self.timeout)
             .await
     }
 }
@@ -2455,5 +2474,105 @@ mod tests {
             collected.extend_from_slice(&chunk.unwrap());
         }
         assert_eq!(collected, REPLY);
+    }
+
+    /// Serves every connection a nonce-less 503, which the client passes
+    /// through, with a one-second pause mid-body.
+    async fn client_with_slow_response(client_timeout: Duration) -> Client {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !bytes.windows(5).any(|window| window == b"0\r\n\r\n") {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&buf[..n]);
+                    }
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\na\r\n",
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let _ = socket.write_all(b"1\r\nb\r\n0\r\n\r\n").await;
+                });
+            }
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::builder()
+                .timeout(client_timeout)
+                .build()
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Sends through `send` or `send_stream` and returns the whole body.
+    async fn send_with_timeout(
+        client: &Client,
+        streaming: bool,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>> {
+        let mut request = client.post("/secure").unwrap().body("secret");
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        if !streaming {
+            return Ok(request.send().await?.bytes().to_vec());
+        }
+        let chunks = request
+            .send_stream()
+            .await?
+            .into_stream()
+            .collect::<Vec<_>>()
+            .await;
+        Ok(chunks.into_iter().collect::<Result<Vec<_>>>()?.concat())
+    }
+
+    fn assert_timed_out(result: Result<Vec<u8>>) {
+        match result {
+            Err(Error::Http(err)) => assert!(err.is_timeout(), "expected a timeout, got {err:?}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shorter_request_timeout_overrides_client_timeout() {
+        for streaming in [false, true] {
+            let client = client_with_slow_response(Duration::from_secs(2)).await;
+            let result =
+                send_with_timeout(&client, streaming, Some(Duration::from_millis(500))).await;
+            assert_timed_out(result);
+        }
+    }
+
+    #[tokio::test]
+    async fn longer_request_timeout_overrides_client_timeout() {
+        for streaming in [false, true] {
+            let client = client_with_slow_response(Duration::from_millis(500)).await;
+            let body = send_with_timeout(&client, streaming, Some(Duration::from_secs(2)))
+                .await
+                .unwrap();
+            assert_eq!(body, b"ab");
+        }
+    }
+
+    #[tokio::test]
+    async fn unset_request_timeout_keeps_client_timeout() {
+        for streaming in [false, true] {
+            let client = client_with_slow_response(Duration::from_millis(500)).await;
+            assert_timed_out(send_with_timeout(&client, streaming, None).await);
+        }
     }
 }
