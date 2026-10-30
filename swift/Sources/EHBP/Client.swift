@@ -57,6 +57,10 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - method: HTTP method
     ///   - path: URL path (will be appended to baseURL)
     ///   - headers: Additional headers to include
+    ///   - timeoutInterval: Idle timeout for this request, in seconds: the
+    ///     longest URLSession waits for the next byte, not a deadline for the
+    ///     whole request. Overrides the session configuration's
+    ///     `timeoutIntervalForRequest`, whether shorter or longer; nil keeps it.
     ///   - body: Request body (will be encrypted)
     /// - Returns: Decrypted response data, or an untouched non-success response
     ///   when an intermediary returns an unencrypted error
@@ -64,9 +68,11 @@ public final class EHBPClient: @unchecked Sendable {
         method: String,
         path: String,
         headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil,
         body: Data?
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        try await request(method: method, path: path, headers: headers, body: .data(body))
+        try await request(method: method, path: path, headers: headers,
+                          timeoutInterval: timeoutInterval, body: .data(body))
     }
 
     /// Streaming-body variant: `bodySource` is pulled chunk by chunk (return
@@ -75,18 +81,22 @@ public final class EHBPClient: @unchecked Sendable {
         method: String,
         path: String,
         headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil,
         bodySource: @escaping RequestBodySource
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        try await request(method: method, path: path, headers: headers, body: .source(bodySource))
+        try await request(method: method, path: path, headers: headers,
+                          timeoutInterval: timeoutInterval, body: .source(bodySource))
     }
 
     private func request(
         method: String,
         path: String,
         headers: [String: String],
+        timeoutInterval: TimeInterval?,
         body: RequestBody
     ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
+        let prepared = try prepareRequest(method: method, path: path, headers: headers,
+                                          timeoutInterval: timeoutInterval, body: body)
         defer { prepared.cleanup() }
         let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
         // SPEC 6: the token is obtainable before the request is sent. Any
@@ -127,6 +137,7 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - method: HTTP method
     ///   - path: URL path
     ///   - headers: Additional headers
+    ///   - timeoutInterval: Idle timeout for this request; see `request(method:path:headers:timeoutInterval:body:)`
     ///   - body: Request body (will be encrypted)
     /// - Returns: AsyncThrowingStream of decrypted response chunks, or untouched
     ///   non-success response chunks when an intermediary returns an unencrypted error
@@ -134,9 +145,11 @@ public final class EHBPClient: @unchecked Sendable {
         method: String,
         path: String,
         headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil,
         body: Data?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        try await requestStream(method: method, path: path, headers: headers, body: .data(body))
+        try await requestStream(method: method, path: path, headers: headers,
+                                timeoutInterval: timeoutInterval, body: .data(body))
     }
 
     /// Streaming-body variant of `requestStream`; see `request(bodySource:)`.
@@ -144,18 +157,22 @@ public final class EHBPClient: @unchecked Sendable {
         method: String,
         path: String,
         headers: [String: String] = [:],
+        timeoutInterval: TimeInterval? = nil,
         bodySource: @escaping RequestBodySource
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        try await requestStream(method: method, path: path, headers: headers, body: .source(bodySource))
+        try await requestStream(method: method, path: path, headers: headers,
+                                timeoutInterval: timeoutInterval, body: .source(bodySource))
     }
 
     private func requestStream(
         method: String,
         path: String,
         headers: [String: String],
+        timeoutInterval: TimeInterval?,
         body: RequestBody
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let prepared = try prepareRequest(method: method, path: path, headers: headers, body: body)
+        let prepared = try prepareRequest(method: method, path: path, headers: headers,
+                                          timeoutInterval: timeoutInterval, body: body)
         let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
         // SPEC 6: the token is obtainable before the request is sent.
         if let token { publishToken(token, for: generation) }
@@ -318,6 +335,7 @@ public final class EHBPClient: @unchecked Sendable {
         method: String,
         path: String,
         headers: [String: String],
+        timeoutInterval: TimeInterval?,
         body: RequestBody
     ) throws -> PreparedRequest {
         let url = try resolveURL(path)
@@ -325,6 +343,7 @@ public final class EHBPClient: @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if let timeoutInterval { request.timeoutInterval = timeoutInterval }
 
         for (key, value) in try EHBPClient.callerHeaders(headers) {
             request.setValue(value, forHTTPHeaderField: key)
