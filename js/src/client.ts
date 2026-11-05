@@ -28,9 +28,10 @@ const RESERVED_REQUEST_HEADERS = [
 /** Network transport used after request encryption and before response decryption. */
 export interface TransportOptions {
   /**
-   * Fetch-compatible implementation for network I/O, including key discovery in
-   * Transport.create(). Headers remain visible to this implementation. Bodyless
-   * requests and key discovery are not encrypted. Defaults to global fetch.
+   * Fetch-compatible implementation for all network I/O, including key
+   * discovery in Transport.create(). Called with no `this`. Defaults to global
+   * fetch. See the README's "Custom network transport" section for what it
+   * receives, what it must do, and which responses are not authenticated.
    */
   fetch?: typeof fetch;
 }

@@ -46,20 +46,32 @@ const transport = new Transport(verifiedIdentity, 'https://enclave.example', {
 });
 ```
 
-The callback receives requests after EHBP encryption; responses pass through
-EHBP decryption as usual. Headers remain visible, and bodyless requests are not
-encrypted. The factories also use this callback to discover the server key;
-key discovery does not authenticate the server. For attested services, construct
-`Transport` with an identity verified by your attestation layer.
+The callback receives every request the transport sends, including server key
+discovery in `Transport.create` and `createTransport`. It is always called with
+no `this`, so pass `window.fetch` directly but bind methods
+(`relay.fetch.bind(relay)`).
 
-The callback must preserve the encrypted body and protocol headers, return a
-standard `Response`, and honor request cancellation and redirect policy. Route
-only to trusted destinations: authorization headers are not body-encrypted.
+Requests with a body arrive as a single EHBP-encrypted `Request`. Bodyless
+requests arrive unencrypted. `data:` and `blob:` URLs skip EHBP and arrive as
+the caller's original `(input, init)`; handle them or forward them to
+`globalThis.fetch`.
+
+The callback must preserve the encrypted body and protocol headers, finish
+reading the request body before resolving, return a standard `Response`, and
+honor request cancellation and redirect policy.
+
+Only the bodies of encrypted requests and their 2xx responses are protected.
+Headers, including authorization, are visible to the callback. Error responses,
+responses to bodyless requests, and key discovery are not authenticated, and
+the callback or anything it routes through can forge them. Route only to
+trusted destinations. For attested services, construct `Transport` with an
+identity verified by your attestation layer.
+
 Omitting the option preserves the default global `fetch` behavior.
 
 ## API
 
-### `createTransport(serverURL: string): Promise<Transport>`
+### `createTransport(serverURL: string, init?: RequestInit, options?: TransportOptions): Promise<Transport>`
 
 Creates a transport that automatically encrypts requests and decrypts responses.
 
