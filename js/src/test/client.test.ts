@@ -105,6 +105,115 @@ describe('Transport', () => {
     serverIdentity = await Identity.generate();
   });
 
+  it('uses an isolated custom fetch for encrypted requests and streamed responses', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
+    const makeTransport = (label: string) => new Transport(serverIdentity, 'https://example.com', {
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
+        assert.strictEqual(request.headers.get('authorization'), `Bearer ${label}`);
+        assert.strictEqual(request.credentials, 'omit');
+        assert.strictEqual(request.redirect, 'error');
+        assert(!(await request.clone().text()).includes(`private-${label}`));
+        const encrypted = await buildEncryptedResponse(request, serverIdentity);
+        const bytes = new Uint8Array(await encrypted.arrayBuffer());
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes.slice(0, 3));
+            controller.enqueue(bytes.slice(3));
+            controller.close();
+          },
+        }), { headers: encrypted.headers });
+      },
+    });
+    const clients = ['one', 'two'].map(makeTransport);
+    const results = await Promise.all(clients.map(async (client, index) => {
+      const label = ['one', 'two'][index];
+      const response = await client.post('https://example.com/test', `private-${label}`, {
+        headers: { authorization: `Bearer ${label}` },
+        credentials: 'omit',
+        redirect: 'error',
+      });
+      return response.text();
+    }));
+    assert.deepStrictEqual(results, ['processed:private-one', 'processed:private-two']);
+  });
+
+  it('calls an injected fetch without a receiver for encrypted and bodyless requests', async () => {
+    const receivers: unknown[] = [];
+    const transport = new Transport(serverIdentity, 'https://example.com', {
+      fetch: async function (this: unknown, input, init) {
+        receivers.push(this);
+        assert.strictEqual(this, undefined, 'fetch must not receive the Transport as its receiver');
+        const request = new Request(input, init);
+        return request.body ? buildEncryptedResponse(request, serverIdentity) : new Response('bodyless');
+      },
+    });
+    const encrypted = await transport.post('https://example.com/test', 'hello');
+    assert.strictEqual(await encrypted.text(), 'processed:hello');
+    const bodyless = await transport.get('https://example.com/test');
+    assert.strictEqual(await bodyless.text(), 'bodyless');
+    assert.deepStrictEqual(receivers, [undefined, undefined]);
+  });
+
+  it('preserves origin checks before invoking custom fetch', async () => {
+    const transport = new Transport(serverIdentity, 'https://example.com', {
+      fetch: async () => { assert.fail('must reject before networking'); },
+    });
+    await assert.rejects(transport.post('https://other.example/test', 'secret'), InvalidInputError);
+  });
+
+  it('uses custom fetch for bodyless requests and forwards cancellation', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
+    const controller = new AbortController();
+    const transport = new Transport(serverIdentity, 'https://example.com', {
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        assert.strictEqual(request.body, null);
+        assert.strictEqual(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER), false);
+        controller.abort();
+        assert.strictEqual(request.signal.aborted, true);
+        request.signal.throwIfAborted();
+        return new Response();
+      },
+    });
+    await assert.rejects(transport.get('https://example.com/test', { signal: controller.signal }),
+      { name: 'AbortError' });
+  });
+
+  it('propagates custom fetch errors and clears the recovery token', async () => {
+    const failure = new Error('network unavailable');
+    const transport = new Transport(serverIdentity, 'https://example.com', {
+      fetch: async () => { throw failure; },
+    });
+    await assert.rejects(transport.post('https://example.com/test', 'secret'), error => error === failure);
+    assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/);
+  });
+
+  it('uses custom fetch for key discovery and subsequent requests through both factories', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
+    for (const create of [Transport.create, createTransport]) {
+      const urls: string[] = [];
+      const transport = await create('https://example.com', { credentials: 'omit' }, {
+        fetch: async function (this: unknown, input, init) {
+          assert.strictEqual(this, undefined, 'key discovery and API requests must use the same receiver');
+          const request = new Request(input, init);
+          urls.push(request.url);
+          if (request.url.endsWith(PROTOCOL.KEYS_PATH)) {
+            assert.strictEqual(request.credentials, 'omit');
+            return new Response(toArrayBuffer(await serverIdentity.marshalConfig()), {
+              headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
+            });
+          }
+          return buildEncryptedResponse(request, serverIdentity);
+        },
+      });
+      const response = await transport.post('https://example.com/test', 'hello');
+      assert.strictEqual(await response.text(), 'processed:hello');
+      assert.deepStrictEqual(urls, [`https://example.com${PROTOCOL.KEYS_PATH}`, 'https://example.com/test']);
+    }
+  });
+
   it('should create transport with server public key', () => {
     const transport = new Transport(
       serverIdentity,

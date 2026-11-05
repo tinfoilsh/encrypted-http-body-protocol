@@ -25,7 +25,19 @@ const RESERVED_REQUEST_HEADERS = [
   PROTOCOL.RESPONSE_NONCE_HEADER,
 ];
 
+/** Network transport used after request encryption and before response decryption. */
+export interface TransportOptions {
+  /**
+   * Fetch-compatible implementation for all network I/O, including key
+   * discovery in Transport.create(). Called with no `this`. Defaults to global
+   * fetch. See the README's "Custom network transport" section for what it
+   * receives, what it must do, and which responses are not authenticated.
+   */
+  fetch?: typeof fetch;
+}
+
 export class Transport {
+  private readonly fetchImpl: typeof fetch;
   private serverIdentity: Identity;
   private serverHost: string;
   private serverHostname: string;
@@ -36,7 +48,9 @@ export class Transport {
   private requestGeneration = 0;
 
   /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
-  constructor(serverIdentity: Identity, serverHost: string) {
+  constructor(serverIdentity: Identity, serverHost: string, options: TransportOptions = {}) {
+    const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchImpl = (input, init) => send(input, init);
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
     const originUrl = serverHost.includes('://') ? new URL(serverHost) : undefined;
@@ -63,7 +77,7 @@ export class Transport {
    * Create a new transport by fetching server public key.
    * The optional init is applied to the key fetch (e.g. credentials).
    */
-  static async create(serverURL: string, init?: RequestInit): Promise<Transport> {
+  static async create(serverURL: string, init?: RequestInit, options: TransportOptions = {}): Promise<Transport> {
     const url = new URL(serverURL);
     // Same canonical rejection as the constructor and request(), before the
     // key fetch can fail with an uncoded TypeError.
@@ -73,7 +87,8 @@ export class Transport {
 
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
-    const response = await fetch(keysURL.toString(), init);
+    const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    const response = await send(keysURL.toString(), init);
 
     if (!response.ok) {
       throw new InvalidKeyConfigError(`failed to get server public key: status ${response.status}`);
@@ -87,7 +102,7 @@ export class Transport {
     const keysData = new Uint8Array(await response.arrayBuffer());
     const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
 
-    return new Transport(serverIdentity, url.origin);
+    return new Transport(serverIdentity, url.origin, options);
   }
 
   private static isProblemJSONContentType(contentType: string | null): boolean {
@@ -192,7 +207,7 @@ export class Transport {
     // Skip EHBP for non-network URLs (data:, blob:)
     const inputUrl = input instanceof Request ? input.url : String(input);
     if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) {
-      return fetch(input, init);
+      return this.fetchImpl(input, init);
     }
     // Reject credential-bearing URLs with the canonical code before the
     // platform Request constructor rejects them with an uncoded TypeError,
@@ -280,7 +295,7 @@ export class Transport {
 
     // Bodyless requests: context is null, response is plaintext
     if (!token) {
-      return fetch(encryptedRequest);
+      return this.fetchImpl(encryptedRequest);
     }
 
     // SPEC 6: the token exists once the body is sealed, before it is sent,
@@ -298,7 +313,7 @@ export class Transport {
     let response: Response;
     let shouldDecrypt: boolean;
     try {
-      response = await fetch(encryptedRequest);
+      response = await this.fetchImpl(encryptedRequest);
       shouldDecrypt = await Transport.shouldDecryptResponse(response);
     } catch (err) {
       clearToken();
@@ -356,6 +371,6 @@ export class Transport {
  * Create a new transport instance.
  * The optional init is applied to the server key fetch (e.g. credentials).
  */
-export async function createTransport(serverURL: string, init?: RequestInit): Promise<Transport> {
-  return Transport.create(serverURL, init);
+export async function createTransport(serverURL: string, init?: RequestInit, options: TransportOptions = {}): Promise<Transport> {
+  return Transport.create(serverURL, init, options);
 }

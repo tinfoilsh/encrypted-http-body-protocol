@@ -34,9 +34,46 @@ const response = await transport.post('/api/data', JSON.stringify({ message: 'he
 const data = await response.json();
 ```
 
+## Custom network transport
+
+Pass a fetch-compatible implementation as the third argument to `Transport`,
+`Transport.create`, or `createTransport` to use a native HTTP bridge or relay
+without replacing global `fetch`:
+
+```typescript
+const transport = new Transport(verifiedIdentity, 'https://enclave.example', {
+  fetch: nativeFetch,
+});
+```
+
+The callback receives every request the transport sends, including server key
+discovery in `Transport.create` and `createTransport`. It is always called with
+no `this`, so pass `window.fetch` directly but bind methods
+(`relay.fetch.bind(relay)`).
+
+Requests with a body arrive as a single EHBP-encrypted `Request`. Bodyless
+requests arrive unencrypted. `data:` and `blob:` URLs skip EHBP and arrive as
+the caller's original `(input, init)`; handle them or forward them to
+`globalThis.fetch`.
+
+The callback must preserve the encrypted body and protocol headers, finish
+reading the request body before resolving, return a standard `Response`, and
+honor request cancellation and redirect policy.
+
+Only encrypted request bodies and response bodies carrying `Ehbp-Response-Nonce`
+are protected; a 2xx response to an encrypted request without that header is
+rejected. Headers, including authorization, are visible to the callback. Error
+responses without that header, responses to bodyless requests, and key
+discovery are not authenticated, and the callback or anything it routes through
+can forge them. Route only to
+trusted destinations. For attested services, construct `Transport` with an
+identity verified by your attestation layer.
+
+Omitting the option preserves the default global `fetch` behavior.
+
 ## API
 
-### `createTransport(serverURL: string): Promise<Transport>`
+### `createTransport(serverURL: string, init?: RequestInit, options?: TransportOptions): Promise<Transport>`
 
 Creates a transport that automatically encrypts requests and decrypts responses.
 
