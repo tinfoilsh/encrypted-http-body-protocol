@@ -60,10 +60,12 @@ The callback must preserve the encrypted body and protocol headers, finish
 reading the request body before resolving, return a standard `Response`, and
 honor request cancellation and redirect policy.
 
-Only the bodies of encrypted requests and their 2xx responses are protected.
-Headers, including authorization, are visible to the callback. Error responses,
-responses to bodyless requests, and key discovery are not authenticated, and
-the callback or anything it routes through can forge them. Route only to
+Only encrypted request bodies and response bodies carrying `Ehbp-Response-Nonce`
+are protected; a 2xx response to an encrypted request without that header is
+rejected. Headers, including authorization, are visible to the callback. Error
+responses without that header, responses to bodyless requests, and key
+discovery are not authenticated, and the callback or anything it routes through
+can forge them. Route only to
 trusted destinations. For attested services, construct `Transport` with an
 identity verified by your attestation layer.
 
