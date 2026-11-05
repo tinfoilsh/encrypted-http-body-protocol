@@ -34,6 +34,29 @@ const response = await transport.post('/api/data', JSON.stringify({ message: 'he
 const data = await response.json();
 ```
 
+## Custom network transport
+
+Pass a fetch-compatible implementation as the third argument to `Transport`,
+`Transport.create`, or `createTransport` to use a native HTTP bridge or relay
+without replacing global `fetch`:
+
+```typescript
+const transport = new Transport(verifiedIdentity, 'https://enclave.example', {
+  fetch: nativeFetch,
+});
+```
+
+The callback receives requests after EHBP encryption; responses pass through
+EHBP decryption as usual. Headers remain visible, and bodyless requests are not
+encrypted. The factories also use this callback to discover the server key;
+key discovery does not authenticate the server. For attested services, construct
+`Transport` with an identity verified by your attestation layer.
+
+The callback must preserve the encrypted body and protocol headers, return a
+standard `Response`, and honor request cancellation and redirect policy. Route
+only to trusted destinations: authorization headers are not body-encrypted.
+Omitting the option preserves the default global `fetch` behavior.
+
 ## API
 
 ### `createTransport(serverURL: string): Promise<Transport>`
