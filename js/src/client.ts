@@ -48,7 +48,8 @@ export class Transport {
 
   /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
   constructor(serverIdentity: Identity, serverHost: string, options: TransportOptions = {}) {
-    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchImpl = (input, init) => send(input, init);
     this.serverIdentity = serverIdentity;
     this.serverHost = serverHost;
     const originUrl = serverHost.includes('://') ? new URL(serverHost) : undefined;

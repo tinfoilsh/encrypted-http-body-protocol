@@ -139,6 +139,23 @@ describe('Transport', () => {
     assert.deepStrictEqual(results, ['processed:private-one', 'processed:private-two']);
   });
 
+  it('calls an injected fetch without a receiver for encrypted and bodyless requests', async () => {
+    const receivers: unknown[] = [];
+    const transport = new Transport(serverIdentity, 'https://example.com', {
+      fetch: async function (this: unknown, input, init) {
+        receivers.push(this);
+        assert.strictEqual(this, undefined, 'fetch must not receive the Transport as its receiver');
+        const request = new Request(input, init);
+        return request.body ? buildEncryptedResponse(request, serverIdentity) : new Response('bodyless');
+      },
+    });
+    const encrypted = await transport.post('https://example.com/test', 'hello');
+    assert.strictEqual(await encrypted.text(), 'processed:hello');
+    const bodyless = await transport.get('https://example.com/test');
+    assert.strictEqual(await bodyless.text(), 'bodyless');
+    assert.deepStrictEqual(receivers, [undefined, undefined]);
+  });
+
   it('preserves origin checks before invoking custom fetch', async () => {
     const transport = new Transport(serverIdentity, 'https://example.com', {
       fetch: async () => { assert.fail('must reject before networking'); },
@@ -178,7 +195,8 @@ describe('Transport', () => {
     for (const create of [Transport.create, createTransport]) {
       const urls: string[] = [];
       const transport = await create('https://example.com', { credentials: 'omit' }, {
-        fetch: async (input, init) => {
+        fetch: async function (this: unknown, input, init) {
+          assert.strictEqual(this, undefined, 'key discovery and API requests must use the same receiver');
           const request = new Request(input, init);
           urls.push(request.url);
           if (request.url.endsWith(PROTOCOL.KEYS_PATH)) {
