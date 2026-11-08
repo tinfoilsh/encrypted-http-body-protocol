@@ -596,7 +596,7 @@ def main() -> None:
             {"outcome": "error", "error_code": "DUPLICATE_RESPONSE_NONCE"},
             "Two nonce headers MUST fail closed.",
             browser={"runnable": False, "skip_reason": "browser-coalesces-duplicate-headers"},
-            runners=["go", "python", "rust"]),
+            runners=["go", "python", "rust", "kotlin"]),
         e2e("e2e-duplicate-nonce-coalesced", "duplicate_nonce",
             {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
             "fetch and URLSession coalesce repeated headers; the merged value is not valid hex "
