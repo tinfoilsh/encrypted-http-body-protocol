@@ -45,6 +45,11 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Build JS library and browser bundle
         working-directory: js
         run: |
@@ -73,7 +78,7 @@ jobs:
         run: |
           python3 conformance/harness/run.py \
             --adapter go --adapter python --adapter js --adapter rust --adapter swift \
-            --adapter js-chromium --adapter js-firefox
+            --adapter kotlin --adapter js-chromium --adapter js-firefox
 
       - name: Upload conformance report
         if: always()

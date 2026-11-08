@@ -3,11 +3,12 @@
 EHBP (Encrypted HTTP Body Protocol) encrypts the HTTP message body while leaving the rest of the message unmodified.
 Proxies can inspect and route upon request metadata without seeing the body.
 
-The protocol uses HPKE, with a Go reference implementation (server middleware and client transport), a JavaScript/TypeScript client, and a Swift client.
+The protocol uses HPKE, with a Go reference implementation (server middleware and client transport), a JavaScript/TypeScript client, a Swift client, and a Kotlin client (JVM and Android).
 
 - Protocol specification: [SPEC.md](SPEC.md)
 - JavaScript client: [js/README.md](js/README.md)
 - Swift client: [swift/](swift/)
+- Kotlin client: [kotlin/README.md](kotlin/README.md)
 
 ## Motivation
 EHBP makes it practical to add body encryption without needing to rethink existing HTTP stacks.

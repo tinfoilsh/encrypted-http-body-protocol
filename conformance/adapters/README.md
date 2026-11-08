@@ -66,5 +66,6 @@ a difference is a finding.
 | Python | `python/` | `.venv` python | yes |
 | JavaScript (Node) | `js/` | built `dist` | yes |
 | Swift | `swift/` | built binary | yes |
+| Kotlin | `kotlin/` | `installDist` launcher (Gradle build in `kotlin/`) | yes |
 | Rust | `rust/` | cargo binary | CI only (no local toolchain) |
 | JavaScript (browser) | `js-browser/` | Playwright page | Step 6 |
