@@ -1,0 +1,48 @@
+name: Reproducible build
+
+on:
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+# The Kotlin jar must be a pure function of the commit: two clean builds, in
+# two different directories (so an embedded absolute path would show), must
+# produce byte-identical archives.
+jobs:
+  kotlin-jar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build once
+        working-directory: kotlin
+        run: |
+          ./gradlew --no-daemon --no-build-cache -q -PnoAndroid clean jar
+          sha256sum build/libs/*.jar | tee "$RUNNER_TEMP/first.sha256"
+
+      - name: Build again from a second checkout path
+        run: |
+          set -euo pipefail
+          second="$RUNNER_TEMP/second-checkout"
+          mkdir -p "$second"
+          git archive HEAD | tar -x -C "$second"
+          cd "$second/kotlin"
+          ./gradlew --no-daemon --no-build-cache -q -PnoAndroid clean jar
+          sha256sum build/libs/*.jar | tee "$RUNNER_TEMP/second.sha256"
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+          diff <(cut -d' ' -f1 "$RUNNER_TEMP/first.sha256") <(cut -d' ' -f1 "$RUNNER_TEMP/second.sha256") \
+            || { echo "::error::Kotlin jar is not reproducible: the two clean builds differ"; exit 1; }
+          echo "::notice::Reproducible build verified: $(cut -d' ' -f1 "$RUNNER_TEMP/first.sha256")"
