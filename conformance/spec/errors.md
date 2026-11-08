@@ -39,6 +39,7 @@ are `<CODE>: <detail>`; the detail is diagnostic and not asserted.
 | Rust | `Error::Coded(Code, detail)` | `err.code()` (`Option`) |
 | JavaScript | one `EhbpError` subclass per code (`UnsupportedSuiteError`) | `codeOf(err)` / `err.code` |
 | Swift | `EHBPError(code, detail)` struct | `(error as? EHBPError)?.code` |
+| Kotlin | `ProtocolError(code, detail)` (an `IOException`) | `codeOf(err)` / `err.code` |
 
 Names are the code in each language's casing; acronyms follow the language
 (`HPKESetupFailedError` in Python, `HpkeSetupFailedError` in JavaScript).
