@@ -8,6 +8,9 @@ plugins {
     `maven-publish`
 }
 
+// JitPack republishes whatever lands in ~/.m2 under its own group
+// (com.github.tinfoilsh.encrypted-http-body-protocol), so this group only
+// matters for a future Maven Central publication and must not be the JitPack one.
 group = "sh.tinfoil"
 version = "0.5.0"
 

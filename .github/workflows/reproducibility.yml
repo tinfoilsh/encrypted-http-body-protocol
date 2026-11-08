@@ -95,7 +95,7 @@ jobs:
           # The first GET triggers the build; poll up to ~15 min for slow builds.
           code=000
           for i in $(seq 1 90); do
-            code=$(curl -sIL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || echo 000)
+            code=$(curl -sL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || echo 000)
             echo "Attempt $i: HTTP $code"
             [ "$code" = "200" ] && break
             sleep 10

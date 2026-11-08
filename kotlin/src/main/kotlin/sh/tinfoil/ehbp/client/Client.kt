@@ -53,7 +53,9 @@ class Transport internal constructor(
     // or declared for; requests must target it. Null when built from a bare identity.
     private val origin: HttpUrl?,
 ) {
-    private val httpClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    // No HTTP cache either: ciphertext and recovery-bound responses are never
+    // written to disk or replayed, as with Go's cache-less http.Transport.
+    private val httpClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).cache(null).build()
     private val mu = Any()
     private var lastSessionRecoveryToken: SessionRecoveryToken? = null
     private var requestGeneration = 0L
@@ -238,7 +240,7 @@ private fun sameOrigin(a: HttpUrl, b: HttpUrl): Boolean = a.scheme == b.scheme &
 
 private fun syncServerPublicKey(server: HttpUrl, httpClient: OkHttpClient): Identity {
     val keysURL = server.newBuilder().encodedPath(KeysPath).fragment(null).build()
-    val discoveryClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    val discoveryClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).cache(null).build()
     discoveryClient.newCall(Request.Builder().url(keysURL).build()).execute().use { resp ->
         if (resp.code != 200) throw ProtocolError(Code.InvalidKeyConfig, "server returned status ${resp.code}")
         val contentType = resp.header("Content-Type").orEmpty()

@@ -1,6 +1,7 @@
 package sh.tinfoil.ehbp.client
 
 import com.sun.net.httpserver.HttpServer
+import okhttp3.Cache
 import okhttp3.OkHttpClient
 import okhttp3.Headers
 import okhttp3.MediaType
@@ -22,6 +23,7 @@ import sh.tinfoil.ehbp.protocol.EncapsulatedKeyHeader
 import sh.tinfoil.ehbp.protocol.ProtocolError
 import sh.tinfoil.ehbp.protocol.ResponseNonceHeader
 import sh.tinfoil.ehbp.protocol.codeOf
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.net.InetSocketAddress
@@ -219,6 +221,23 @@ class ClientTest {
             // Scheme and host compare case-insensitively; the default port matches an explicit one.
             tr.roundTrip(post("HTTP://127.0.0.1:${port(srv)}/x", "x")).body!!.bytes()
             assertEquals(1, hits.get())
+        }
+    }
+
+    @Test
+    fun neverUsesTheCallersHttpCache() {
+        val hits = AtomicInteger()
+        EhbpTestServer(newIdentity()) { ex, _ ->
+            hits.incrementAndGet(); ex.responseHeaders.set("Cache-Control", "public, max-age=3600"); 200 to "cacheable".toByteArray()
+        }.use { srv ->
+            val dir = File.createTempFile("ehbp-cache", "").also { it.delete(); it.mkdirs() }
+            val cache = Cache(dir, 10L shl 20)
+            val tr = newTransport(srv.url, OkHttpClient.Builder().cache(cache).build())
+            repeat(2) { tr.roundTrip(Request.Builder().url("${srv.url}/keys-like").build()).body!!.bytes() }
+            assertEquals(2, hits.get(), "every request reaches the server")
+            assertEquals(0, cache.requestCount(), "the derived client has no cache at all")
+            assertEquals(0, cache.writeSuccessCount())
+            dir.deleteRecursively()
         }
     }
 

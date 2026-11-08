@@ -85,11 +85,18 @@ on the configured origin, and reads only the first key configuration.
 - Response plaintext is released frame by frame as each frame authenticates;
   after a failure the body stream rethrows the same error forever.
 - `getSessionRecoveryToken()` is readable as soon as the request body is
-  encrypted and is cleared when the exchange completes or fails (SPEC 6).
+  encrypted and before it is sent, so it can be persisted ahead of a crash
+  (SPEC 6). As in the Go client it is cleared once the exchange is consumed:
+  the response was fully read, a newer request superseded it, or the exchange
+  failed (pass-through, key-config problem, or a body that stopped
+  authenticating). Persist it beforehand if you need it afterwards.
 
 ## Errors
 
-All protocol failures are `sh.tinfoil.ehbp.protocol.ProtocolError`, an
+All protocol failures carry a `sh.tinfoil.ehbp.protocol.ProtocolError`, an
 `IOException` whose `code` is the SPEC 5.5 class and whose message is
-`CODE: detail`. `codeOf(throwable)` finds the code anywhere in a cause chain.
-Transport failures surface as OkHttp's own `IOException`s, uncoded.
+`CODE: detail`. One wrapper exists, as in Go: a 422 key-config problem is
+thrown as `KeyConfigError` with the `KEY_CONFIG_MISMATCH` `ProtocolError` as
+its cause, so callers can catch the rekey case by type. `codeOf(throwable)`
+finds the code anywhere in a cause chain and is the portable way to classify
+either. Transport failures surface as OkHttp's own `IOException`s, uncoded.
