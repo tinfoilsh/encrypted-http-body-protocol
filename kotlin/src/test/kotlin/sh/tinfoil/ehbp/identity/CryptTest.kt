@@ -4,6 +4,10 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.Buffer
+import okio.BufferedSink
+import okio.Sink
+import okio.Timeout
+import okio.buffer
 import sh.tinfoil.ehbp.openFrames
 import sh.tinfoil.ehbp.protocol.EncapsulatedKeyHeader
 import sh.tinfoil.ehbp.toHex
@@ -78,6 +82,37 @@ class CryptTest {
         val framed = drain(encrypted.body!!)
         assertEquals(20_000 + 3 * 20, framed.size, "okio emits 8 KiB segments, so frames match the Go reader")
         assertContentEquals(plaintext, openFrames(recipient(ctx!!.requestEnc), ByteArrayInputStream(framed)))
+    }
+
+    @Test
+    fun encryptorStreamsWithoutBufferingTheBody() {
+        // A counting sink stands in for the socket. The producer writes 1 MiB blocks
+        // and, after each, checks that ciphertext for the previous blocks has already
+        // left the encryptor: nothing accumulates between producer and wire.
+        var received = 0L
+        val wire = object : Sink {
+            override fun write(source: Buffer, byteCount: Long) { source.skip(byteCount); received += byteCount }
+            override fun flush() {}
+            override fun timeout() = Timeout.NONE
+            override fun close() {}
+        }
+        val block = ByteArray(1 shl 20)
+        val producer = object : RequestBody() {
+            override fun contentType() = null
+            override fun contentLength() = -1L
+            override fun writeTo(sink: BufferedSink) {
+                for (i in 1..8) {
+                    sink.write(block)
+                    assertTrue(received >= (i - 1) * block.size.toLong(), "block $i: only ${received} bytes reached the wire")
+                }
+            }
+        }
+        val req = Request.Builder().url("http://example.test/x").post(producer).build()
+        val (encrypted, _) = server.encryptRequestWithContext(req)
+        val sink = wire.buffer()
+        encrypted.body!!.writeTo(sink)
+        sink.flush()
+        assertEquals(8L * block.size + 8 * 128 * 20, received, "8 MiB in 8 KiB frames, 20 bytes overhead each")
     }
 
     @Test

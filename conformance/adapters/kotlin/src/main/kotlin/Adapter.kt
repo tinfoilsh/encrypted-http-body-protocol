@@ -61,6 +61,7 @@ class Result(val fixtureId: String) {
     var emittedN = 0
     var native: String? = null
     var tokenEarly: Boolean? = null
+    var peakRss: Long? = null
 
     fun toJson() = buildJsonObject {
         put("fixture_id", fixtureId)
@@ -75,6 +76,7 @@ class Result(val fixtureId: String) {
         put("native_error", native)
         put("runner", "kotlin")
         tokenEarly?.let { put("token_before_response", it) }
+        peakRss?.let { put("peak_rss_bytes", it) }
     }.toString()
 }
 
@@ -195,7 +197,26 @@ fun largeBody(fx: JsonObject, r: Result) {
     val resp = tr.roundTrip(req)
     r.status = resp.code
     r.setBody(readTracked(resp.body!!.byteStream(), r))
+    r.peakRss = peakRssBytes()
 }
+
+/**
+ * Peak resident set size of this process, as the Go adapter reports, or null
+ * when not measurable. Linux: VmHWM from /proc/self/status (true high-water
+ * mark). macOS: `ps` RSS at completion; the JVM does not uncommit heap without
+ * periodic GC, so for this one-shot process it tracks the peak.
+ */
+fun peakRssBytes(): Long? = runCatching {
+    val status = java.io.File("/proc/self/status")
+    if (status.exists()) {
+        return status.readLines().firstOrNull { it.startsWith("VmHWM:") }
+            ?.split(Regex("\\s+"))?.getOrNull(1)?.toLongOrNull()?.times(1024)
+    }
+    val pid = ProcessHandle.current().pid()
+    val out = ProcessBuilder("ps", "-o", "rss=", "-p", pid.toString()).redirectErrorStream(true).start()
+        .inputStream.bufferedReader().readText().trim()
+    out.toLongOrNull()?.times(1024)
+}.getOrNull()
 
 fun discoverTarget(fx: JsonObject): String = when (fx.strIn("target")) {
     "bad_ct" -> System.getenv("ORACLE_BAD_CT_URL")
