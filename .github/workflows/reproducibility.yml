@@ -3,13 +3,21 @@ name: Reproducible build
 on:
   pull_request:
     branches: ["**"]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# The Kotlin jar must be a pure function of the commit: two clean builds, in
-# two different directories (so an embedded absolute path would show), must
-# produce byte-identical archives.
+# The Kotlin jar must be a pure function of the commit. Two checks:
+#  - kotlin-jar: two clean builds in two different directories (so an embedded
+#    absolute path would show) must produce byte-identical archives. Runs on
+#    every PR.
+#  - jitpack: the artifact JitPack builds for this commit must match the local
+#    build, so what consumers download is what the repository produces. Runs on
+#    pushes to main and on release tags, where JitPack publication matters.
 jobs:
   kotlin-jar:
     runs-on: ubuntu-latest
@@ -46,3 +54,73 @@ jobs:
           diff <(cut -d' ' -f1 "$RUNNER_TEMP/first.sha256") <(cut -d' ' -f1 "$RUNNER_TEMP/second.sha256") \
             || { echo "::error::Kotlin jar is not reproducible: the two clean builds differ"; exit 1; }
           echo "::notice::Reproducible build verified: $(cut -d' ' -f1 "$RUNNER_TEMP/first.sha256")"
+
+  jitpack:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build locally
+        id: local
+        working-directory: kotlin
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --no-build-cache -q -PnoAndroid clean jar
+          jar=$(ls build/libs/ehbp-*.jar | grep -v sources)
+          hash=$(sha256sum "$jar" | awk '{print $1}')
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "Local:   $hash  $jar"
+
+      - name: Fetch the JitPack build of this commit
+        id: jitpack
+        run: |
+          set -euo pipefail
+          # JitPack accepts a tag or a 10-char commit prefix as the version.
+          ref="${GITHUB_REF_TYPE}"
+          if [ "$ref" = "tag" ]; then version="${GITHUB_REF_NAME}"; else version=$(git rev-parse --short=10 HEAD); fi
+          base="https://jitpack.io/com/github/tinfoilsh/encrypted-http-body-protocol/ehbp/${version}"
+          url="$base/ehbp-${version}.jar"
+          log="$base/build.log"
+          echo "URL: $url"
+          # The first GET triggers the build; poll up to ~15 min for slow builds.
+          code=000
+          for i in $(seq 1 90); do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || echo 000)
+            echo "Attempt $i: HTTP $code"
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::JitPack did not produce an artifact (last HTTP $code)"
+            echo "--- build.log (tail) ---"
+            curl -sL "$log" | tail -200 || true
+            exit 1
+          fi
+          curl -sL -o "jitpack-${version}.jar" "$url"
+          hash=$(sha256sum "jitpack-${version}.jar" | awk '{print $1}')
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "JitPack: $hash  jitpack-${version}.jar"
+
+      - name: Compare
+        env:
+          LOCAL_HASH: ${{ steps.local.outputs.hash }}
+          JITPACK_HASH: ${{ steps.jitpack.outputs.hash }}
+        run: |
+          set -euo pipefail
+          echo "Local:   $LOCAL_HASH"
+          echo "JitPack: $JITPACK_HASH"
+          if [ "$LOCAL_HASH" != "$JITPACK_HASH" ]; then
+            echo "::error::SHA-256 mismatch: the local build does not match the JitPack artifact"
+            exit 1
+          fi
+          echo "::notice::JitPack artifact matches the local build: $LOCAL_HASH"

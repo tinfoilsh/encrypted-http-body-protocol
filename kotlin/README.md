@@ -7,6 +7,20 @@ with the same function names and the same error codes. Crypto is BouncyCastle
 (17+) and on Android (minSdk 21). Only the client side is ported: there is no
 server middleware.
 
+## Install
+
+Releases are served by [JitPack](https://jitpack.io/#tinfoilsh/encrypted-http-body-protocol)
+from the git tag, so the Kotlin client ships with the same `v<version>` tag as
+Go and Swift and needs no separate publish step.
+
+```kotlin
+repositories { maven("https://jitpack.io") }
+dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:v0.5.0") }
+```
+
+CI compares JitPack's artifact against a clean local build of the same commit
+on every push to `main` and every release tag.
+
 ## Build and test
 
 ```

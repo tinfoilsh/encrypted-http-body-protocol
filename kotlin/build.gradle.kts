@@ -5,6 +5,7 @@ plugins {
     kotlin("android") version "2.2.20" apply false
     id("com.android.library") version "8.13.0" apply false
     `java-library`
+    `maven-publish`
 }
 
 group = "sh.tinfoil"
@@ -27,6 +28,24 @@ dependencies {
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+}
+
+// Consumed through JitPack (see ../jitpack.yml), which rebuilds the tagged
+// commit and serves it as com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:<tag>.
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+            pom {
+                name.set("ehbp")
+                description.set("Encrypted HTTP Body Protocol client for the JVM and Android")
+                url.set("https://github.com/tinfoilsh/encrypted-http-body-protocol")
+                licenses { license { name.set("MIT"); url.set("https://github.com/tinfoilsh/encrypted-http-body-protocol/blob/main/LICENSE") } }
+                scm { url.set("https://github.com/tinfoilsh/encrypted-http-body-protocol") }
+            }
+        }
+    }
 }
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
