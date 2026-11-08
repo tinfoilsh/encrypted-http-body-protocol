@@ -2,8 +2,17 @@ package sh.tinfoil.ehbp.client
 
 import com.sun.net.httpserver.HttpServer
 import okhttp3.OkHttpClient
+import okhttp3.Headers
+import okhttp3.MediaType
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.BufferedSource
+import okio.buffer
+import okio.source
 import sh.tinfoil.ehbp.EhbpTestServer
 import sh.tinfoil.ehbp.identity.KeyConfigError
 import sh.tinfoil.ehbp.identity.isKeyConfigError
@@ -14,10 +23,12 @@ import sh.tinfoil.ehbp.protocol.ProtocolError
 import sh.tinfoil.ehbp.protocol.ResponseNonceHeader
 import sh.tinfoil.ehbp.protocol.codeOf
 import java.io.IOException
+import java.io.InputStream
 import java.net.InetSocketAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -65,9 +76,9 @@ class ClientTest {
 
     @Test
     fun rejectsNonceLessSuccessResponse() = echoServer().use { srv ->
-        srv.tweak = { ex, _ -> ex.responseHeaders.set(ResponseNonceHeader, ""); "substituted".toByteArray() }
+        srv.suppressNonce = true
+        srv.tweak = { _, _ -> "substituted".toByteArray() }
         val tr = newTransport(srv.url)
-        // The JDK server drops an empty header value, so the client sees no nonce at all.
         val e = assertFailsWith<ProtocolError> { tr.roundTrip(post("${srv.url}/x", "hi")) }
         assertEquals(Code.MissingResponseNonce, e.code)
         assertNull(tr.getSessionRecoveryToken())
@@ -75,7 +86,8 @@ class ClientTest {
 
     @Test
     fun passesThroughNonceLessErrorResponse() = EhbpTestServer(newIdentity()) { _, _ -> 503 to "busy".toByteArray() }.use { srv ->
-        srv.tweak = { ex, _ -> ex.responseHeaders.set(ResponseNonceHeader, ""); "busy".toByteArray() }
+        srv.suppressNonce = true
+        srv.tweak = { _, _ -> "busy".toByteArray() }
         val tr = newTransport(srv.url)
         val resp = tr.roundTrip(post("${srv.url}/x", "hi"))
         assertEquals(503, resp.code)
@@ -121,6 +133,40 @@ class ClientTest {
     }
 
     @Test
+    fun emptyFirstNonceCannotTurnAnErrorIntoPassThrough() {
+        val identity = newIdentity()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(503).message("Service Unavailable")
+                .headers(Headers.Builder()
+                    .add(ResponseNonceHeader, "")
+                    .add(ResponseNonceHeader, "00".repeat(32)).build())
+                .body("forged plaintext".toResponseBody()).build()
+        }.build()
+        val tr = newTransportWithConfig("https://example.test", identity.marshalConfig(), http)
+        assertEquals(Code.DuplicateResponseNonce, assertFailsWith<ProtocolError> {
+            tr.roundTrip(post("https://example.test/x", "request"))
+        }.code)
+    }
+
+    @Test
+    fun encrypted422IsNotTreatedAsAKeyConfigMismatch() {
+        val identity = newIdentity()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(422).message("Unprocessable Content")
+                .addHeader(ResponseNonceHeader, "00".repeat(32))
+                .addHeader("Content-Type", "application/problem+json")
+                .body("""{"type":"urn:ietf:params:ehbp:error:key-config","title":"retry"}""".toResponseBody())
+                .build()
+        }.build()
+        val tr = newTransportWithConfig("https://example.test", identity.marshalConfig(), http)
+        tr.roundTrip(post("https://example.test/x", "request")).use { resp ->
+            assertEquals(Code.ChunkTooLarge, assertFailsWith<ProtocolError> { resp.body!!.bytes() }.code)
+        }
+    }
+
+    @Test
     fun rejectsInvalidResponseNonce() = echoServer().use { srv ->
         srv.tweak = { ex, framed -> ex.responseHeaders.set(ResponseNonceHeader, "abc"); framed }
         assertEquals(Code.InvalidResponseNonce, assertFailsWith<ProtocolError> { newTransport(srv.url).roundTrip(post("${srv.url}/x", "hi")) }.code)
@@ -131,9 +177,9 @@ class ClientTest {
         val problem = """{"type":"urn:ietf:params:ehbp:error:key-config","title":"stale key"}"""
         var body = problem
         EhbpTestServer(newIdentity()) { _, _ -> 422 to ByteArray(0) }.use { srv ->
+            srv.suppressNonce = true
             srv.tweak = { ex, _ ->
                 ex.responseHeaders.set("Content-Type", "application/problem+json; charset=utf-8")
-                ex.responseHeaders.set(ResponseNonceHeader, "") // problem responses are plaintext
                 body.toByteArray()
             }
             val tr = newTransport(srv.url)
@@ -187,7 +233,9 @@ class ClientTest {
         val cfg = newIdentity().marshalConfig()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         var mode = ""
+        val seenQuery = AtomicReference<String?>()
         server.createContext("/.well-known/hpke-keys") { ex ->
+            seenQuery.set(ex.requestURI.rawQuery)
             ex.responseHeaders.set("Content-Type", if (mode == "ct") "text/plain" else "application/ohttp-keys")
             ex.sendResponseHeaders(if (mode == "status") 404 else 200, cfg.size.toLong())
             ex.responseBody.use { it.write(cfg) }
@@ -201,9 +249,65 @@ class ClientTest {
             assertEquals(Code.InvalidKeyConfig, assertFailsWith<ProtocolError> { newTransport(base) }.code)
             mode = ""
             assertContentEquals(cfg, newTransport("$base/some/path?q=1").serverIdentity().marshalConfig())
+            assertNull(seenQuery.get())
         } finally {
             server.stop(0)
         }
+    }
+
+    @Test
+    fun discoveryDoesNotFollowRedirects() {
+        val targetHits = AtomicInteger()
+        val target = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        target.createContext("/") { ex ->
+            targetHits.incrementAndGet()
+            val cfg = newIdentity().marshalConfig()
+            ex.responseHeaders.set("Content-Type", "application/ohttp-keys")
+            ex.sendResponseHeaders(200, cfg.size.toLong())
+            ex.responseBody.use { it.write(cfg) }
+        }
+        target.start()
+        val source = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        source.createContext("/.well-known/hpke-keys") { ex ->
+            ex.responseHeaders.set("Location", "http://127.0.0.1:${target.address.port}/keys")
+            ex.sendResponseHeaders(302, -1)
+            ex.close()
+        }
+        source.start()
+        try {
+            assertEquals(Code.InvalidKeyConfig, assertFailsWith<ProtocolError> {
+                newTransport("http://127.0.0.1:${source.address.port}")
+            }.code)
+            assertEquals(0, targetHits.get())
+        } finally {
+            source.stop(0)
+            target.stop(0)
+        }
+    }
+
+    @Test
+    fun discoveryReadsOnlyTheFirstKeyConfig() {
+        val cfg = newIdentity().marshalConfig()
+        val stream = object : InputStream() {
+            private var pos = 0
+            override fun read(): Int {
+                if (pos >= cfg.size + 8) throw IOException("unbounded trailing data was read")
+                return if (pos < cfg.size) cfg[pos++].toInt() and 0xff else { pos++; 0 }
+            }
+        }
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK")
+                .addHeader("Content-Type", "application/ohttp-keys")
+                .body(object : ResponseBody() {
+                    private val src = stream.source().buffer()
+                    override fun contentType(): MediaType? = null
+                    override fun contentLength() = -1L
+                    override fun source(): BufferedSource = src
+                }).build()
+        }.build()
+        val tr = newTransport("https://example.test", http)
+        assertContentEquals(cfg, tr.serverIdentity().marshalConfig())
     }
 
     @Test

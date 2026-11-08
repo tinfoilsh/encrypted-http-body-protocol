@@ -69,6 +69,8 @@ Every constructor takes an optional `OkHttpClient` (TLS pinning, timeouts,
 proxies, cookies). `roundTrip` is a single HTTP transaction like Go's
 `RoundTripper`: the client is used with redirects disabled and a 3xx is returned
 to the caller instead of being replayed against the new location.
+Key discovery also rejects redirects, requests exactly `/.well-known/hpke-keys`
+on the configured origin, and reads only the first key configuration.
 
 ## Semantics
 

@@ -82,8 +82,9 @@ fun extractSessionRecoveryToken(ctx: RequestContext): SessionRecoveryToken {
 fun decryptResponseWithToken(resp: Response, token: SessionRecoveryToken): Response {
     val nonces = resp.headers(ResponseNonceHeader)
     if (nonces.size > 1) throw ProtocolError(Code.DuplicateResponseNonce, "duplicate $ResponseNonceHeader header")
-    val responseNonceHex = nonces.firstOrNull().orEmpty()
-    if (responseNonceHex.isEmpty()) throw ProtocolError(Code.MissingResponseNonce, "missing $ResponseNonceHeader header")
+    val responseNonceHex = nonces.firstOrNull()
+        ?: throw ProtocolError(Code.MissingResponseNonce, "missing $ResponseNonceHeader header")
+    if (responseNonceHex.isEmpty()) throw ProtocolError(Code.InvalidResponseNonce, "empty $ResponseNonceHeader header")
 
     val responseNonce = hexDecodeOrNull(responseNonceHex)
         ?: throw ProtocolError(Code.InvalidResponseNonce, "invalid response nonce")

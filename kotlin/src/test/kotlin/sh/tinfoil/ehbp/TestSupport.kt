@@ -66,6 +66,7 @@ class EhbpTestServer(
 
     /** Replace the encrypted frames and nonce header just before sending. */
     var tweak: (HttpExchange, ByteArray) -> ByteArray = { _, framed -> framed }
+    var suppressNonce = false
 
     init {
         server.createContext("/.well-known/hpke-keys") { ex ->
@@ -94,7 +95,7 @@ class EhbpTestServer(
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val aead = deriveResponseKeys(recipient.export(ExportLabel.toByteArray(), ExportLength), enc, nonce).newResponseAEAD()
         val framed = tweak(ex, sealFrames(aead, *body.toList().chunked(8192).map { it.toByteArray() }.toTypedArray()))
-        if (!ex.responseHeaders.containsKey(ResponseNonceHeader)) ex.responseHeaders.set(ResponseNonceHeader, nonce.toHex())
+        if (!suppressNonce && !ex.responseHeaders.containsKey(ResponseNonceHeader)) ex.responseHeaders.set(ResponseNonceHeader, nonce.toHex())
         ex.sendResponseHeaders(status, 0) // chunked
         ex.responseBody.use { it.write(framed) }
     }
