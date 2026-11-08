@@ -20,6 +20,10 @@ breaks the build here instead of in an app. It is only included when an Android
 SDK is present (`ANDROID_HOME`, `ANDROID_SDK_ROOT` or `local.properties`); pass
 `-PnoAndroid` to leave it out regardless.
 
+The jar is reproducible: archive timestamps and entry order are fixed, and CI
+(`.github/workflows/reproducibility.yml`) builds it twice from clean in two
+directories and fails if the SHA-256 differs.
+
 ## Usage
 
 ```kotlin

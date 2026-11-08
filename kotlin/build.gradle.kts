@@ -31,3 +31,10 @@ java {
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
 tasks.test { useJUnitPlatform() }
+
+// Reproducible archives: fixed entry timestamps and order, so two clean builds
+// of the same commit produce byte-identical jars (checked in CI).
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
