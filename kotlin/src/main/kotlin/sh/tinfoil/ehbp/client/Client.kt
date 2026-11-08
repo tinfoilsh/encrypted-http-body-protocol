@@ -8,17 +8,18 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import sh.tinfoil.ehbp.identity.Identity
 import sh.tinfoil.ehbp.identity.KeyConfigError
+import sh.tinfoil.ehbp.identity.RequestEncLength
 import sh.tinfoil.ehbp.identity.SessionRecoveryToken
 import sh.tinfoil.ehbp.identity.decryptResponseWithToken
 import sh.tinfoil.ehbp.identity.encryptRequestWithContext
 import sh.tinfoil.ehbp.identity.extractSessionRecoveryToken
+import sh.tinfoil.ehbp.identity.readFully
 import sh.tinfoil.ehbp.identity.unmarshalPublicConfig
 import sh.tinfoil.ehbp.identity.withStream
 import sh.tinfoil.ehbp.protocol.Code
@@ -130,8 +131,9 @@ class Transport internal constructor(
 
         // Only decrypt if we encrypted the request (had a body)
         if (reqCtx != null) {
+            val nonces = resp.headers(ResponseNonceHeader)
             val (rekey, title) = try {
-                isKeyConfigMismatchResponse(resp)
+                if (nonces.isEmpty()) isKeyConfigMismatchResponse(resp) else false to ""
             } catch (e: IOException) {
                 resp.close()
                 setToken(generation, null)
@@ -143,7 +145,7 @@ class Transport internal constructor(
                 throw KeyConfigError(ProtocolError(Code.KeyConfigMismatch, title.ifEmpty { "key configuration mismatch" }))
             }
 
-            if (resp.headers(ResponseNonceHeader).firstOrNull().isNullOrEmpty() && resp.code !in 200..299) {
+            if (nonces.isEmpty() && resp.code !in 200..299) {
                 // Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
                 setToken(generation, null)
                 return resp
@@ -236,11 +238,21 @@ private fun sameOrigin(a: HttpUrl, b: HttpUrl): Boolean = a.scheme == b.scheme &
 
 private fun syncServerPublicKey(server: HttpUrl, httpClient: OkHttpClient): Identity {
     val keysURL = server.newBuilder().encodedPath(KeysPath).fragment(null).build()
-    httpClient.newCall(Request.Builder().url(keysURL).build()).execute().use { resp ->
+    val discoveryClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    discoveryClient.newCall(Request.Builder().url(keysURL).build()).execute().use { resp ->
         if (resp.code != 200) throw ProtocolError(Code.InvalidKeyConfig, "server returned status ${resp.code}")
         val contentType = resp.header("Content-Type").orEmpty()
         if (contentType != KeysMediaType) throw ProtocolError(Code.InvalidKeyConfig, "server returned invalid content type: $contentType")
-        return unmarshalPublicConfig(resp.body!!.bytes())
+        // Only the first key_config is used. Its suite list has a uint16 length,
+        // so reading that config alone bounds discovery memory even when the
+        // endpoint sends an unbounded stream of trailing configs or junk.
+        val stream = resp.body?.byteStream() ?: throw ProtocolError(Code.InvalidKeyConfig, "server returned no key configuration")
+        val prefixLength = 1 + 2 + RequestEncLength + 2
+        val prefix = stream.readFully(prefixLength)
+        if (prefix.size < prefixLength) return unmarshalPublicConfig(prefix)
+        val suitesLength = ((prefix[prefixLength - 2].toInt() and 0xff) shl 8) or
+            (prefix[prefixLength - 1].toInt() and 0xff)
+        return unmarshalPublicConfig(prefix + stream.readFully(suitesLength))
     }
 }
 
@@ -251,7 +263,7 @@ private fun syncServerPublicKey(server: HttpUrl, httpClient: OkHttpClient): Iden
  */
 fun newTransport(server: String, httpClient: OkHttpClient = OkHttpClient()): Transport {
     val origin = parseOrigin(server)
-    return Transport(syncServerPublicKey(server.toHttpUrl(), httpClient), httpClient, origin)
+    return Transport(syncServerPublicKey(origin, httpClient), httpClient, origin)
 }
 
 /** NewTransportWithConfig creates a Transport from pre-fetched /.well-known/hpke-keys bytes (RFC 9458 format). */

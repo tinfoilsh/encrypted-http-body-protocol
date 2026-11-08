@@ -89,7 +89,7 @@ class SessionRecoveryTest {
     fun decryptResponseWithTokenErrors() {
         val body = { ByteArrayInputStream(ByteArray(0)) }
         assertEquals(Code.MissingResponseNonce, assertFailsWith<ProtocolError> { decryptResponseWithToken(response(body()), token) }.code)
-        assertEquals(Code.MissingResponseNonce, assertFailsWith<ProtocolError> { decryptResponseWithToken(response(body(), ResponseNonceHeader to ""), token) }.code)
+        assertEquals(Code.InvalidResponseNonce, assertFailsWith<ProtocolError> { decryptResponseWithToken(response(body(), ResponseNonceHeader to ""), token) }.code)
         assertEquals(Code.InvalidResponseNonce, assertFailsWith<ProtocolError> { decryptResponseWithToken(response(body(), ResponseNonceHeader to "zz"), token) }.code)
         assertEquals(Code.InvalidResponseNonce, assertFailsWith<ProtocolError> { decryptResponseWithToken(response(body(), ResponseNonceHeader to "ab".repeat(16)), token) }.code)
         assertEquals(Code.DuplicateResponseNonce, assertFailsWith<ProtocolError> {
