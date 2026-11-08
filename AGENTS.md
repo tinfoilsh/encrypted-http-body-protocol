@@ -26,7 +26,9 @@ script bumps `package.json` and tells you to run `npm install --package-lock-onl
 to finish syncing the lockfile.
 
 **Go** and **Swift** have no version to edit — they are released purely by the
-git tag, so creating the `v<new-version>` tag is what ships them.
+git tag, so creating the `v<new-version>` tag is what ships them. **Kotlin** is
+served by JitPack from the same tag (`jitpack.yml` builds `kotlin/`); the
+`Reproducible build` workflow then checks JitPack's jar against a clean build.
 
 ### Release steps
 

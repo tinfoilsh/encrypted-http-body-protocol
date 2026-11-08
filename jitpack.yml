@@ -1,0 +1,7 @@
+# JitPack builds the Kotlin client from the tagged commit. The Gradle project
+# lives in kotlin/, so a custom install step publishes it to the local Maven
+# repository JitPack collects from. -PnoAndroid: the artifact is the JVM jar.
+jdk:
+  - openjdk21
+install:
+  - cd kotlin && ./gradlew --no-daemon -PnoAndroid publishToMavenLocal
