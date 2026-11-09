@@ -32,7 +32,11 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # No cache here: a reproducibility check must build from the commit alone,
+      # and this workflow also runs on release tags (zizmor cache-poisoning).
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-disabled: true
 
       - name: Build once
         working-directory: kotlin
@@ -72,7 +76,11 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # No cache here: a reproducibility check must build from the commit alone,
+      # and this workflow also runs on release tags (zizmor cache-poisoning).
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-disabled: true
 
       - name: Build locally
         id: local
