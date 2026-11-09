@@ -86,10 +86,13 @@ on the configured origin, and reads only the first key configuration.
   after a failure the body stream rethrows the same error forever.
 - `getSessionRecoveryToken()` is readable as soon as the request body is
   encrypted and before it is sent, so it can be persisted ahead of a crash
-  (SPEC 6). As in the Go client it is cleared once the exchange is consumed:
-  the response was fully read, a newer request superseded it, or the exchange
-  failed (pass-through, key-config problem, or a body that stopped
-  authenticating). Persist it beforehand if you need it afterwards.
+  (SPEC 6). It is cleared once the exchange is consumed: the response was
+  fully read, a newer request superseded it, or the exchange failed
+  (pass-through, key-config problem, transport error, or a body that stopped
+  authenticating). Clearing on failure goes beyond SPEC 6.3, which names only
+  full decryption and supersession; it is a deliberate choice shared by the
+  Go, Python and Rust clients so that a failed exchange never leaves live key
+  material behind. Persist the token beforehand if you need it afterwards.
 
 ## Errors
 
