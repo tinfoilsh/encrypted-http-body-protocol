@@ -4,6 +4,12 @@ pluginManagement {
         google()
         mavenCentral()
     }
+    // Declared here so AGP is only resolved when android/ is actually included;
+    // a `plugins { ... apply false }` entry in the root build would fetch it for every build.
+    plugins {
+        kotlin("android") version "2.2.20"
+        id("com.android.library") version "8.13.0"
+    }
 }
 
 rootProject.name = "ehbp"
