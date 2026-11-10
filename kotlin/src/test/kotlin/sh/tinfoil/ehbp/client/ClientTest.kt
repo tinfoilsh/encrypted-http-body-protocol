@@ -142,6 +142,14 @@ class ClientTest {
     }
 
     @Test
+    fun emptyEncryptedResponseWithoutAChunkedBody() = EhbpTestServer(newIdentity()) { _, _ -> 200 to ByteArray(0) }.use { srv ->
+        srv.contentLength = true // Content-Length: 0 and no frames at all is a valid empty response
+        val resp = newTransport(srv.url).roundTrip(post("${srv.url}/x", "hi"))
+        assertEquals(200, resp.code)
+        assertEquals("", resp.body!!.string())
+    }
+
+    @Test
     fun tokenClearedWhenTheRequestCannotBeSent() {
         val port = java.net.ServerSocket(0).use { it.localPort } // closed again: nothing listens
         val tr = newTransportWithIdentity(newIdentity())
