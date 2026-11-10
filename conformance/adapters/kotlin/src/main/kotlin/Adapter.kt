@@ -27,7 +27,6 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
-import okhttp3.internal.http.HttpMethod
 import okio.BufferedSink
 import okio.BufferedSource
 import okio.buffer
@@ -245,7 +244,7 @@ fun doRequest(fx: JsonObject, r: Result) {
     // OkHttp insists on a body object for POST/PUT; a zero-length one is bodyless to the library.
     val body = when {
         bodyHex != null -> hex(bodyHex).toRequestBody()
-        HttpMethod.requiresRequestBody(method) -> ByteArray(0).toRequestBody()
+        method in setOf("POST", "PUT", "PATCH", "PROPPATCH", "REPORT") -> ByteArray(0).toRequestBody()
         else -> null
     }
     val builder = Request.Builder().url(serverURL + request.str("path")).method(method, body)
