@@ -64,7 +64,7 @@ jobs:
   jitpack:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -106,7 +106,8 @@ jobs:
           echo "URL: $url"
           # The first GET triggers the build. JitPack long-polls while building, so
           # each attempt can take the full 30 s: 60 attempts bound the loop to ~40 min,
-          # inside the job timeout, so the build.log tail below still runs.
+          # leaving the 60 min job headroom for checkout, the local build and the
+          # build.log tail below.
           code=000
           for i in $(seq 1 60); do
             code=$(curl -sL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || true)
