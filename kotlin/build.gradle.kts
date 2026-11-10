@@ -2,6 +2,10 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.2.20"
+    // Declared here, not in settings pluginManagement: the Kotlin plugin must load in
+    // the same classloader as AGP or kotlin("android") cannot see BaseVariant (CI failure).
+    kotlin("android") version "2.2.20" apply false
+    id("com.android.library") version "8.13.0" apply false
     `java-library`
     `maven-publish`
 }
