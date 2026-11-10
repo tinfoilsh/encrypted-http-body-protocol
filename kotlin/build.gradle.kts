@@ -2,8 +2,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.2.20"
-    kotlin("android") version "2.2.20" apply false
-    id("com.android.library") version "8.13.0" apply false
     `java-library`
     `maven-publish`
 }
@@ -59,4 +57,7 @@ tasks.test { useJUnitPlatform() }
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
+    // Entry modes come from the build host's umask otherwise.
+    filePermissions { unix("rw-r--r--") }
+    dirPermissions { unix("rwxr-xr-x") }
 }

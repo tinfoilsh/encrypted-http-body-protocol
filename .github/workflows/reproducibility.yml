@@ -64,7 +64,7 @@ jobs:
   jitpack:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -104,10 +104,12 @@ jobs:
           url="$base/ehbp-${version}.jar"
           log="$base/build.log"
           echo "URL: $url"
-          # The first GET triggers the build; poll up to ~15 min for slow builds.
+          # The first GET triggers the build. JitPack long-polls while building, so
+          # each attempt can take the full 30 s: 60 attempts bound the loop to ~40 min,
+          # inside the job timeout, so the build.log tail below still runs.
           code=000
-          for i in $(seq 1 90); do
-            code=$(curl -sL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || echo 000)
+          for i in $(seq 1 60); do
+            code=$(curl -sL -o /dev/null -w '%{http_code}' "$url" --max-time 30 || true)
             echo "Attempt $i: HTTP $code"
             [ "$code" = "200" ] && break
             sleep 10
