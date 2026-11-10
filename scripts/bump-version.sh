@@ -83,9 +83,10 @@ awk -v ver="$VERSION" '
 mv "$tmp" "$ROOT/rust/Cargo.lock"
 echo "  updated rust/Cargo.toml + Cargo.lock"
 
-# --- Kotlin: the Gradle project version ---
+# --- Kotlin: the Gradle project version and the JitPack coordinate in the README ---
 replace_in_file "s/^version *=.*/version = \"$VERSION\"/" "$ROOT/kotlin/build.gradle.kts"
-echo "  updated kotlin/build.gradle.kts"
+replace_in_file "s/(:ehbp:v)[0-9][^\"]*/\1$VERSION/" "$ROOT/kotlin/README.md"
+echo "  updated kotlin/build.gradle.kts + README.md"
 
 echo
 echo "Versions now set:"

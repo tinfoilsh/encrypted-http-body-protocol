@@ -19,7 +19,7 @@ The script updates every in-tree version and keeps the lockfiles in sync:
 | JavaScript | `js/package.json`, `js/package-lock.json`                             |
 | Python     | `python/pyproject.toml`, `python/src/ehbp/__init__.py` (`__version__`) |
 | Rust       | `rust/Cargo.toml`, `rust/Cargo.lock`                                   |
-| Kotlin     | `kotlin/build.gradle.kts`                                              |
+| Kotlin     | `kotlin/build.gradle.kts`, `kotlin/README.md` (install snippet)        |
 
 The JavaScript lockfile is updated through `npm`; if `npm` is not installed the
 script bumps `package.json` and tells you to run `npm install --package-lock-only`
