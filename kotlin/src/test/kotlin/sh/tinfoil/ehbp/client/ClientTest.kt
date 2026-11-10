@@ -49,10 +49,11 @@ class ClientTest {
     fun secureRoundTripAndTokenLifecycle() = echoServer().use { srv ->
         val tr = newTransport(srv.url)
         assertNull(tr.getSessionRecoveryToken())
+        srv.contentLength = true
         val resp = tr.roundTrip(post("${srv.url}/echo", "hello"))
         assertEquals(200, resp.code)
         assertNotNull(resp.header(ResponseNonceHeader))
-        assertNull(resp.header("Content-Length"))
+        assertNull(resp.header("Content-Length"), "the encrypted length must not describe the plaintext stream")
         assertNotNull(tr.getSessionRecoveryToken(), "token available until the body is consumed")
         assertEquals("hello", resp.body!!.string())
         assertNull(tr.getSessionRecoveryToken(), "token consumed at EOF")
@@ -121,10 +122,31 @@ class ClientTest {
     }
 
     @Test
+    fun bodylessRequestsDropCallerFramingHeaders() {
+        val seen = AtomicReference<String?>("unset")
+        EhbpTestServer(newIdentity()) { ex, _ -> seen.set(ex.requestHeaders.getFirst("Content-Length")); 200 to ByteArray(0) }.use { srv ->
+            // Go's transport never writes these from req.Header; OkHttp would send them verbatim on a
+            // bodyless request and the server would then wait for a body that never comes.
+            val http = OkHttpClient.Builder().readTimeout(2, TimeUnit.SECONDS).build()
+            val req = Request.Builder().url("${srv.url}/x").header("Content-Length", "5").header("Transfer-Encoding", "chunked").build()
+            assertEquals(200, newTransport(srv.url, http).roundTrip(req).code)
+            assertNull(seen.get())
+        }
+    }
+
+    @Test
     fun passThroughNeedsEveryNonceHeaderAbsent() = EhbpTestServer(newIdentity()) { _, _ -> 503 to ByteArray(0) }.use { srv ->
         // First value present, second empty: Go reads the first and fails DUPLICATE; so must we.
-        srv.tweak = { ex, framed -> ex.responseHeaders.add(ResponseNonceHeader, "00".repeat(32)); ex.responseHeaders.add(ResponseNonceHeader, "11".repeat(32)); framed }
+        srv.tweak = { ex, framed -> ex.responseHeaders.add(ResponseNonceHeader, "00".repeat(32)); ex.responseHeaders.add(ResponseNonceHeader, ""); framed }
         assertEquals(Code.DuplicateResponseNonce, assertFailsWith<ProtocolError> { newTransport(srv.url).roundTrip(post("${srv.url}/x", "hi")) }.code)
+    }
+
+    @Test
+    fun tokenClearedWhenTheRequestCannotBeSent() {
+        val port = java.net.ServerSocket(0).use { it.localPort } // closed again: nothing listens
+        val tr = newTransportWithIdentity(newIdentity())
+        assertFailsWith<IOException> { tr.roundTrip(post("http://127.0.0.1:$port/x", "hi")) }
+        assertNull(tr.getSessionRecoveryToken(), "token consumed by the transport failure")
     }
 
     @Test
@@ -209,8 +231,10 @@ class ClientTest {
         val hits = AtomicInteger()
         EhbpTestServer(newIdentity()) { _, body -> hits.incrementAndGet(); 200 to body }.use { srv ->
             val tr = newTransportWithConfig(srv.url, srv.identity.marshalConfig())
-            val reserved = Request.Builder().url("${srv.url}/x").header(ResponseNonceHeader, "0".repeat(64)).post("x".toByteArray().toRequestBody()).build()
-            assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(reserved) }.code)
+            for (name in listOf(ResponseNonceHeader, EncapsulatedKeyHeader)) {
+                val reserved = Request.Builder().url("${srv.url}/x").header(name, "0".repeat(64)).post("x".toByteArray().toRequestBody()).build()
+                assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(reserved) }.code)
+            }
             assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(post("http://attacker.invalid/x", "x")) }.code)
             assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(post("http://127.0.0.1:${port(srv).toInt() + 1}/x", "x")) }.code)
             assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(post("http://u:p@127.0.0.1:${port(srv)}/x", "x")) }.code)
@@ -244,7 +268,8 @@ class ClientTest {
     @Test
     fun transportWithIdentityEnforcesNoOrigin() = echoServer().use { srv ->
         val tr = newTransportWithIdentity(srv.identity)
-        assertEquals("ok", tr.roundTrip(post("${srv.url}/x", "ok")).body!!.string())
+        // A different host string for the same listener: an origin pin would reject it.
+        assertEquals("ok", tr.roundTrip(post("http://localhost:${port(srv)}/x", "ok")).body!!.string())
     }
 
     @Test

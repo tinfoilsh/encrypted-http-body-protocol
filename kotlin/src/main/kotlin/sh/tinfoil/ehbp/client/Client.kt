@@ -76,9 +76,9 @@ class Transport internal constructor(
 
     /**
      * validateRequest rejects requests that would let the caller influence the
-     * authority or the protocol headers the library owns. OkHttp derives
-     * Content-Length and Transfer-Encoding from the body and the Host header is
-     * cleared during encryption, so only the Ehbp-* headers are reserved here.
+     * authority or the protocol headers the library owns. Content-Length,
+     * Transfer-Encoding and Host are stripped in roundTrip (OkHttp only derives
+     * the first two when a body exists), so only the Ehbp-* headers are reserved here.
      */
     private fun validateRequest(req: Request) {
         val url = req.url
@@ -108,10 +108,10 @@ class Transport internal constructor(
             ++requestGeneration
         }
 
-        // Like Go clearing req.Host: OkHttp sends a caller-set Host header verbatim, so a
-        // caller could address another virtual host while the URL passes the origin check.
-        // Clear it so the wire Host always follows the validated URL, bodyless requests included.
-        val cleaned = req.newBuilder().removeHeader("Host").build()
+        // Like Go's transport, which never writes these three from req.Header: OkHttp sends a
+        // caller-set Host verbatim (a different virtual host behind a URL that passes the origin
+        // check) and, on a bodyless request, caller-set Content-Length / Transfer-Encoding too.
+        val cleaned = req.newBuilder().removeHeader("Host").removeHeader("Content-Length").removeHeader("Transfer-Encoding").build()
 
         // For bodyless requests reqCtx is null: the response passes through unencrypted.
         val (newReq, reqCtx) = serverIdentity.encryptRequestWithContext(cleaned)

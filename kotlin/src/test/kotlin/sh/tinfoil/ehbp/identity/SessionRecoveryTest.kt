@@ -125,6 +125,8 @@ class SessionRecoveryTest {
     fun rejectsOversizedChunkBeforeReading() {
         val body = decrypt(ByteBuffer.allocate(4).putInt((64 shl 20) + 1).array())
         assertEquals(Code.ChunkTooLarge, assertFailsWith<ProtocolError> { body.read() }.code)
+        val wrapped = decrypt(byteArrayOf(-1, -1, -1, -1)) // 0xFFFFFFFF: negative as a signed Int
+        assertEquals(Code.ChunkTooLarge, assertFailsWith<ProtocolError> { wrapped.read() }.code)
         val max = decrypt(ByteBuffer.allocate(4).putInt(64 shl 20).array() + ByteArray(16))
         assertEquals(Code.FramingTruncated, assertFailsWith<ProtocolError> { max.read() }.code)
     }
