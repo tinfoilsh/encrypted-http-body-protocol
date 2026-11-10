@@ -67,6 +67,8 @@ class EhbpTestServer(
     /** Replace the encrypted frames and nonce header just before sending. */
     var tweak: (HttpExchange, ByteArray) -> ByteArray = { _, framed -> framed }
     var suppressNonce = false
+    /** Send the encrypted body with a Content-Length instead of chunked, as a proxy might. */
+    var contentLength = false
 
     init {
         server.createContext("/.well-known/hpke-keys") { ex ->
@@ -96,7 +98,7 @@ class EhbpTestServer(
         val aead = deriveResponseKeys(recipient.export(ExportLabel.toByteArray(), ExportLength), enc, nonce).newResponseAEAD()
         val framed = tweak(ex, sealFrames(aead, *body.toList().chunked(8192).map { it.toByteArray() }.toTypedArray()))
         if (!suppressNonce && !ex.responseHeaders.containsKey(ResponseNonceHeader)) ex.responseHeaders.set(ResponseNonceHeader, nonce.toHex())
-        ex.sendResponseHeaders(status, 0) // chunked
+        ex.sendResponseHeaders(status, if (contentLength) framed.size.toLong() else 0) // 0 = chunked
         ex.responseBody.use { it.write(framed) }
     }
 
