@@ -229,9 +229,14 @@ impl ResponseDecryptor {
         }
     }
 
+    /// True while bytes of an incomplete length prefix or frame are buffered.
+    pub(crate) fn has_partial_frame(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
     /// Validates that source EOF occurred on a frame boundary.
     pub fn finish(&self) -> Result<()> {
-        if self.buffer.is_empty() {
+        if !self.has_partial_frame() {
             Ok(())
         } else {
             Err(Error::Coded(
