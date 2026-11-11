@@ -67,7 +67,8 @@ class SessionRecoveryTest {
             """{"exportedSecret": "${good}0", "requestEnc": "$good"}""",
             """{"exportedSecret": "${"ab".repeat(16)}", "requestEnc": "$good"}""",
             """{"exportedSecret": "$good", "requestEnc": "${"ab".repeat(31)}"}""",
-            """{"exportedSecret": null, "requestEnc": "$good"}""")
+            """{"exportedSecret": null, "requestEnc": "$good"}""",
+            "[".repeat(50_000)) // nested arrays overflow kotlinx's parser: still INVALID_TOKEN, not an Error
         for (j in bad) assertEquals(Code.InvalidToken, assertFailsWith<ProtocolError> { SessionRecoveryToken.fromJson(j) }.code, j)
     }
 

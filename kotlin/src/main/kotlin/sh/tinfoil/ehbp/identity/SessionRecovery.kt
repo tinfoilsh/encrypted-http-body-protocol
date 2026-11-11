@@ -1,7 +1,6 @@
 // Mirrors identity/session_recovery.go.
 package sh.tinfoil.ehbp.identity
 
-import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -32,7 +31,7 @@ class SessionRecoveryToken(val exportedSecret: ByteArray, val requestEnc: ByteAr
         fun fromJson(data: String): SessionRecoveryToken {
             val obj = try {
                 Json.parseToJsonElement(data)
-            } catch (e: SerializationException) {
+            } catch (e: Throwable) { // includes StackOverflowError: kotlinx recurses on nested arrays
                 throw ProtocolError(Code.InvalidToken, "invalid token", e)
             } as? JsonObject ?: throw ProtocolError(Code.InvalidToken, "invalid token: not a JSON object")
 
