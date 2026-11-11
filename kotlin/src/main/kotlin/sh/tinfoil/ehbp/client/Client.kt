@@ -1,6 +1,7 @@
 // Mirrors client/client.go.
 package sh.tinfoil.ehbp.client
 
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -180,19 +181,20 @@ class Transport internal constructor(
 
         val problem = try {
             Json.parseToJsonElement(bodyBytes.decodeToString())
-        } catch (_: Throwable) { // malformed JSON, or a StackOverflowError: kotlinx recurses on nested arrays
+        } catch (_: SerializationException) {
+            return none
+        } catch (_: StackOverflowError) { // kotlinx recurses on nested arrays: not a problem document
             return none
         } as? JsonObject ?: return none
-        // Go decodes into {type string; title string}: a non-string field is a decode error,
-        // and encoding/json matches keys case-insensitively when no exact key exists.
+        // Go decodes into {type string; title string}: a non-string field is a decode error.
+        // JSON member names are case-sensitive: only the exact keys are read.
         fun str(el: JsonElement?): String? = when {
             el == null || el is JsonNull -> ""
             el is JsonPrimitive && el.isString -> el.content
             else -> null
         }
-        fun field(name: String) = problem[name] ?: problem.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
-        val type = str(field("type")) ?: return none
-        val title = str(field("title")) ?: return none
+        val type = str(problem["type"]) ?: return none
+        val title = str(problem["title"]) ?: return none
         if (type != KeyConfigProblemType) return none
         return true to title
     }
