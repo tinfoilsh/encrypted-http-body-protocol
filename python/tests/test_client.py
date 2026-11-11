@@ -81,6 +81,14 @@ def test_streaming_request_closed_early_consumes_session_recovery_token(make_ser
     assert client.get_session_recovery_token() is None
 
 
+def _client_with_handler(server: MockServer, handler) -> Client:
+    return Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
 def test_older_stream_completion_does_not_clear_newer_recovery_token(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
@@ -130,11 +138,7 @@ def test_older_request_cannot_publish_or_clear_newer_recovery_token(
                 raise RuntimeError("timed out waiting to release newer request")
         return server.handler(request)
 
-    client = Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    client = _client_with_handler(server, handler)
     errors = []
 
     def run_older():
@@ -277,11 +281,7 @@ def _problem_client(server: MockServer, body: bytes, headers=None) -> Client:
             422, headers=headers or {"content-type": "application/problem+json"}, content=body
         )
 
-    return Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    return _client_with_handler(server, handler)
 
 
 @pytest.mark.parametrize(
@@ -289,7 +289,7 @@ def _problem_client(server: MockServer, body: bytes, headers=None) -> Client:
     [
         b'{"Type": "urn:ietf:params:ehbp:error:key-config"}',  # key is case-sensitive
         b'{"type": "urn:ietf:params:ehbp:error:key-config"}' + b" " * (64 * 1024),  # over 64 KiB
-        b"[" * 50000 + b"]" * 50000,  # deep nesting must not raise RecursionError
+        b"[" * 30000 + b"]" * 30000,  # under the 64 KiB cap so deep nesting reaches json.loads
     ],
 )
 def test_non_matching_422_problem_passes_through(server: MockServer, body: bytes):
@@ -316,11 +316,7 @@ def _nonce_client(server: MockServer, nonce_value: str, status: int = 200) -> Cl
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, headers={RESPONSE_NONCE_HEADER: nonce_value}, content=b"")
 
-    return Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    return _client_with_handler(server, handler)
 
 
 @pytest.mark.parametrize("status", [200, 502])
@@ -341,11 +337,7 @@ def test_transport_failure_mid_frame_is_framing_truncated(server: MockServer):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={RESPONSE_NONCE_HEADER: "00" * 32}, stream=Broken())
 
-    client = Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    client = _client_with_handler(server, handler)
     with pytest.raises(FramingTruncatedError):
         client.post("/v1/echo", body=b"payload")
     with pytest.raises(FramingTruncatedError), client.stream(

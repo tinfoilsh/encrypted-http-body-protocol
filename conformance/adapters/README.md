@@ -10,8 +10,11 @@ extensible: to add a language you copy this shape and fill in the public-API cal
 - **Output:** one normalized result JSON object on stdout (see
   `../schema/result.schema.json`). Exit 0 even for `outcome: error`; reserve a
   non-zero exit and stderr for an adapter crash (a bug in the adapter itself).
-- **Environment:** `ORACLE_URL` and the two loopback discovery endpoints
-  `ORACLE_BAD_CT_URL` / `ORACLE_NON200_URL`.
+- **Environment:** `ORACLE_URL`, plus one `ORACLE_<TARGET>_URL` per auxiliary
+  oracle listener (`bad_ct`, `non200`, `ct_params`, `status203`, `redirect`,
+  `trailing`, and any future target). A fixture's `inputs.target` names the
+  listener; the adapter upper-cases it to look up `ORACLE_<TARGET>_URL` and
+  falls back to `ORACLE_URL` when unset.
 
 ## Required shape
 
