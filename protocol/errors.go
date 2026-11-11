@@ -56,8 +56,7 @@ func Errorf(code Code, format string, args ...any) error {
 
 // CodeOf returns the canonical code found anywhere in err's chain, or "" if none.
 func CodeOf(err error) Code {
-	var e *Error
-	if errors.As(err, &e) {
+	if e, ok := errors.AsType[*Error](err); ok {
 		return e.Code
 	}
 	return ""

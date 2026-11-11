@@ -107,11 +107,12 @@ func main() {
 	}
 	mainKeys := "http://" + mainLn.Addr().String() + protocol.KeysPath
 	aux := []string{"bad_ct", "non200", "ct_params", "status203", "redirect", "trailing"}
-	line := "listening main=" + mainLn.Addr().String()
+	var line strings.Builder
+	line.WriteString("listening main=" + mainLn.Addr().String())
 	for _, mode := range aux {
-		line += fmt.Sprintf(" %s=%s", mode, serveBadConfig(net.JoinHostPort(host, "0"), id, mode, mainKeys))
+		line.WriteString(fmt.Sprintf(" %s=%s", mode, serveBadConfig(net.JoinHostPort(host, "0"), id, mode, mainKeys)))
 	}
-	fmt.Println(line)
+	fmt.Println(line.String())
 	log.Printf("oracle: public key %s", id.MarshalPublicKeyHex())
 	log.Fatal(http.Serve(mainLn, mux))
 }
@@ -162,7 +163,9 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key")
+		// X-Caller is the caller-supplied header the request_meta scenario echoes
+		// (SPEC 5.1: caller headers are preserved); browsers preflight it.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key, X-Caller")
 		w.Header().Set("Access-Control-Expose-Headers", "Ehbp-Response-Nonce, Ehbp-Encapsulated-Key, Content-Type, X-Oracle-Public-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)

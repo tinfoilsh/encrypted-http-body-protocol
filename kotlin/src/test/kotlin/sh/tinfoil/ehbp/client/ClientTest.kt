@@ -257,7 +257,7 @@ class ClientTest {
 
             // SPEC 5.4.2: JSON member names are case-sensitive; "Type" is not the type member.
             body = """{"Type":"urn:ietf:params:ehbp:error:key-config","Title":"rotated"}"""
-            assertEquals(422, tr.roundTrip(post("${srv.url}/x", "hi")).code)
+            tr.roundTrip(post("${srv.url}/x", "hi")).use { resp -> assertEquals(422, resp.code) }
 
             // A non-string title falls back to the default; the type member alone decides.
             body = """{"type":"urn:ietf:params:ehbp:error:key-config","title":7}"""
