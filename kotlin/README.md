@@ -81,13 +81,22 @@ on the configured origin, and reads only the first key configuration.
   (`MISSING_RESPONSE_NONCE`); a non-2xx response without the header is returned
   as an unauthenticated pass-through.
 - A 422 `application/problem+json` key-config problem throws `KeyConfigError`
-  (code `KEY_CONFIG_MISMATCH`): refresh the key config and retry.
+  (code `KEY_CONFIG_MISMATCH`): refresh the key config and retry. Detection
+  (SPEC 5.4.2) applies only to responses without `Ehbp-Response-Nonce`; the
+  body must be a JSON object of at most 64 KiB whose exact, case-sensitive
+  `type` member is the key-config URN. `title` is used when it is a string,
+  otherwise the message is `key configuration mismatch`. Anything else passes
+  through as a plaintext 422.
+- `Ehbp-Encapsulated-Key`, `Ehbp-Response-Nonce` and `Host` are reserved
+  (SPEC 5.1): a caller-set value is `INVALID_INPUT`. Caller-set
+  `Content-Length` / `Transfer-Encoding` are dropped; the library frames the body.
 - Response plaintext is released frame by frame as each frame authenticates;
   after a failure the body stream rethrows the same error forever.
 - `getSessionRecoveryToken()` is readable as soon as the request body is
   encrypted and before it is sent, so it can be persisted ahead of a crash
   (SPEC 6). It is cleared once the exchange is consumed (SPEC 6.3): the
-  response was fully read, a newer request superseded it, or the exchange
+  response was fully read, its body was closed before EOF, a newer request
+  superseded it, or the exchange
   failed (pass-through, key-config problem, transport error, or a body that
   stopped authenticating). Persist the token beforehand if you need it
   afterwards.

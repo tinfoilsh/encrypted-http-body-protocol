@@ -110,15 +110,30 @@ class ClientTest {
     }
 
     @Test
-    fun hostHeaderFollowsTheUrlForEveryRequest() {
+    fun hostHeaderFollowsTheUrlAndCallersCannotSetIt() {
         val seen = ArrayList<String>()
         EhbpTestServer(newIdentity()) { ex, body -> seen += ex.requestHeaders.getFirst("Host"); 200 to body }.use { srv ->
             val tr = newTransport(srv.url)
-            tr.roundTrip(Request.Builder().url("${srv.url}/x").header("Host", "attacker.invalid").build()).body!!.bytes()
-            tr.roundTrip(Request.Builder().url("${srv.url}/x").header("Host", "attacker.invalid").post("b".toByteArray().toRequestBody()).build()).body!!.bytes()
+            // SPEC 5.1: Host is reserved; a caller-supplied value is rejected before anything is sent.
+            for (req in listOf(Request.Builder().url("${srv.url}/x").header("Host", "attacker.invalid").build(),
+                Request.Builder().url("${srv.url}/x").header("host", "attacker.invalid").post("b".toByteArray().toRequestBody()).build())) {
+                assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { tr.roundTrip(req) }.code)
+            }
+            tr.roundTrip(Request.Builder().url("${srv.url}/x").build()).body!!.bytes()
+            tr.roundTrip(post("${srv.url}/x", "b")).body!!.bytes()
             val expected = srv.url.removePrefix("http://")
             assertEquals(listOf(expected, expected), seen)
         }
+    }
+
+    @Test
+    fun closingTheBodyBeforeEofConsumesTheToken() = echoServer().use { srv ->
+        val tr = newTransport(srv.url)
+        val resp = tr.roundTrip(post("${srv.url}/echo", "hello"))
+        assertEquals('h'.code, resp.body!!.byteStream().read())
+        assertNotNull(tr.getSessionRecoveryToken(), "token available while the body is open")
+        resp.close()
+        assertNull(tr.getSessionRecoveryToken(), "an abandoned body consumes the token (SPEC 6.3)")
     }
 
     @Test
@@ -240,9 +255,13 @@ class ClientTest {
             assertEquals(body.length, deep.body!!.bytes().size)
             assertNull(tr.getSessionRecoveryToken(), "pass-through consumes the token")
 
-            // Go's encoding/json matches keys case-insensitively; so do we.
+            // SPEC 5.4.2: JSON member names are case-sensitive; "Type" is not the type member.
             body = """{"Type":"urn:ietf:params:ehbp:error:key-config","Title":"rotated"}"""
-            assertEquals("KEY_CONFIG_MISMATCH: rotated", assertFailsWith<KeyConfigError> { tr.roundTrip(post("${srv.url}/x", "hi")) }.message)
+            assertEquals(422, tr.roundTrip(post("${srv.url}/x", "hi")).code)
+
+            // A non-string title falls back to the default; the type member alone decides.
+            body = """{"type":"urn:ietf:params:ehbp:error:key-config","title":7}"""
+            assertEquals("KEY_CONFIG_MISMATCH: key configuration mismatch", assertFailsWith<KeyConfigError> { tr.roundTrip(post("${srv.url}/x", "hi")) }.message)
         }
     }
 

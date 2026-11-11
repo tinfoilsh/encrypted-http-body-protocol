@@ -1,9 +1,8 @@
 // Mirrors client/client.go.
 package sh.tinfoil.ehbp.client
 
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl
@@ -75,9 +74,9 @@ class Transport internal constructor(
 
     /**
      * validateRequest rejects requests that would let the caller influence the
-     * authority or the protocol headers the library owns. Content-Length,
-     * Transfer-Encoding and Host are stripped in roundTrip (OkHttp only derives
-     * the first two when a body exists), so only the Ehbp-* headers are reserved here.
+     * authority or the protocol headers the library owns (SPEC 5.1): the Ehbp-*
+     * headers and Host. Content-Length and Transfer-Encoding are stripped in
+     * roundTrip instead (OkHttp only derives them when a body exists).
      */
     private fun validateRequest(req: Request) {
         val url = req.url
@@ -88,7 +87,7 @@ class Transport internal constructor(
             throw ProtocolError(Code.InvalidInput, "request URL must use the configured origin: $origin")
         }
         for (name in req.headers.names()) {
-            if (name.equals(EncapsulatedKeyHeader, true) || name.equals(ResponseNonceHeader, true)) {
+            if (name.equals(EncapsulatedKeyHeader, true) || name.equals(ResponseNonceHeader, true) || name.equals("Host", true)) {
                 throw ProtocolError(Code.InvalidInput, "reserved request header cannot be set by callers: $name")
             }
         }
@@ -107,10 +106,9 @@ class Transport internal constructor(
             ++requestGeneration
         }
 
-        // Like Go's transport, which never writes these three from req.Header: OkHttp sends a
-        // caller-set Host verbatim (a different virtual host behind a URL that passes the origin
-        // check) and, on a bodyless request, caller-set Content-Length / Transfer-Encoding too.
-        val cleaned = req.newBuilder().removeHeader("Host").removeHeader("Content-Length").removeHeader("Transfer-Encoding").build()
+        // Like Go's transport, which never writes these from req.Header: on a bodyless request
+        // OkHttp would send caller-set Content-Length / Transfer-Encoding verbatim.
+        val cleaned = req.newBuilder().removeHeader("Content-Length").removeHeader("Transfer-Encoding").build()
 
         // For bodyless requests reqCtx is null: the response passes through unencrypted.
         val (newReq, reqCtx) = serverIdentity.encryptRequestWithContext(cleaned)
@@ -180,21 +178,15 @@ class Transport internal constructor(
 
         val problem = try {
             Json.parseToJsonElement(bodyBytes.decodeToString())
-        } catch (_: Throwable) { // malformed JSON, or a StackOverflowError: kotlinx recurses on nested arrays
+        } catch (_: SerializationException) {
+            return none
+        } catch (_: StackOverflowError) { // kotlinx recurses on nested arrays: not a problem document
             return none
         } as? JsonObject ?: return none
-        // Go decodes into {type string; title string}: a non-string field is a decode error,
-        // and encoding/json matches keys case-insensitively when no exact key exists.
-        fun str(el: JsonElement?): String? = when {
-            el == null || el is JsonNull -> ""
-            el is JsonPrimitive && el.isString -> el.content
-            else -> null
-        }
-        fun field(name: String) = problem[name] ?: problem.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
-        val type = str(field("type")) ?: return none
-        val title = str(field("title")) ?: return none
-        if (type != KeyConfigProblemType) return none
-        return true to title
+        // SPEC 5.4.2: the exact, case-sensitive "type" member decides; "title" is used only when it is a string.
+        fun str(name: String) = (problem[name] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        if (str("type") != KeyConfigProblemType) return none
+        return true to str("title").orEmpty()
     }
 }
 
@@ -216,6 +208,12 @@ private class TokenOwningInputStream(src: InputStream, private val onDone: () ->
         return n
     }
 
+    /** Close ends the exchange whatever was read (SPEC 6.3): a body abandoned before EOF consumes its token too. */
+    override fun close() {
+        finish()
+        super.close()
+    }
+
     private fun finish() {
         if (!done) {
             done = true
@@ -224,8 +222,11 @@ private class TokenOwningInputStream(src: InputStream, private val onDone: () ->
     }
 }
 
-private fun isProblemJSONContentType(contentType: String): Boolean =
-    contentType.substringBefore(';').trim().equals(ProblemJSONMediaType, ignoreCase = true)
+/** isMediaType reports whether contentType's media type is want, compared case-insensitively with any parameters ignored. */
+private fun isMediaType(contentType: String, want: String): Boolean =
+    contentType.substringBefore(';').trim().equals(want, ignoreCase = true)
+
+private fun isProblemJSONContentType(contentType: String): Boolean = isMediaType(contentType, ProblemJSONMediaType)
 
 /** parseOrigin validates a base URL: http(s) scheme, a host, and no credentials. */
 private fun parseOrigin(server: String): HttpUrl {
@@ -245,7 +246,7 @@ private fun syncServerPublicKey(server: HttpUrl, httpClient: OkHttpClient): Iden
     discoveryClient.newCall(Request.Builder().url(keysURL).build()).execute().use { resp ->
         if (resp.code != 200) throw ProtocolError(Code.InvalidKeyConfig, "server returned status ${resp.code}")
         val contentType = resp.header("Content-Type").orEmpty()
-        if (contentType != KeysMediaType) throw ProtocolError(Code.InvalidKeyConfig, "server returned invalid content type: $contentType")
+        if (!isMediaType(contentType, KeysMediaType)) throw ProtocolError(Code.InvalidKeyConfig, "server returned invalid content type: $contentType")
         // Only the first key_config is used. Its suite list has a uint16 length,
         // so reading that config alone bounds discovery memory even when the
         // endpoint sends an unbounded stream of trailing configs or junk.
