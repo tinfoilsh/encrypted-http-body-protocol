@@ -37,6 +37,8 @@ struct Out {
     peak_rss_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_before_response: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_after_exchange: Option<bool>,
 }
 
 #[tokio::main]
@@ -101,11 +103,12 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
         "request" => request(fx, out).await?,
         "large_body" => large_body(fx, out).await?,
         "token_before_response" => token_before_response(fx, out).await?,
+        "token_after_exchange" => token_after_exchange(fx, out).await?,
         "discover" => {
             Client::new(&discover_target(fx)).await?;
         }
         "reject_reserved_header" | "reject_cross_origin" | "reject_url_credentials" => {
-            harden(op).await?;
+            harden(fx, op).await?;
         }
         other => {
             return Err(Error::Coded(
@@ -117,23 +120,34 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
     Ok(())
 }
 
+/// Discovery variants are exposed as ORACLE_<TARGET>_URL (operations.md).
 fn discover_target(fx: &Value) -> String {
-    let var = match fx["inputs"]["target"].as_str().unwrap_or("") {
-        "bad_ct" => "ORACLE_BAD_CT_URL",
-        "non200" => "ORACLE_NON200_URL",
-        _ => "ORACLE_URL",
-    };
-    std::env::var(var).unwrap_or_default()
+    let target = fx["inputs"]["target"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if !target.is_empty() && target != "ORACLE_URL" {
+        if let Ok(url) = std::env::var(format!("ORACLE_{target}_URL")) {
+            return url;
+        }
+    }
+    std::env::var("ORACLE_URL").unwrap_or_default()
 }
 
-async fn harden(op: &str) -> Result<(), Error> {
+async fn harden(fx: &Value, op: &str) -> Result<(), Error> {
     let base = std::env::var("ORACLE_URL").unwrap_or_default();
     let client = Client::new(&base).await?;
     match op {
         "reject_reserved_header" => {
-            client
-                .post("/s/echo")?
-                .header("ehbp-encapsulated-key", "x")?;
+            let name = fx["inputs"]["header"]
+                .as_str()
+                .unwrap_or(RESPONSE_NONCE_HEADER);
+            let value = if name.eq_ignore_ascii_case("host") {
+                "attacker.invalid".to_string()
+            } else {
+                "0".repeat(64)
+            };
+            client.post("/s/echo")?.header(name, value.as_str())?;
         }
         "reject_cross_origin" => {
             client.get("http://other.example/x")?;
@@ -186,6 +200,45 @@ fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
 async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
     let base = std::env::var("ORACLE_URL").unwrap_or_default();
     let client = Client::new(&base).await?;
+    exchange(&client, fx, out).await
+}
+
+/// Runs the fixture request, then reports whether the public token accessor
+/// still returns a token (SPEC 6.3), also when the exchange failed.
+async fn token_after_exchange(fx: &Value, out: &mut Out) -> Result<(), Error> {
+    let base = std::env::var("ORACLE_URL").unwrap_or_default();
+    let client = Client::new(&base).await?;
+    let result = if fx["inputs"]["close_early"].as_bool().unwrap_or(false) {
+        close_early(&client, fx, out).await
+    } else {
+        exchange(&client, fx, out).await
+    };
+    out.token_after_exchange = Some(client.get_session_recovery_token().is_some());
+    result
+}
+
+/// Reads at most one frame of the streaming body, then drops the stream.
+async fn close_early(client: &Client, fx: &Value, out: &mut Out) -> Result<(), Error> {
+    let resp = build(client, fx)?.send_stream().await?;
+    out.status = Some(resp.status().as_u16());
+    out.response_headers = Some(subset_headers(|n| {
+        resp.headers().get(n).and_then(|v| v.to_str().ok())
+    }));
+    let mut stream = resp.into_stream();
+    let _ = futures_util::StreamExt::next(&mut stream).await;
+    drop(stream);
+    out.body_hex = None;
+    Ok(())
+}
+
+fn subset_headers<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Map<String, Value> {
+    HEADER_SUBSET
+        .iter()
+        .filter_map(|name| get(name).map(|v| (name.to_string(), Value::String(v.to_string()))))
+        .collect()
+}
+
+fn build(client: &Client, fx: &Value) -> Result<tinfoil_ehbp::RequestBuilder, Error> {
     let req = &fx["request"];
     let path = req["path"].as_str().unwrap_or("/");
 
@@ -210,16 +263,13 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
     if req["body_hex"].is_string() {
         builder = builder.body(h(req, "body_hex")?);
     }
+    Ok(builder)
+}
 
-    let resp = builder.send().await?;
+async fn exchange(client: &Client, fx: &Value, out: &mut Out) -> Result<(), Error> {
+    let resp = build(client, fx)?.send().await?;
     out.status = Some(resp.status().as_u16());
-
-    let mut headers = Map::new();
-    for name in HEADER_SUBSET {
-        if let Some(v) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
-            headers.insert(name.to_string(), Value::String(v.to_string()));
-        }
-    }
+    let headers = subset_headers(|n| resp.headers().get(n).and_then(|v| v.to_str().ok()));
     let no_nonce = !headers.contains_key(&RESPONSE_NONCE_HEADER.to_ascii_lowercase());
     out.response_headers = Some(headers);
     let status = resp.status();

@@ -57,9 +57,11 @@ impl Client {
     ) -> Result<Self> {
         let base_url = parse_base_url(base_url.as_ref())?;
         let keys_url = base_url.join(KEYS_PATH)?;
+        // SPEC 3.1: status 200 only; the default client never follows redirects,
+        // so a 3xx surfaces here. A caller-supplied client must do the same.
         let response = http_client.get(keys_url).send().await?;
         let status = response.status();
-        if !status.is_success() {
+        if status != StatusCode::OK {
             return Err(Error::Coded(
                 Code::InvalidKeyConfig,
                 format!("server returned status {status} while fetching key configuration"),
@@ -434,7 +436,13 @@ impl Client {
             self.dispatch(method, url, headers, body, timeout).await?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES).await?;
+        let encrypted = token.is_some() && headers.contains_key(RESPONSE_NONCE_HEADER);
+        let body = read_response_body_capped(response, DEFAULT_MAX_RESPONSE_BYTES)
+            .await
+            .map_err(|err| match err {
+                Error::Http(err) if encrypted => framing_transport_error(err),
+                other => other,
+            })?;
 
         let Some(token) = token else {
             return Ok(Response {
@@ -1079,7 +1087,7 @@ fn decrypt_response_stream(
         let mut decryptor = ResponseDecryptor::from_key_material(key_material);
 
         while let Some(chunk) = poll_next(&mut stream).await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(framing_transport_error)?;
             decryptor.feed(&chunk);
             while let Some(plaintext) = decryptor.next_frame()? {
                 yield Bytes::from(plaintext);
@@ -1088,6 +1096,15 @@ fn decrypt_response_stream(
 
         decryptor.finish()?;
     }
+}
+
+/// SPEC 5.5: a transport failure inside an encrypted body is FRAMING_TRUNCATED,
+/// like an EOF there; the frames that authenticated were already delivered.
+fn framing_transport_error(err: reqwest::Error) -> Error {
+    Error::Coded(
+        Code::FramingTruncated,
+        format!("transport failed inside the encrypted body: {err}"),
+    )
 }
 
 async fn poll_next<S>(stream: &mut S) -> Option<S::Item>
@@ -1342,6 +1359,19 @@ mod tests {
     }
 
     async fn client_with_unencrypted_response(status: StatusCode) -> Client {
+        let body = b"upstream unavailable";
+        let header = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nX-Upstream: proxy\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap(),
+            body.len(),
+        );
+        client_with_raw_response([header.as_bytes(), body].concat()).await
+    }
+
+    /// Serves `raw` verbatim once the encrypted request body has arrived, then
+    /// closes the connection.
+    async fn client_with_raw_response(raw: Vec<u8>) -> Client {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1360,15 +1390,7 @@ mod tests {
                 }
             }
 
-            let body = b"upstream unavailable";
-            let header = format!(
-                "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nX-Upstream: proxy\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                status.as_u16(),
-                status.canonical_reason().unwrap(),
-                body.len(),
-            );
-            socket.write_all(header.as_bytes()).await.unwrap();
-            socket.write_all(body).await.unwrap();
+            socket.write_all(&raw).await.unwrap();
         });
 
         let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
@@ -1424,6 +1446,59 @@ mod tests {
             .unwrap()
             .concat();
         assert_eq!(body, b"upstream unavailable");
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    /// A 200 with a valid nonce whose body is cut by the transport two bytes
+    /// into a length prefix: Content-Length promises more than is sent.
+    async fn client_with_transport_cut_mid_frame() -> Client {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\n{RESPONSE_NONCE_HEADER}: {}\r\nContent-Length: 64\r\nConnection: close\r\n\r\n",
+            "ab".repeat(RESPONSE_NONCE_LENGTH)
+        );
+        client_with_raw_response([header.as_bytes(), &[0u8, 0u8]].concat()).await
+    }
+
+    #[tokio::test]
+    async fn buffered_transport_failure_inside_encrypted_body_is_framing_truncated() {
+        let client = client_with_transport_cut_mid_frame().await;
+        let err = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, Error::Coded(Code::FramingTruncated, _)),
+            "{err}"
+        );
+        assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn streaming_transport_failure_inside_encrypted_body_is_framing_truncated() {
+        let client = client_with_transport_cut_mid_frame().await;
+        let response = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send_stream()
+            .await
+            .unwrap();
+        let err = response
+            .into_stream()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, Error::Coded(Code::FramingTruncated, _)),
+            "{err}"
+        );
         assert!(client.get_session_recovery_token().is_none());
     }
 
@@ -1943,6 +2018,13 @@ mod tests {
     }
 
     async fn serve_key_config(content_type: &'static str) -> String {
+        serve_key_config_with_status("200 OK", content_type).await
+    }
+
+    async fn serve_key_config_with_status(
+        status_line: &'static str,
+        content_type: &'static str,
+    ) -> String {
         let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
         let config = identity.marshal_public_config();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1953,7 +2035,7 @@ mod tests {
             let mut buf = [0u8; 1024];
             let _ = socket.read(&mut buf).await.unwrap();
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+                "HTTP/1.1 {status_line}\r\nContent-Type: {content_type}\r\nLocation: /elsewhere\r\nContent-Length: {}\r\n\r\n",
                 config.len()
             );
             socket.write_all(header.as_bytes()).await.unwrap();
@@ -1988,6 +2070,18 @@ mod tests {
             .unwrap();
 
         assert!(matches!(err, Error::Coded(Code::InvalidKeyConfig, _)));
+    }
+
+    #[tokio::test]
+    async fn key_config_requires_status_200_and_never_follows_redirects() {
+        for status_line in ["203 Non-Authoritative Information", "302 Found"] {
+            let base_url = serve_key_config_with_status(status_line, KEYS_MEDIA_TYPE).await;
+            let err = Client::new(base_url).await.err().unwrap();
+            assert!(
+                matches!(err, Error::Coded(Code::InvalidKeyConfig, _)),
+                "{status_line}"
+            );
+        }
     }
 
     #[test]
