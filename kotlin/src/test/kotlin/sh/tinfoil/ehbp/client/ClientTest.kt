@@ -231,6 +231,18 @@ class ClientTest {
             val big = tr.roundTrip(post("${srv.url}/x", "hi"))
             assertEquals(422, big.code)
             assertEquals(body.length, big.body!!.bytes().size)
+
+            // Deeply nested arrays overflow kotlinx's recursive parser; that is "not a problem
+            // document", never an escaped StackOverflowError that would leak the exchange.
+            body = """{"type":""" + "[".repeat(50_000)
+            val deep = tr.roundTrip(post("${srv.url}/x", "hi"))
+            assertEquals(422, deep.code)
+            assertEquals(body.length, deep.body!!.bytes().size)
+            assertNull(tr.getSessionRecoveryToken(), "pass-through consumes the token")
+
+            // Go's encoding/json matches keys case-insensitively; so do we.
+            body = """{"Type":"urn:ietf:params:ehbp:error:key-config","Title":"rotated"}"""
+            assertEquals("KEY_CONFIG_MISMATCH: rotated", assertFailsWith<KeyConfigError> { tr.roundTrip(post("${srv.url}/x", "hi")) }.message)
         }
     }
 

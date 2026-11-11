@@ -1,7 +1,6 @@
 // Mirrors client/client.go.
 package sh.tinfoil.ehbp.client
 
-import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -136,7 +135,7 @@ class Transport internal constructor(
             val nonces = resp.headers(ResponseNonceHeader)
             val (rekey, title) = try {
                 if (nonces.isEmpty()) isKeyConfigMismatchResponse(resp) else false to ""
-            } catch (e: IOException) {
+            } catch (e: Throwable) { // any failure here ends the exchange: release the connection and the token
                 resp.close()
                 setToken(generation, null)
                 throw e
@@ -155,7 +154,7 @@ class Transport internal constructor(
 
             resp = try {
                 decryptResponseWithToken(resp, token!!)
-            } catch (e: IOException) {
+            } catch (e: Throwable) {
                 resp.close()
                 setToken(generation, null)
                 throw e
@@ -181,17 +180,19 @@ class Transport internal constructor(
 
         val problem = try {
             Json.parseToJsonElement(bodyBytes.decodeToString())
-        } catch (_: SerializationException) {
+        } catch (_: Throwable) { // malformed JSON, or a StackOverflowError: kotlinx recurses on nested arrays
             return none
         } as? JsonObject ?: return none
-        // Go decodes into {type string; title string}: a non-string field is a decode error.
+        // Go decodes into {type string; title string}: a non-string field is a decode error,
+        // and encoding/json matches keys case-insensitively when no exact key exists.
         fun str(el: JsonElement?): String? = when {
             el == null || el is JsonNull -> ""
             el is JsonPrimitive && el.isString -> el.content
             else -> null
         }
-        val type = str(problem["type"]) ?: return none
-        val title = str(problem["title"]) ?: return none
+        fun field(name: String) = problem[name] ?: problem.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+        val type = str(field("type")) ?: return none
+        val title = str(field("title")) ?: return none
         if (type != KeyConfigProblemType) return none
         return true to title
     }
@@ -207,7 +208,7 @@ private class TokenOwningInputStream(src: InputStream, private val onDone: () ->
     private inline fun guard(read: () -> Int): Int {
         val n = try {
             read()
-        } catch (e: IOException) {
+        } catch (e: Throwable) {
             finish()
             throw e
         }

@@ -1,7 +1,6 @@
 // Mirrors identity/derive.go.
 package sh.tinfoil.ehbp.identity
 
-import org.bouncycastle.crypto.InvalidCipherTextException
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.engines.AESEngine
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
@@ -98,7 +97,7 @@ class ResponseAEAD internal constructor(private val key: ByteArray, private val 
     fun openWithSeq(seq: ULong, ciphertext: ByteArray, aad: ByteArray? = null): ByteArray =
         try {
             gcm(false, nonceForSeq(seq), ciphertext, aad)
-        } catch (e: InvalidCipherTextException) {
+        } catch (e: Exception) { // InvalidCipherTextException in practice; anything else from BC is still a failed open
             throw ProtocolError(Code.AEADDecryptFailed, "failed to decrypt chunk", e)
         }
 
