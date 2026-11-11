@@ -55,6 +55,13 @@ type result struct {
 	Runner      string            `json:"runner"`
 	PeakRSS     *int64            `json:"peak_rss_bytes,omitempty"`
 	TokenEarly  *bool             `json:"token_before_response,omitempty"`
+	TokenAfter  *bool             `json:"token_after_exchange,omitempty"`
+}
+
+// noFollow is the documented http.Client configuration for an EHBP transport:
+// a 3xx is returned to the caller instead of being followed (SPEC 5.1).
+func noFollow(tr http.RoundTripper) *http.Client {
+	return &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 func main() {
@@ -129,7 +136,7 @@ func run(fx *fixture, r *result) error {
 		_, err := client.NewTransport(discoverTarget(fx))
 		return err
 	case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
-		return hardening(fx.Operation)
+		return hardening(fx)
 	case "decrypt_request":
 		return decryptRequest(fx, r)
 	case "middleware_request":
@@ -138,6 +145,8 @@ func run(fx *fixture, r *result) error {
 		return largeBody(fx, r)
 	case "token_before_response":
 		return tokenBeforeResponse(fx, r)
+	case "token_after_exchange":
+		return tokenAfterExchange(fx, r)
 	default:
 		return fmt.Errorf("unknown operation %q", fx.Operation)
 	}
@@ -150,7 +159,8 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { re
 // hardening exercises request-boundary validation without contacting the URL
 // under test. A recording RoundTripper returns a plaintext 502 if the request
 // escapes validation; that successful pass-through is the divergent result.
-func hardening(op string) error {
+func hardening(fx *fixture) error {
+	op := fx.Operation
 	serverID, err := identity.NewIdentity()
 	if err != nil {
 		return err
@@ -184,7 +194,15 @@ func hardening(op string) error {
 		return err
 	}
 	if op == "reject_reserved_header" {
-		req.Header.Set(protocol.ResponseNonceHeader, strings.Repeat("0", 64))
+		name := strIn(fx, "header")
+		if name == "" {
+			name = protocol.ResponseNonceHeader
+		}
+		value := strings.Repeat("0", 64)
+		if strings.EqualFold(name, "Host") {
+			value = "attacker.invalid"
+		}
+		req.Header.Set(name, value)
 	}
 	resp, err := tr.RoundTrip(req)
 	if resp != nil {
@@ -418,15 +436,15 @@ func largeBody(fx *fixture, r *result) error {
 	return nil
 }
 
+// discoverTarget maps a fixture target to the oracle listener the harness
+// exposes as ORACLE_<TARGET>_URL (the main oracle for anything else).
 func discoverTarget(fx *fixture) string {
-	switch strIn(fx, "target") {
-	case "bad_ct":
-		return os.Getenv("ORACLE_BAD_CT_URL")
-	case "non200":
-		return os.Getenv("ORACLE_NON200_URL")
-	default:
-		return os.Getenv("ORACLE_URL")
+	if t := strIn(fx, "target"); t != "" && t != "ORACLE_URL" {
+		if u := os.Getenv("ORACLE_" + strings.ToUpper(t) + "_URL"); u != "" {
+			return u
+		}
 	}
+	return os.Getenv("ORACLE_URL")
 }
 
 func decryptResponse(fx *fixture, r *result) error {
@@ -470,7 +488,7 @@ func doRequest(fx *fixture, r *result) error {
 	for k, v := range fx.Request.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Transport: tr}).Do(req)
+	resp, err := noFollow(tr).Do(req)
 	if err != nil {
 		return err
 	}
@@ -486,7 +504,59 @@ func doRequest(fx *fixture, r *result) error {
 		return rerr
 	}
 	// No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
-	if resp.Header.Get(protocol.ResponseNonceHeader) == "" && (status < 200 || status >= 300) {
+	if len(resp.Header.Values(protocol.ResponseNonceHeader)) == 0 && (status < 200 || status >= 300) {
+		r.Passthrough = true
+	}
+	setBody(r, plain)
+	return nil
+}
+
+// tokenAfterExchange runs the fixture request, lets the exchange end (fully
+// read, or closed after at most one frame when close_early is set, or failed),
+// then reports whether the public token accessor still returns one (SPEC 6.3).
+func tokenAfterExchange(fx *fixture, r *result) error {
+	serverURL := os.Getenv("ORACLE_URL")
+	tr, err := client.NewTransport(serverURL)
+	if err != nil {
+		return err
+	}
+	after := func() {
+		has := tr.GetSessionRecoveryToken() != nil
+		r.TokenAfter = &has
+	}
+	var reqBody io.Reader
+	if fx.Request.BodyHex != nil {
+		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex"))
+	}
+	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, reqBody)
+	if err != nil {
+		return err
+	}
+	resp, err := noFollow(tr).Do(req)
+	if err != nil {
+		after()
+		return err
+	}
+	status := resp.StatusCode
+	r.Status = &status
+	r.Headers = subsetHeaders(resp.Header)
+	closeEarly, _ := fx.Inputs["close_early"].(bool)
+	if closeEarly {
+		buf := make([]byte, 1)
+		_, _ = resp.Body.Read(buf) // at most one frame is released by one read
+		_ = resp.Body.Close()
+		after()
+		return nil
+	}
+	plain, n, rerr := readTracked(resp.Body)
+	_ = resp.Body.Close()
+	after()
+	if rerr != nil {
+		r.EmittedN = n
+		r.Emitted = n > 0
+		return rerr
+	}
+	if len(resp.Header.Values(protocol.ResponseNonceHeader)) == 0 && (status < 200 || status >= 300) {
 		r.Passthrough = true
 	}
 	setBody(r, plain)

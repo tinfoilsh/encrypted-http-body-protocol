@@ -50,7 +50,8 @@
         "decrypt_request",
         "middleware_request",
         "large_body",
-        "token_before_response"
+        "token_before_response",
+        "token_after_exchange"
       ],
       "description": "The standard operation the adapter performs. `request` is used for e2e/shape; crypto/config/server operations run in-process."
     },
@@ -201,6 +202,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "token_after_exchange": {
+          "type": "boolean",
+          "description": "Whether the session recovery token is still readable after the exchange ended (SPEC 6.3: it must not be)."
         }
       },
       "required": [

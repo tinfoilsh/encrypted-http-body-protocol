@@ -28,12 +28,11 @@ type Transport struct {
 	requestGeneration        uint64
 }
 
-type problemDetails struct {
-	Type  string `json:"type"`
-	Title string `json:"title"`
-}
-
 const maxProblemDetailsBytes = 64 << 10
+
+// maxKeyConfigBytes bounds the discovery read: one key_config is 41 bytes, and
+// its suites list has a uint16 length, so 64 KiB covers any first config.
+const maxKeyConfigBytes = 64 << 10
 
 type preservingReadCloser struct {
 	io.Reader
@@ -57,6 +56,13 @@ func (r *tokenOwningReadCloser) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close ends the exchange whatever was read (SPEC 6.3): a body abandoned
+// before EOF consumes its token too.
+func (r *tokenOwningReadCloser) Close() error {
+	r.once.Do(r.onComplete)
+	return r.ReadCloser.Close()
+}
+
 var _ http.RoundTripper = (*Transport)(nil)
 
 // Option configures a Transport.
@@ -67,10 +73,21 @@ type Option func(*Transport)
 // lets callers compose EHBP with a TLS-pinned or otherwise customized
 // http.Client. A nil client is ignored so the default remains in place.
 //
-// Encrypted requests are sent through the client's Transport only. Redirect
-// policy, cookie jar, and timeout are supplied by the outer http.Client that
-// drives this RoundTripper, not by the client passed here; the full client is
-// used for the key-configuration fetch.
+// Encrypted requests are sent through the client's Transport only. Cookie jar
+// and timeout are supplied by the outer http.Client that drives this
+// RoundTripper, not by the client passed here; the key-configuration fetch uses
+// the client's Transport and Timeout but never follows redirects (SPEC 3.1).
+//
+// Redirects: SPEC 5.1 says a redirect of an encrypted request is never
+// followed automatically. A RoundTripper cannot enforce that; the outer
+// http.Client does. Configure it with
+//
+//	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+//
+// so a 3xx is returned to the caller as a plaintext pass-through. With Go's
+// default policy a 301/302/303 is re-sent as a bodyless GET (plaintext
+// response) and a 307/308 is re-encrypted for its target; neither leaks the
+// body, but both differ from every other EHBP client.
 func WithHTTPClient(c *http.Client) Option {
 	return func(t *Transport) {
 		if c != nil {
@@ -158,6 +175,14 @@ func parseOrigin(server string) (*url.URL, error) {
 	return &url.URL{Scheme: u.Scheme, Host: u.Host}, nil
 }
 
+// noRedirectClient copies c with a policy that returns the first response, so
+// discovery observes exactly the status the key endpoint sent (SPEC 3.1).
+func noRedirectClient(c *http.Client) *http.Client {
+	cp := *c
+	cp.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &cp
+}
+
 func portOf(u *url.URL) string {
 	if p := u.Port(); p != "" {
 		return p
@@ -185,10 +210,11 @@ func (t *Transport) setToken(generation uint64, token *identity.SessionRecoveryT
 }
 
 // validateRequest rejects requests that would let the caller influence the
-// authority or the protocol headers the library owns. Content-Length,
-// Transfer-Encoding, and Host entries in req.Header never reach the wire in
-// Go's client (the transport derives them from the request itself), so only
-// the Ehbp-* headers are reserved here.
+// authority or the protocol headers the library owns (SPEC 5.1): the Ehbp-*
+// headers and Host. Content-Length and Transfer-Encoding entries in req.Header
+// never reach the wire in Go's client (the transport derives them from the
+// request itself). req.Host, the field, is cleared in RoundTrip instead of
+// rejected: a reverse proxy sets it from the inbound request.
 func (t *Transport) validateRequest(req *http.Request) error {
 	if req.URL == nil {
 		return protocol.Errorf(protocol.InvalidInput, "request has no URL")
@@ -200,7 +226,7 @@ func (t *Transport) validateRequest(req *http.Request) error {
 		return protocol.Errorf(protocol.InvalidInput, "request URL must use the configured origin: %s", t.origin)
 	}
 	for name := range req.Header {
-		if strings.EqualFold(name, protocol.EncapsulatedKeyHeader) || strings.EqualFold(name, protocol.ResponseNonceHeader) {
+		if strings.EqualFold(name, protocol.EncapsulatedKeyHeader) || strings.EqualFold(name, protocol.ResponseNonceHeader) || strings.EqualFold(name, "Host") {
 			return protocol.Errorf(protocol.InvalidInput, "reserved request header cannot be set by callers: %s", name)
 		}
 	}
@@ -208,27 +234,31 @@ func (t *Transport) validateRequest(req *http.Request) error {
 }
 
 func (t *Transport) syncServerPublicKey(server string) error {
-	keysURL, err := url.Parse(server)
+	parsed, err := url.Parse(server)
 	if err != nil {
 		return protocol.Errorf(protocol.InvalidInput, "failed to parse server URL: %w", err)
 	}
-	keysURL.Path = protocol.KeysPath
+	// Exactly /.well-known/hpke-keys on the origin: no base path, query, or fragment.
+	keysURL := &url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: protocol.KeysPath}
 
-	resp, err := t.httpClient.Get(keysURL.String())
+	resp, err := noRedirectClient(t.httpClient).Get(keysURL.String())
 	if err != nil {
 		return fmt.Errorf("failed to get server public key: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// SPEC 3.1: status 200 only (a 3xx surfaces here because redirects are not followed).
 	if resp.StatusCode != http.StatusOK {
 		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned status %d", resp.StatusCode)
 	}
 
-	if resp.Header.Get("Content-Type") != protocol.KeysMediaType {
+	if !isMediaType(resp.Header.Get("Content-Type"), protocol.KeysMediaType) {
 		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned invalid content type: %s", resp.Header.Get("Content-Type"))
 	}
 
-	ohttpKeys, err := io.ReadAll(resp.Body)
+	// Only the first key_config is used (SPEC 3.1); bound the read so a hostile
+	// endpoint cannot make discovery allocate without limit.
+	ohttpKeys, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyConfigBytes))
 	if err != nil {
 		return fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -255,15 +285,21 @@ func (t *Transport) GetSessionRecoveryToken() *identity.SessionRecoveryToken {
 	return t.lastSessionRecoveryToken
 }
 
-func isProblemJSONContentType(contentType string) bool {
+// isMediaType reports whether contentType's media type is want, compared
+// case-insensitively with any parameters ignored.
+func isMediaType(contentType, want string) bool {
 	if contentType == "" {
 		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return strings.HasPrefix(strings.ToLower(contentType), protocol.ProblemJSONMediaType)
+		mediaType = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
 	}
-	return strings.EqualFold(mediaType, protocol.ProblemJSONMediaType)
+	return strings.EqualFold(mediaType, want)
+}
+
+func isProblemJSONContentType(contentType string) bool {
+	return isMediaType(contentType, protocol.ProblemJSONMediaType)
 }
 
 func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
@@ -289,14 +325,20 @@ func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
 	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	resp.ContentLength = int64(len(bodyBytes))
 
-	var problem problemDetails
+	// SPEC 5.4.2: the exact, case-sensitive "type" member decides; "title" is
+	// used only when it is a string. encoding/json's case-insensitive field
+	// matching is deliberately not used.
+	var problem map[string]json.RawMessage
 	if err := json.Unmarshal(bodyBytes, &problem); err != nil {
 		return false, "", nil
 	}
-	if problem.Type != protocol.KeyConfigProblemType {
+	var typ string
+	if err := json.Unmarshal(problem["type"], &typ); err != nil || typ != protocol.KeyConfigProblemType {
 		return false, "", nil
 	}
-	return true, problem.Title, nil
+	var title string
+	_ = json.Unmarshal(problem["title"], &title)
+	return true, title, nil
 }
 
 // roundTripper returns the RoundTripper used to send encrypted requests,
@@ -368,11 +410,19 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// Only decrypt if we encrypted the request (had a body)
 	if reqCtx != nil {
-		rekey, title, checkErr := isKeyConfigMismatchResponse(resp)
-		if checkErr != nil {
-			resp.Body.Close()
-			t.setToken(generation, nil)
-			return nil, checkErr
+		// A response carrying a nonce (even an empty one) is handled by the
+		// nonce rules: the key-config problem is only looked for without one
+		// (SPEC 5.4.2), and an empty value is malformed, not absent (SPEC 4.2).
+		nonceAbsent := len(resp.Header.Values(protocol.ResponseNonceHeader)) == 0
+		rekey, title := false, ""
+		if nonceAbsent {
+			var checkErr error
+			rekey, title, checkErr = isKeyConfigMismatchResponse(resp)
+			if checkErr != nil {
+				resp.Body.Close()
+				t.setToken(generation, nil)
+				return nil, checkErr
+			}
 		}
 		if rekey {
 			resp.Body.Close()
@@ -383,8 +433,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "%s", title))
 		}
 
-		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
-			(resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+		if nonceAbsent && (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
 			// Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
 			t.setToken(generation, nil)
 			return resp, nil

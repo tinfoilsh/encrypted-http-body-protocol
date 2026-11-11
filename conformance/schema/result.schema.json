@@ -126,6 +126,10 @@
     "runner": {
       "description": "NOT ASSERTED. Which adapter produced this (e.g. 'rust', 'js-browser:firefox'). For the report only.",
       "type": "string"
+    },
+    "token_after_exchange": {
+      "type": "boolean",
+      "description": "ASSERTED. For token_after_exchange: whether the session recovery token was still readable after the exchange ended (SPEC 6.3)."
     }
   },
   "allOf": [
