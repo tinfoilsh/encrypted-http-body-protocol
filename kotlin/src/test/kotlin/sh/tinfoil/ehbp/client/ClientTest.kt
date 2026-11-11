@@ -240,9 +240,9 @@ class ClientTest {
             assertEquals(body.length, deep.body!!.bytes().size)
             assertNull(tr.getSessionRecoveryToken(), "pass-through consumes the token")
 
-            // Go's encoding/json matches keys case-insensitively; so do we.
+            // JSON member names are case-sensitive: "Type" is not the type member.
             body = """{"Type":"urn:ietf:params:ehbp:error:key-config","Title":"rotated"}"""
-            assertEquals("KEY_CONFIG_MISMATCH: rotated", assertFailsWith<KeyConfigError> { tr.roundTrip(post("${srv.url}/x", "hi")) }.message)
+            assertEquals(422, tr.roundTrip(post("${srv.url}/x", "hi")).code)
         }
     }
 
