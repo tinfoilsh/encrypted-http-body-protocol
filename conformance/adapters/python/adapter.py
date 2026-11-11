@@ -70,10 +70,12 @@ def run(fx: dict, res: dict) -> None:
         large_body(fx, res)
     elif op == "token_before_response":
         token_before_response(fx, res)
+    elif op == "token_after_exchange":
+        token_after_exchange(fx, res)
     elif op == "discover":
         Client.discover(discover_target(ins))  # raises on bad content type / status
     elif op in ("reject_reserved_header", "reject_cross_origin", "reject_url_credentials"):
-        hardening(op)
+        hardening(op, ins)
     else:
         raise InvalidInputError(f"unknown operation {op}")
 
@@ -85,16 +87,18 @@ def record_partial(res: dict, out: bytes) -> None:
 
 
 def discover_target(ins: dict) -> str:
-    return {"bad_ct": os.environ.get("ORACLE_BAD_CT_URL", ""),
-            "non200": os.environ.get("ORACLE_NON200_URL", "")}.get(
-        ins.get("target"), os.environ["ORACLE_URL"])
+    """The oracle listener the harness exposes as ORACLE_<TARGET>_URL, else the oracle."""
+    target = ins.get("target") or "ORACLE_URL"
+    return os.environ.get(f"ORACLE_{target.upper()}_URL") or os.environ["ORACLE_URL"]
 
 
-def hardening(op: str) -> None:
+def hardening(op: str, ins: dict) -> None:
     base = os.environ["ORACLE_URL"]
     client = Client.discover(base)
     if op == "reject_reserved_header":
-        client.request("POST", "/s/echo", body=b"x", headers={ENCAPSULATED_KEY_HEADER: "x"})
+        name = ins.get("header") or RESPONSE_NONCE_HEADER
+        value = "attacker.invalid" if name.lower() == "host" else "0" * 64
+        client.request("POST", "/s/echo", body=b"x", headers={name: value})
     elif op == "reject_cross_origin":
         client.request("GET", "http://other.example/x")
     else:  # reject_url_credentials
@@ -176,6 +180,34 @@ def token_before_response(fx: dict, res: dict) -> None:
         raise r
     res["status"] = r.status_code
     res["body_hex"] = r.content.hex()
+
+
+def token_after_exchange(fx: dict, res: dict) -> None:
+    """Run the exchange to its end (full read, early close, or failure), then read the token (SPEC 6.3)."""
+    base, identity = oracle()
+    client = Client(base, identity)
+    req = fx["request"]
+    body = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
+    out = bytearray()
+    try:
+        with client.stream(req["method"], req["path"], body=body, headers=req.get("headers") or {}) as r:
+            res["status"] = r.status_code
+            res["response_headers"] = subset_headers(r.headers)
+            chunks = r.iter_bytes()
+            if fx.get("inputs", {}).get("close_early"):
+                next(chunks, None)  # at most one frame, then leave the block: closes the body
+            else:
+                for chunk in chunks:
+                    out += chunk
+                res["body_hex"] = bytes(out).hex()
+        no_nonce = RESPONSE_NONCE_HEADER.lower() not in {k.lower() for k in (res.get("response_headers") or {})}
+        res["passthrough"] = no_nonce and not (200 <= (res["status"] or 0) < 300)
+    except EHBPError:
+        record_partial(res, out)
+        raise
+    finally:
+        res["token_after_exchange"] = client.get_session_recovery_token() is not None
+        client.close()
 
 
 def pattern(size: int, seed: int):

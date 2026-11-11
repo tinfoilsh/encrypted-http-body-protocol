@@ -4,6 +4,18 @@ These values are shared with the Go, JS, Rust, and Swift implementations and
 MUST NOT diverge; they define the on-the-wire format and the HPKE/HKDF labels.
 """
 
+import re
+
+_STRICT_HEX = re.compile(r"(?:[0-9a-fA-F]{2})*")
+
+
+def decode_hex(value: str) -> bytes:
+    """SPEC 4.1 strict hex: digit pairs only, either case; no prefix or whitespace."""
+    if not isinstance(value, str) or not _STRICT_HEX.fullmatch(value):
+        raise ValueError("not strict hex")
+    return bytes.fromhex(value)
+
+
 ENCAPSULATED_KEY_HEADER = "Ehbp-Encapsulated-Key"
 RESPONSE_NONCE_HEADER = "Ehbp-Response-Nonce"
 KEYS_MEDIA_TYPE = "application/ohttp-keys"

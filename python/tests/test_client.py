@@ -10,8 +10,10 @@ from conftest import DEFAULT_BASE_URL, MockServer
 from ehbp import Client, ServerIdentity
 from ehbp.errors import (
     ChunkTooLargeError,
+    FramingTruncatedError,
     InvalidInputError,
     InvalidKeyConfigError,
+    InvalidResponseNonceError,
     KeyConfigMismatchError,
     MissingResponseNonceError,
 )
@@ -68,14 +70,15 @@ def test_streaming_request_clears_session_recovery_token_after_full_consumption(
     assert client.get_session_recovery_token() is None
 
 
-def test_streaming_request_retains_session_recovery_token_after_partial_consumption(make_server):
+def test_streaming_request_closed_early_consumes_session_recovery_token(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
 
     with client.stream("POST", "/v1/echo", body=b"payload") as response:
         next(iter(response))
+        assert client.get_session_recovery_token() is not None
 
-    assert client.get_session_recovery_token() is not None
+    assert client.get_session_recovery_token() is None
 
 
 def test_older_stream_completion_does_not_clear_newer_recovery_token(make_server):
@@ -204,10 +207,12 @@ def test_protocol_relative_url_to_foreign_host_is_rejected(server: MockServer):
         client.get("//evil.example/steal")
 
 
-def test_reserved_header_is_rejected(server: MockServer):
+@pytest.mark.parametrize("name", [RESPONSE_NONCE_HEADER, ENCAPSULATED_KEY_HEADER, "Host"])
+def test_reserved_header_is_rejected(server: MockServer, name):
     client = server.make_client()
     with pytest.raises(InvalidInputError):
-        client.post("/v1/echo", body=b"payload", headers={RESPONSE_NONCE_HEADER: "00"})
+        client.post("/v1/echo", body=b"payload", headers={name: "00"})
+    assert server.last_request is None
 
 
 def test_base_url_with_credentials_is_rejected(server: MockServer):
@@ -266,6 +271,90 @@ def test_key_config_mismatch_raises_dedicated_error(make_server):
     assert client.get_session_recovery_token() is None
 
 
+def _problem_client(server: MockServer, body: bytes, headers=None) -> Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422, headers=headers or {"content-type": "application/problem+json"}, content=body
+        )
+
+    return Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"Type": "urn:ietf:params:ehbp:error:key-config"}',  # key is case-sensitive
+        b'{"type": "urn:ietf:params:ehbp:error:key-config"}' + b" " * (64 * 1024),  # over 64 KiB
+        b"[" * 50000 + b"]" * 50000,  # deep nesting must not raise RecursionError
+    ],
+)
+def test_non_matching_422_problem_passes_through(server: MockServer, body: bytes):
+    response = _problem_client(server, body).post("/v1/echo", body=b"payload")
+    assert response.status_code == 422
+    assert response.content == body
+
+
+def test_422_problem_with_non_string_title_still_mismatch(server: MockServer):
+    body = b'{"type": "urn:ietf:params:ehbp:error:key-config", "title": 7}'
+    with pytest.raises(KeyConfigMismatchError, match="key configuration mismatch"):
+        _problem_client(server, body).post("/v1/echo", body=b"payload")
+
+
+def test_422_with_response_nonce_is_decrypted_not_problem(make_server):
+    server = make_server(status_code=422)
+    client = server.make_client()
+    response = client.post("/v1/echo", body=b"payload")
+    assert response.status_code == 422
+    assert response.content == b"echo:payload"
+
+
+def _nonce_client(server: MockServer, nonce_value: str, status: int = 200) -> Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={RESPONSE_NONCE_HEADER: nonce_value}, content=b"")
+
+    return Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+@pytest.mark.parametrize("status", [200, 502])
+@pytest.mark.parametrize(
+    "nonce_value", ["", "0x" + "00" * 31, "00" * 16 + " " + "00" * 16, "00" * 32 + " "]
+)
+def test_malformed_response_nonce_is_invalid(server: MockServer, nonce_value, status):
+    with pytest.raises(InvalidResponseNonceError):
+        _nonce_client(server, nonce_value, status).post("/v1/echo", body=b"payload")
+
+
+def test_transport_failure_mid_frame_is_framing_truncated(server: MockServer):
+    class Broken(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"\x00\x00\x00\x10\xaa"
+            raise httpx.ReadError("connection reset")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={RESPONSE_NONCE_HEADER: "00" * 32}, stream=Broken())
+
+    client = Client(
+        DEFAULT_BASE_URL,
+        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(FramingTruncatedError):
+        client.post("/v1/echo", body=b"payload")
+    with pytest.raises(FramingTruncatedError), client.stream(
+        "POST", "/v1/echo", body=b"payload"
+    ) as response:
+        b"".join(response.iter_bytes())
+    assert client.get_session_recovery_token() is None
+
+
 def test_response_size_cap_is_enforced(server: MockServer):
     client = server.make_client(max_response_bytes=4)
     with pytest.raises(ChunkTooLargeError):
@@ -282,6 +371,32 @@ def test_discover_fetches_config_over_mock_transport(server: MockServer):
 def test_discover_accepts_http_transport_by_default(server: MockServer):
     client = Client.discover("http://server.example", http_client=server.http_client())
     assert client.server_identity.public_key_bytes() == server.public_key_bytes
+
+
+def _discovery_client(server: MockServer, status: int, content_type: str) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/.well-known/hpke-keys"
+        headers = {"content-type": content_type, "location": "https://server.example/keys"}
+        return httpx.Response(status, headers=headers, content=server.config_bytes() + b"tail")
+
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+
+@pytest.mark.parametrize("content_type", ["Application/OHTTP-Keys; v=1", "application/ohttp-keys"])
+def test_discover_accepts_media_type_params_and_trailing_bytes(server: MockServer, content_type):
+    client = Client.discover(
+        "http://server.example/base?x=1", http_client=_discovery_client(server, 200, content_type)
+    )
+    assert client.server_identity.public_key_bytes() == server.public_key_bytes
+
+
+@pytest.mark.parametrize("status", [203, 302])
+def test_discover_rejects_non_200_without_following(server: MockServer, status):
+    with pytest.raises(InvalidKeyConfigError):
+        Client.discover(
+            DEFAULT_BASE_URL,
+            http_client=_discovery_client(server, status, "application/ohttp-keys"),
+        )
 
 
 def test_server_identity_rejects_out_of_range_key_id(server: MockServer):

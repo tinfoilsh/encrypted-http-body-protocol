@@ -25,12 +25,15 @@ from .protocol import (
     PROBLEM_JSON_MEDIA_TYPE,
     RESPONSE_NONCE_HEADER,
     RESPONSE_NONCE_LENGTH,
+    decode_hex,
 )
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = MAX_RESPONSE_CHUNK_LENGTH
 
 KEY_CONFIG_MISMATCH_STATUS = 422
+# SPEC 5.4.2: a problem document over this size is passed through unparsed.
+MAX_PROBLEM_BODY_BYTES = 64 * 1024
 
 
 def media_type(headers: httpx.Headers) -> str:
@@ -39,13 +42,14 @@ def media_type(headers: httpx.Headers) -> str:
 
 
 def raise_for_key_config_mismatch(status: int, headers: httpx.Headers, body: bytes) -> None:
-    if status != KEY_CONFIG_MISMATCH_STATUS:
+    """SPEC 5.4.2: only a nonce-less 422 problem+json body of at most 64 KiB is checked."""
+    if status != KEY_CONFIG_MISMATCH_STATUS or RESPONSE_NONCE_HEADER in headers:
         return
-    if media_type(headers) != PROBLEM_JSON_MEDIA_TYPE:
+    if media_type(headers) != PROBLEM_JSON_MEDIA_TYPE or len(body) > MAX_PROBLEM_BODY_BYTES:
         return
     try:
         problem = json.loads(body)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return
     if isinstance(problem, dict) and problem.get("type") == KEY_CONFIG_PROBLEM_TYPE:
         title = problem.get("title")
@@ -61,7 +65,7 @@ def response_nonce(headers: httpx.Headers) -> bytes:
     if len(values) > 1:
         raise DuplicateResponseNonceError(f"multiple {RESPONSE_NONCE_HEADER} headers")
     try:
-        nonce = bytes.fromhex(values[0].strip())
+        nonce = decode_hex(values[0])
     except ValueError as err:
         raise InvalidResponseNonceError(f"invalid response nonce header: {err}") from err
     if len(nonce) != RESPONSE_NONCE_LENGTH:
