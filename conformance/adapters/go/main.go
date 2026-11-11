@@ -543,9 +543,12 @@ func tokenAfterExchange(fx *fixture, r *result) error {
 	closeEarly, _ := fx.Inputs["close_early"].(bool)
 	if closeEarly {
 		buf := make([]byte, 1)
-		_, _ = resp.Body.Read(buf) // at most one frame is released by one read
+		_, rerr := resp.Body.Read(buf) // at most one frame is released by one read
 		_ = resp.Body.Close()
 		after()
+		if rerr != nil && rerr != io.EOF {
+			return rerr
+		}
 		return nil
 	}
 	plain, n, rerr := readTracked(resp.Body)

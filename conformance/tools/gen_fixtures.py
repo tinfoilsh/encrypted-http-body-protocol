@@ -629,7 +629,7 @@ def main() -> None:
             "id": fid, "description": desc, "category": "e2e", "operation": "request",
             "server_scenario": scenario,
             "request": {"method": method, "path": f"/s/{scenario}",
-                        "body_hex": body.encode().hex() if body else None, "headers": {}},
+                        "body_hex": body.encode().hex() if body is not None else None, "headers": {}},
             "expect": expect,
         }
         if browser is not None:
@@ -754,7 +754,8 @@ def main() -> None:
             "64 characters with an embedded space: strict hex has no whitespace (SPEC 4.1)."),
         e2e("e2e-redirect-not-followed", "redirect_302",
             {"outcome": "ok", "status": 302, "passthrough": True, "body_hex": b"redirecting".hex()},
-            "A 302 to an encrypted request is never followed (SPEC 5.1): no nonce, non-2xx, passed through."),
+            "A 302 to an encrypted request is never followed (SPEC 5.1): no nonce, non-2xx, passed through.",
+            browser={"runnable": False, "skip_reason": "browser-fetch-returns-opaqueredirect"}),
         e2e("e2e-problem-422-other-type", "problem_422_other_type",
             {"outcome": "ok", "status": 422, "passthrough": True,
              "body_hex": b'{"type":"urn:example:validation","title":"bad field"}'.hex()},
@@ -798,7 +799,8 @@ def main() -> None:
     # the token is gone. Each case reuses a request scenario and asks the adapter
     # to read the public token accessor afterwards.
     def tok(fid, scenario, expect, desc, body="hello", close_early=False):
-        fx = e2e(fid, scenario, {**expect, "token_after_exchange": False}, desc, body=body)
+        fx = e2e(fid, scenario, {**expect, "token_after_exchange": False}, desc, body=body,
+                 browser={"runnable": False, "skip_reason": "token-lifecycle-tested-in-native-adapters"})
         fx["operation"] = "token_after_exchange"
         if close_early:
             fx["inputs"] = {"close_early": True}

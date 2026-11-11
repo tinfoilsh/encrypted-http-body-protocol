@@ -68,6 +68,7 @@ type StreamingEncryptReader struct {
 	sender *hpke.Sender
 	buffer []byte
 	eof    bool
+	sealed bool // at least one frame has been produced
 }
 
 // Read implements io.Reader, encrypting data as it's read
@@ -95,7 +96,10 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		if err == io.EOF {
 			r.eof = true
-			if bytesRead == 0 {
+			// An encrypted request must carry at least one authenticated frame:
+			// the server's open of a frame is what authenticates the encapsulated
+			// key (SPEC 5.1, 7.4). An empty stream seals one empty-plaintext frame.
+			if bytesRead == 0 && r.sealed {
 				return 0, io.EOF
 			}
 		} else {
@@ -103,9 +107,10 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	if bytesRead == 0 {
-		return 0, io.EOF
+	if bytesRead == 0 && !r.eof {
+		return 0, nil
 	}
+	r.sealed = true
 
 	// Encrypt chunk
 	encrypted, err := r.sender.Seal(nil, plaintext[:bytesRead])

@@ -30,9 +30,11 @@ type Transport struct {
 
 const maxProblemDetailsBytes = 64 << 10
 
-// maxKeyConfigBytes bounds the discovery read: one key_config is 41 bytes, and
-// its suites list has a uint16 length, so 64 KiB covers any first config.
-const maxKeyConfigBytes = 64 << 10
+// maxKeyConfigBytes bounds the discovery read to the largest possible first
+// key_config: 37 fixed bytes plus a suites vector of up to 65535 bytes. Only
+// the first config is read (SPEC 3.1), so this covers every accepted config
+// and every rejectable one with its proper error class.
+const maxKeyConfigBytes = 37 + (1 << 16) - 1
 
 type preservingReadCloser struct {
 	io.Reader
