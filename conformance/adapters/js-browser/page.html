@@ -92,7 +92,7 @@ async function tokenBeforeResponse(fx, res, oracleUrl) {
   const base = oracleUrl.replace(/\/$/, '');
   const transport = await createTransport(base);
   const req = fx.request;
-  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
+  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: req.body_hex != null ? hb(req.body_hex) : undefined });
   await new Promise((r) => setTimeout(r, 500)); // oracle holds 5 s
   // The getter throws when no token is published; either way, no translation.
   try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
@@ -138,7 +138,7 @@ async function doRequest(fx, res, oracleUrl) {
   const transport = await createTransport(base);
   const req = fx.request;
   const init = { method: req.method, headers: req.headers || {} };
-  if (req.body_hex) init.body = hb(req.body_hex);
+  if (req.body_hex != null) init.body = hb(req.body_hex); // '' is a zero-length body, not absent
   const response = await transport.request(base + req.path, init);
   res.status = response.status;
   res.response_headers = subsetHeaders(response.headers);

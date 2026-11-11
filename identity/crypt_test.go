@@ -1115,9 +1115,9 @@ type unknownLengthReader struct{ io.Reader }
 
 func TestEncryptRequestEmptyStreamSealsOneFrame(t *testing.T) {
 	serverID, err := NewIdentity()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	pub, err := FromPublicKeyBytes(serverID.MarshalPublicKey())
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/x", unknownLengthReader{strings.NewReader("")})
 	ctx, err := pub.EncryptRequestWithContext(req)

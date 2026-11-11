@@ -1138,6 +1138,11 @@ fn framing_transport_error(err: reqwest::Error) -> Error {
 fn ends_mid_frame(mut data: &[u8]) -> bool {
     while data.len() >= 4 {
         let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if len > crate::derive::DEFAULT_MAX_RESPONSE_CHUNK_BYTES {
+            // The decryptor rejects this prefix as CHUNK_TOO_LARGE before reading
+            // the frame, so the body did not end inside a frame it would accept.
+            return false;
+        }
         let rest = &data[4..];
         if rest.len() < len {
             return true;
@@ -1597,7 +1602,9 @@ mod tests {
         assert!(ends_mid_frame(&[0, 0, 0, 2, 9]));
         assert!(!ends_mid_frame(&[0, 0, 0, 2, 9, 9]));
         assert!(ends_mid_frame(&[0, 0, 0, 2, 9, 9, 0]));
-        assert!(ends_mid_frame(&[0xff, 0xff, 0xff, 0xff, 1]));
+        // An oversized prefix is CHUNK_TOO_LARGE territory, never a truncation.
+        assert!(!ends_mid_frame(&[0xff, 0xff, 0xff, 0xff, 1]));
+        assert!(ends_mid_frame(&[0x04, 0x00, 0x00, 0x00, 1]));
     }
 
     #[tokio::test]

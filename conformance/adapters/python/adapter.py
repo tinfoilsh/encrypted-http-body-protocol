@@ -133,7 +133,7 @@ def oracle() -> tuple[str, ServerIdentity]:
 def request(fx: dict, res: dict) -> None:
     base, identity = oracle()
     req = fx["request"]
-    content = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
+    content = bytes.fromhex(req["body_hex"]) if req.get("body_hex") is not None else None  # "" is a zero-length body, not absent
 
     client = httpx.Client(transport=EHBPTransport(identity), base_url=base)
     out = bytearray()
@@ -187,7 +187,7 @@ def token_after_exchange(fx: dict, res: dict) -> None:
     base, identity = oracle()
     client = Client(base, identity)
     req = fx["request"]
-    body = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
+    body = bytes.fromhex(req["body_hex"]) if req.get("body_hex") is not None else None  # "" is a zero-length body, not absent
     out = bytearray()
     try:
         with client.stream(req["method"], req["path"], body=body, headers=req.get("headers") or {}) as r:

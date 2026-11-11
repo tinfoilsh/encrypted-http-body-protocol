@@ -16,7 +16,7 @@ use crate::{
     Code, Error, Result,
 };
 
-const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ResponseKeyMaterial {
