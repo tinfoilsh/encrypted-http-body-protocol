@@ -30,6 +30,14 @@ class DeriveTest {
     }
 
     @Test
+    fun newResponseAEADValidation() {
+        assertEquals(Code.HPKESetupFailed, assertFailsWith<ProtocolError> { ResponseKeyMaterial(ByteArray(31), ByteArray(12)).newResponseAEAD() }.code)
+        for (n in listOf(0, 11, 13, 32)) {
+            assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { ResponseKeyMaterial(ByteArray(32), ByteArray(n)).newResponseAEAD() }.code, "nonce $n")
+        }
+    }
+
+    @Test
     fun nonceComputation() {
         val base = hex("f8b0ce9466f27aa6243c65f9")
         val aead = ResponseKeyMaterial(ByteArray(32), base).newResponseAEAD()

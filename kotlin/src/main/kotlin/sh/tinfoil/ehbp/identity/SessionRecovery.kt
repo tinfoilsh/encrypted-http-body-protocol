@@ -47,6 +47,8 @@ class SessionRecoveryToken(val exportedSecret: ByteArray, val requestEnc: ByteAr
                     el is JsonPrimitive && el.isString -> el.content
                     else -> throw ProtocolError(Code.InvalidToken, "invalid token: $name is not a string")
                 }
+                // Bound the input before decoding so attacker-controlled JSON cannot force a large allocation.
+                if (hex.length != 2 * ExportLength) throw ProtocolError(Code.InvalidToken, "$name must be ${2 * ExportLength} hex characters, got ${hex.length}")
                 return hexDecodeOrNull(hex) ?: throw ProtocolError(Code.InvalidToken, "invalid $name hex")
             }
             val exportedSecret = field("exportedSecret")

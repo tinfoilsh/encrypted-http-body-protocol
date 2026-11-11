@@ -59,6 +59,6 @@ class IdentityTest {
     fun fromPublicKeyErrorCases() {
         assertEquals(Code.InvalidKeyConfig, assertFailsWith<ProtocolError> { fromPublicKeyHex("zz") }.code)
         assertEquals(Code.InvalidKeyConfig, assertFailsWith<ProtocolError> { fromPublicKeyBytes(ByteArray(31)) }.code)
-        assertEquals(pk07, fromPublicKeyHex(pk07.uppercase()).marshalPublicKeyHex())
+        assertEquals("ab".repeat(32), fromPublicKeyHex("AB".repeat(32)).marshalPublicKeyHex())
     }
 }

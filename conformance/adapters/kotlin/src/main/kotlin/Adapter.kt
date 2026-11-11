@@ -366,9 +366,8 @@ fun JsonObject.strIn(key: String): String = (this["inputs"] as? JsonObject)?.str
 fun JsonObject.hexIn(key: String): ByteArray = hex(strIn(key))
 fun hex(s: String): ByteArray {
     if (s.length % 2 != 0) fatal("bad hex: odd length")
-    return ByteArray(s.length / 2) { i ->
-        val v = s.substring(2 * i, 2 * i + 2).toIntOrNull(16) ?: fatal("bad hex: ${s.substring(2 * i, 2 * i + 2)}")
-        v.toByte()
-    }
+    // toInt(16) alone would accept signed pairs like "-1" or "+f".
+    if (!s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) fatal("bad hex: non-hex digit in \"$s\"")
+    return ByteArray(s.length / 2) { i -> s.substring(2 * i, 2 * i + 2).toInt(16).toByte() }
 }
 fun fatal(msg: String): Nothing { System.err.println(msg); exitProcess(2) }

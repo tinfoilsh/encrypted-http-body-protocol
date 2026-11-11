@@ -35,6 +35,9 @@ class ResponseKeyMaterial(val key: ByteArray, val nonceBase: ByteArray) {
         if (key.size != AES256KeyLength) {
             throw ProtocolError(Code.HPKESetupFailed, "failed to create AES cipher: invalid key size ${key.size}")
         }
+        if (nonceBase.size != AESGCMNonceLength) {
+            throw ProtocolError(Code.InvalidInput, "nonce base must be $AESGCMNonceLength bytes, got ${nonceBase.size}")
+        }
         return ResponseAEAD(key.copyOf(), nonceBase.copyOf())
     }
 }

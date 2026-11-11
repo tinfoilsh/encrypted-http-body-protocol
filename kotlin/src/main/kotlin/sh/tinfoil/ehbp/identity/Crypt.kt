@@ -48,6 +48,8 @@ private const val encryptChunkBytes = 8192
  * plaintext is sealed and framed as it is written, in chunks of at most 8 KiB.
  */
 class StreamingEncryptWriter(private val out: OutputStream, private val sender: HPKEContext) : OutputStream() {
+    private var sealed = false // at least one frame has been produced
+
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
     override fun write(p: ByteArray, off: Int, len: Int) {
@@ -55,15 +57,30 @@ class StreamingEncryptWriter(private val out: OutputStream, private val sender: 
         val end = off + len
         while (pos < end) {
             val n = minOf(encryptChunkBytes, end - pos)
-            val encrypted = try {
-                sender.seal(ByteArray(0), p.copyOfRange(pos, pos + n)) // AAD is empty (SPEC 4.3); BC rejects null
-            } catch (e: Exception) {
-                throw ProtocolError(Code.HPKESetupFailed, "failed to encrypt chunk", e)
-            }
-            // Chunk with length prefix
-            out.write(ByteBuffer.allocate(4 + encrypted.size).putInt(encrypted.size).put(encrypted).array())
+            seal(p.copyOfRange(pos, pos + n))
             pos += n
         }
+    }
+
+    /**
+     * An encrypted request must carry at least one authenticated frame: the
+     * server's open of a frame is what authenticates the encapsulated key
+     * (SPEC 5.1, 7.4). Call at end of stream: an empty stream seals one
+     * empty-plaintext frame, as Go's StreamingEncryptReader.
+     */
+    fun finish() {
+        if (!sealed) seal(ByteArray(0))
+    }
+
+    private fun seal(plaintext: ByteArray) {
+        val encrypted = try {
+            sender.seal(ByteArray(0), plaintext) // AAD is empty (SPEC 4.3); BC rejects null
+        } catch (e: Exception) {
+            throw ProtocolError(Code.HPKESetupFailed, "failed to encrypt chunk", e)
+        }
+        // Chunk with length prefix
+        out.write(ByteBuffer.allocate(4 + encrypted.size).putInt(encrypted.size).put(encrypted).array())
+        sealed = true
     }
 
     override fun flush() = out.flush()
@@ -104,9 +121,11 @@ fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestConte
         override fun contentLength() = -1L
         override fun isOneShot() = true // the HPKE sequence cannot be replayed
         override fun writeTo(sink: BufferedSink) {
-            val plain = StreamingEncryptWriter(sink.outputStream(), sender).sink().buffer()
+            val w = StreamingEncryptWriter(sink.outputStream(), sender)
+            val plain = w.sink().buffer()
             body.writeTo(plain)
             plain.flush()
+            w.finish()
         }
     }
     val newReq = req.newBuilder()

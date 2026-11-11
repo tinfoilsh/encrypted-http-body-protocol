@@ -116,6 +116,24 @@ class CryptTest {
     }
 
     @Test
+    fun emptyUnknownLengthBodySealsOneEmptyFrame() {
+        // SPEC 5.1: the server's open of a frame authenticates the encapsulated key,
+        // so an unknown-length stream that yields nothing still carries one frame.
+        val producer = object : RequestBody() {
+            override fun contentType() = null
+            override fun contentLength() = -1L
+            override fun writeTo(sink: BufferedSink) {}
+        }
+        val req = Request.Builder().url("http://example.test/x").post(producer).build()
+        val (encrypted, ctx) = server.encryptRequestWithContext(req)
+        assertNotNull(ctx)
+        val framed = drain(encrypted.body!!)
+        assertEquals(4 + 16, framed.size)
+        assertEquals(16, ByteBuffer.wrap(framed).int)
+        assertContentEquals(ByteArray(0), openFrames(recipient(ctx.requestEnc), ByteArrayInputStream(framed)))
+    }
+
+    @Test
     fun bodylessRequestsPassThrough() {
         val get = Request.Builder().url("http://example.test/x").build()
         assertNull(server.encryptRequestWithContext(get).second)
