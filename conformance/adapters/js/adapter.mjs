@@ -71,6 +71,8 @@ async function run(fx, res) {
       return largeBody(fx, res);
     case 'token_before_response':
       return tokenBeforeResponse(fx, res);
+    case 'token_after_exchange':
+      return tokenAfterExchange(fx, res);
     case 'request':
       return doRequest(fx, res);
     case 'discover':
@@ -79,7 +81,7 @@ async function run(fx, res) {
     case 'reject_reserved_header':
     case 'reject_cross_origin':
     case 'reject_url_credentials':
-      return hardening(fx.operation);
+      return hardening(fx.operation, ins);
     default:
       throw new Error(`unknown operation ${fx.operation}`);
   }
@@ -87,7 +89,7 @@ async function run(fx, res) {
 
 // The alternate origin is another loopback oracle port, so this remains
 // network-safe even if host-rewrite behavior changes.
-async function hardening(op) {
+async function hardening(op, ins) {
   const base = oracleBase();
   const transport = await createTransport(base);
   let target = `${base}/s/echo`;
@@ -97,15 +99,16 @@ async function hardening(op) {
     target = base.replace('://', '://user:pass@') + '/s/echo';
   }
   if (op === 'reject_reserved_header') {
-    init.headers[RESPONSE_NONCE_HEADER] = '00'.repeat(32);
+    const name = ins.header || RESPONSE_NONCE_HEADER;
+    init.headers[name] = name.toLowerCase() === 'host' ? 'attacker.invalid' : '00'.repeat(32);
   }
   await transport.request(target, init);
 }
 
+// A fixture target names an oracle listener the harness exposes as ORACLE_<TARGET>_URL.
 function discoverTarget(ins) {
-  if (ins.target === 'bad_ct') return process.env.ORACLE_BAD_CT_URL;
-  if (ins.target === 'non200') return process.env.ORACLE_NON200_URL;
-  return process.env.ORACLE_URL;
+  const t = ins.target;
+  return (t && t !== 'ORACLE_URL' && process.env[`ORACLE_${t.toUpperCase()}_URL`]) || process.env.ORACLE_URL;
 }
 
 async function decrypt(fx, res) {
@@ -154,9 +157,36 @@ async function doRequest(fx, res) {
 
   res.status = response.status;
   res.response_headers = subsetHeaders(response.headers);
-  const noNonce = !(res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()];
+  const noNonce = (res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()] === undefined;
   res.body_hex = await drain(response.body, res);
   res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);
+}
+
+// Runs the request, lets the exchange end (fully read, closed after at most one
+// chunk when close_early is set, or failed), then reports whether the public
+// token accessor still returns one (SPEC 6.3), also on error outcomes.
+async function tokenAfterExchange(fx, res) {
+  const base = oracleBase();
+  const transport = await createTransport(base);
+  try {
+    const req = fx.request;
+    const init = { method: req.method, headers: req.headers || {} };
+    if (req.body_hex) init.body = hb(req.body_hex);
+    const response = await transport.request(base + req.path, init);
+    res.status = response.status;
+    res.response_headers = subsetHeaders(response.headers);
+    if (fx.inputs?.close_early) {
+      const reader = response.body.getReader();
+      await reader.read();
+      await reader.cancel();
+      return;
+    }
+    const noNonce = (res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()] === undefined;
+    res.body_hex = await drain(response.body, res);
+    res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);
+  } finally {
+    try { res.token_after_exchange = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_after_exchange = false; }
+  }
 }
 
 // Streams a multi-GiB patterned body (1 MiB block, block[i] = (i + seed) & 0xff)

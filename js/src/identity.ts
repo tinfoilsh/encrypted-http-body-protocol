@@ -189,8 +189,9 @@ export class Identity {
   static async unmarshalPublicConfig(data: Uint8Array): Promise<Identity> {
     let offset = 0;
 
-    // Fixed header: key id (1) || KEM id (2) || X25519 key (32) || suites length (2)
-    if (data.length < 37) {
+    // Fixed header: key id (1) || KEM id (2) || X25519 key (32) || suites length (2).
+    // A readable foreign KEM id is UNSUPPORTED_SUITE even in a short config (Go order).
+    if (data.length < 3) {
       throw new InvalidKeyConfigError('truncated key config');
     }
 
@@ -201,6 +202,9 @@ export class Identity {
     const kemId = (data[offset++] << 8) | data[offset++];
     if (kemId !== HPKE_CONFIG.KEM) {
       throw new UnsupportedSuiteError(`unsupported KEM: 0x${kemId.toString(16).padStart(4, '0')}`);
+    }
+    if (data.length < 37) {
+      throw new InvalidKeyConfigError('truncated key config');
     }
 
     // Read Public Key (32 bytes for X25519)
@@ -379,6 +383,10 @@ export class Identity {
       return {
         request: new Request(request.url, {
           ...forwardedRequestInit(request),
+          // SPEC 5.1: a 3xx to an encrypted request is never followed; 'manual'
+          // returns it as a plaintext pass-through (in browsers, as an
+          // opaqueredirect response with status 0). A caller's 'error' is kept.
+          redirect: request.redirect === 'follow' ? 'manual' : request.redirect,
           method: request.method,
           headers,
           body: sink.body,
@@ -471,12 +479,13 @@ export async function decryptResponseWithToken(
   onStreamError?: () => void,
   onStreamComplete?: () => void,
 ): Promise<Response> {
+  // Headers.get: null when absent, '' when present and empty (SPEC 4.2: malformed).
   const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
-  if (!response.body && !responseNonceHex) {
+  if (!response.body && responseNonceHex === null) {
     return response;
   }
 
-  if (!responseNonceHex) {
+  if (responseNonceHex === null) {
     throw new MissingResponseNonceError(`missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
   }
 
@@ -588,9 +597,10 @@ function createDecryptStream(
           if (consumerCancelled) {
             return;
           }
-          fail(error instanceof Error ? error : new Error('Encrypted response read failed', {
-            cause: error,
-          }));
+          // SPEC 5.5: a transport failure inside a frame is a truncation.
+          fail(buffer.length !== 0
+            ? new FramingTruncatedError('transport failed inside an encrypted response chunk', { cause: error })
+            : error instanceof Error ? error : new Error('Encrypted response read failed', { cause: error }));
           return;
         }
         const { done, value } = result;
@@ -615,6 +625,12 @@ function createDecryptStream(
     },
     cancel(reason) {
       consumerCancelled = true;
+      // SPEC 6.3: a body abandoned before EOF ends the exchange like a completed one.
+      try {
+        onStreamComplete?.();
+      } catch {
+        // Observer failures must not interrupt stream cleanup.
+      }
       return reader.cancel(reason);
     },
   });

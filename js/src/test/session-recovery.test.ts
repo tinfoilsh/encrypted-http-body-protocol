@@ -1094,6 +1094,23 @@ describe('Session Recovery Token', () => {
       }
     });
 
+    it('should report a transport failure inside a frame as FRAMING_TRUNCATED', async () => {
+      const token: SessionRecoveryToken = { exportedSecret: new Uint8Array(32), requestEnc: new Uint8Array(32) };
+      const readError = new Error('connection reset');
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0, 0, 0, 16, 1, 2])); // length prefix + partial ciphertext
+        },
+        pull(controller) { controller.error(readError); },
+      });
+      const response = new Response(source, {
+        headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH)) },
+      });
+      const decrypted = await decryptResponseWithToken(response, token);
+      await assert.rejects(decrypted.text(), (error: Error & { cause?: unknown }) =>
+        /FRAMING_TRUNCATED/.test(error.message) && error.cause === readError);
+    });
+
     it('should clear the latest token and cancel upstream after a read failure', async () => {
       const { identity } = await generateTestKeys();
       const { Transport } = await import('../client.js');
