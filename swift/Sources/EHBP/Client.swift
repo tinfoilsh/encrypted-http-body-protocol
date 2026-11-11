@@ -104,7 +104,7 @@ public final class EHBPClient: @unchecked Sendable {
         if let token { publishToken(token, for: generation) }
         defer { clearToken(for: generation) }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: NoRedirect.shared)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
@@ -179,7 +179,7 @@ public final class EHBPClient: @unchecked Sendable {
 
         let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
         do {
-            (asyncBytes, response) = try await session.bytes(for: request)
+            (asyncBytes, response) = try await session.bytes(for: request, delegate: NoRedirect.shared)
         } catch {
             prepared.cleanup()
             clearToken(for: generation)
@@ -258,8 +258,10 @@ public final class EHBPClient: @unchecked Sendable {
             onFailure: { self.clearToken(for: generation) },
             onCancel: { asyncBytes.task.cancel() }
         )
+        // Dropping the stream before EOF ends the exchange (SPEC 6.3).
         let lifetime = StreamCancellation {
             asyncBytes.task.cancel()
+            self.clearToken(for: generation)
         }
         let stream = AsyncThrowingStream<Data, Error>(unfolding: {
             _ = lifetime
@@ -286,9 +288,10 @@ public final class EHBPClient: @unchecked Sendable {
         guard resolved.user == nil, resolved.password == nil else {
             throw EHBPError(.invalidInput, "request URL must not include credentials")
         }
+        let defaultPort = ["https": 443, "http": 80][scheme.lowercased()]
         guard resolved.scheme?.lowercased() == scheme.lowercased(),
               resolved.host?.lowercased() == host.lowercased(),
-              resolved.port == base.port else {
+              (resolved.port ?? defaultPort) == (base.port ?? defaultPort) else {
             throw EHBPError(.invalidInput, "request URL must use the configured origin: \(scheme)://\(host)")
         }
         return url
@@ -607,7 +610,18 @@ where Iterator.Element == UInt8 {
             return try await withTaskCancellationHandler {
                 var iterator = self.iterator
                 var decryptor = self.decryptor
-                while let byte = try await iterator.next() {
+                while true {
+                    let byte: UInt8?
+                    do {
+                        byte = try await iterator.next()
+                    } catch {
+                        // SPEC 5.5: the transport failed inside a frame.
+                        if !Task.isCancelled, (try? decryptor.finish()) == nil {
+                            throw EHBPError(.framingTruncated, "transport failed inside an encrypted response chunk: \(error)")
+                        }
+                        throw error
+                    }
+                    guard let byte else { break }
                     if let plaintext = try decryptor.push(byte) {
                         self.iterator = iterator
                         self.decryptor = decryptor
@@ -624,11 +638,23 @@ where Iterator.Element == UInt8 {
                 cancel()
             }
         } catch {
-            if !Task.isCancelled {
-                onFailure()
-            }
+            onFailure()
             throw error
         }
+    }
+}
+
+/// SPEC 5.1: a 3xx to an encrypted request is never followed; the redirect
+/// itself is delivered (no nonce, non-2xx: pass-through).
+final class NoRedirect: NSObject, URLSessionTaskDelegate {
+    static let shared = NoRedirect()
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 
@@ -647,18 +673,16 @@ private final class StreamCancellation: @unchecked Sendable {
 // MARK: - Data Extensions
 
 public extension Data {
-    /// Creates Data from a hex string
+    /// Creates Data from a hex string: hex digits only, even count, either
+    /// case; no prefix, sign, or whitespace (SPEC 4.1).
     init?(hexString: String) {
-        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
-        guard hex.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
-            data.append(byte)
-            index = nextIndex
+        guard hexString.count % 2 == 0 else { return nil }
+        var data = Data(capacity: hexString.count / 2)
+        var high: Int?
+        for char in hexString {
+            guard char.isASCII, let digit = char.hexDigitValue else { return nil }
+            if let high { data.append(UInt8(high << 4 | digit)) }
+            high = high == nil ? digit : nil
         }
         self = data
     }
