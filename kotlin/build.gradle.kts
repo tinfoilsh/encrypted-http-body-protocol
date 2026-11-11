@@ -4,6 +4,8 @@ plugins {
     kotlin("jvm") version "2.2.20"
     // Declared here, not in settings pluginManagement: the Kotlin plugin must load in
     // the same classloader as AGP or kotlin("android") cannot see BaseVariant (CI failure).
+    // Tradeoff: JVM-only and JitPack builds resolve the AGP artifact from google() too,
+    // though it is never applied there.
     kotlin("android") version "2.2.20" apply false
     id("com.android.library") version "8.13.0" apply false
     `java-library`
