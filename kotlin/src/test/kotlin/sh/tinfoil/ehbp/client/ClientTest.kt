@@ -242,7 +242,7 @@ class ClientTest {
 
             // JSON member names are case-sensitive: "Type" is not the type member.
             body = """{"Type":"urn:ietf:params:ehbp:error:key-config","Title":"rotated"}"""
-            assertEquals(422, tr.roundTrip(post("${srv.url}/x", "hi")).code)
+            tr.roundTrip(post("${srv.url}/x", "hi")).use { resp -> assertEquals(422, resp.code) }
         }
     }
 
