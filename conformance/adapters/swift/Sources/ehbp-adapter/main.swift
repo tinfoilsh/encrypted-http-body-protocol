@@ -181,19 +181,25 @@ func requestOp() async throws {
 func tokenAfterExchangeOp(_ ins: [String: Any]) async throws {
     let client = try await oracleClient()
     let req = fixtureRequest()
-    defer { res["token_after_exchange"] = (try? client.getSessionRecoveryToken()) != nil }
-    if ins["close_early"] as? Bool == true {
-        // The stream is dropped when this scope ends, before the token is read.
-        let (stream, response) = try await client.requestStream(
+    // The token is cleared only when the stream is dropped, so the exchange
+    // runs in its own function and the accessor is read after it returns.
+    func exchange() async throws {
+        if ins["close_early"] as? Bool == true {
+            let (stream, response) = try await client.requestStream(
+                method: req.method, path: req.path, headers: req.headers, body: req.body)
+            var iterator = stream.makeAsyncIterator()
+            _ = try await iterator.next()
+            report(response, body: nil)
+            return
+        }
+        let (data, response) = try await client.request(
             method: req.method, path: req.path, headers: req.headers, body: req.body)
-        var iterator = stream.makeAsyncIterator()
-        _ = try await iterator.next()
-        report(response, body: nil)
-        return
+        report(response, body: data)
     }
-    let (data, response) = try await client.request(
-        method: req.method, path: req.path, headers: req.headers, body: req.body)
-    report(response, body: data)
+    var failure: Error?
+    do { try await exchange() } catch { failure = error }
+    res["token_after_exchange"] = (try? client.getSessionRecoveryToken()) != nil
+    if let failure { throw failure }
 }
 
 // tokenBeforeResponseOp sends the fixture request to the holding oracle route
