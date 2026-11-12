@@ -1,6 +1,6 @@
 # EHBP Conformance Suite
 
-One fixture set runs on every client (Go, JavaScript, Python, Rust, Swift). Each
+One fixture set runs on every client (Go, JavaScript, Python, Rust, Swift, Kotlin). Each
 run emits a normalized result. The harness asserts all languages agree with each
 other and with the fixture. Any disagreement fails CI.
 
@@ -28,7 +28,7 @@ Run the matrix (each `--adapter` is optional; omit to reduce toolchains):
 ```
 python3 conformance/harness/run.py \
   --adapter go --adapter python --adapter js --adapter rust --adapter swift \
-  --adapter js-chromium --adapter js-firefox
+  --adapter kotlin --adapter js-chromium --adapter js-firefox
 ```
 
 The harness builds each adapter, starts the oracle for e2e/shape fixtures, and
@@ -59,7 +59,7 @@ test-vectors/conformance/*.json     fixtures (source of truth)
 conformance/spec/errors.md          canonical error enum
 conformance/schema/*.schema.json    result and fixture formats
 conformance/server/                 Go oracle server
-conformance/adapters/{go,js,python,rust,swift}/   CLI runners (public API only)
+conformance/adapters/{go,js,python,rust,swift,kotlin}/   CLI runners (public API only)
 conformance/adapters/js-browser/    Playwright page (Chromium and Firefox batch runners)
 conformance/harness/                orchestrator: run, collect, diff, report
 ```
@@ -110,7 +110,7 @@ Normative. A change that weakens one MUST be rejected.
   Request fixtures assert round-trip plaintext, not golden request bytes.
 - Browsers coalesce duplicate headers. The duplicate-nonce fixture is `skipped` in
   browser mode and covered by native adapters.
-- Only Go has a server. The suite tests five clients against one reference server.
+- Only Go has a server. The suite tests six clients against one reference server.
 - Because framing has no authenticated end marker, truncation exactly on a
   valid frame boundary is indistinguishable from a complete shorter message.
   This protocol-level limitation is documented in `SECURITY-AUDIT.md` rather

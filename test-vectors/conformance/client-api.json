@@ -40,11 +40,125 @@
     }
   },
   {
+    "id": "discover-content-type-params",
+    "description": "Discovery accepts the media type case-insensitively and with parameters (SPEC 3.1).",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "ct_params"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "ok"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
+    }
+  },
+  {
+    "id": "discover-status-203",
+    "description": "Discovery accepts status 200 only; a 203 (proxy-modified) config is rejected (SPEC 3.1).",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "status203"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
+    }
+  },
+  {
+    "id": "discover-redirect",
+    "description": "Discovery never follows a redirect, even to the valid config (SPEC 3.1).",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "redirect"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
+    }
+  },
+  {
+    "id": "discover-trailing-bytes",
+    "description": "Bytes after the first key_config are ignored (SPEC 3.1).",
+    "category": "client-api",
+    "operation": "discover",
+    "inputs": {
+      "target": "trailing"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "ok"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-discovery-or-request-guards"
+    }
+  },
+  {
     "id": "harden-reserved-header",
-    "description": "Client rejects a caller setting a reserved protocol header.",
+    "description": "Client rejects a caller setting Ehbp-Response-Nonce.",
     "category": "client-api",
     "operation": "reject_reserved_header",
-    "inputs": {},
+    "inputs": {
+      "header": "Ehbp-Response-Nonce"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  },
+  {
+    "id": "harden-reserved-header-encapsulated-key",
+    "description": "Client rejects a caller setting Ehbp-Encapsulated-Key.",
+    "category": "client-api",
+    "operation": "reject_reserved_header",
+    "inputs": {
+      "header": "Ehbp-Encapsulated-Key"
+    },
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_INPUT"
+    }
+  },
+  {
+    "id": "harden-reserved-header-host",
+    "description": "Client rejects a caller-supplied Host header: the authority follows the validated URL (SPEC 5.1).",
+    "category": "client-api",
+    "operation": "reject_reserved_header",
+    "inputs": {
+      "header": "Host"
+    },
     "browser": {
       "runnable": false,
       "skip_reason": "client-api-ops-tested-in-native-adapters"

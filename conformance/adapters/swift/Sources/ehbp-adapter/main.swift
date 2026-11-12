@@ -82,6 +82,8 @@ func run() async throws {
         try await largeBodyOp(ins)
     case "token_before_response":
         try await tokenBeforeResponseOp()
+    case "token_after_exchange":
+        try await tokenAfterExchangeOp(ins)
     default:
         throw EHBPError(.invalidInput, "unknown operation \(op)")
     }
@@ -102,7 +104,9 @@ func hardeningOp(_ operation: String) async throws {
     } else if operation == "reject_url_credentials" {
         base = "http://user:pass@configured.example"
     } else {
-        headers[EHBPProtocol.responseNonceHeader] = String(repeating: "0", count: EHBPConstants.responseNonceLength * 2)
+        let name = (fx["inputs"] as? [String: Any])?["header"] as? String ?? EHBPProtocol.responseNonceHeader
+        headers[name] = name.lowercased() == "host"
+            ? "attacker.invalid" : String(repeating: "0", count: EHBPConstants.responseNonceLength * 2)
     }
 
     let client = try EHBPClient(baseURL: base, publicKey: publicKey, session: session)
@@ -142,31 +146,60 @@ func oracleClient() async throws -> EHBPClient {
     return try EHBPClient(baseURL: base, config: config)
 }
 
-func requestOp() async throws {
-    let client = try await oracleClient()
-
+func fixtureRequest() -> (method: String, path: String, headers: [String: String], body: Data?) {
     let req = fx["request"] as? [String: Any] ?? [:]
     var headers = [String: String]()
     if let h = req["headers"] as? [String: Any] {
         for (k, v) in h { if let s = v as? String { headers[k] = s } }
     }
-    var body: Data?
-    if let bh = req["body_hex"] as? String { body = Data(hexString: bh) }
+    return ((req["method"] as? String) ?? "POST", (req["path"] as? String) ?? "/", headers,
+            (req["body_hex"] as? String).flatMap { Data(hexString: $0) })
+}
 
-    let (data, response) = try await client.request(
-        method: (req["method"] as? String) ?? "POST",
-        path: (req["path"] as? String) ?? "/",
-        headers: headers, body: body)
-
+func report(_ response: HTTPURLResponse, body: Data?) {
     res["status"] = response.statusCode
     var hdrs = [String: String]()
     for name in headerSubset {
         if let v = response.value(forHTTPHeaderField: name) { hdrs[name] = v }
     }
     res["response_headers"] = hdrs
-    let noNonce = hdrs["ehbp-response-nonce"] == nil
-    setBody(data)
-    res["passthrough"] = noNonce && !(200..<300).contains(response.statusCode)
+    if let body { setBody(body) }
+    res["passthrough"] = hdrs["ehbp-response-nonce"] == nil && !(200..<300).contains(response.statusCode)
+}
+
+func requestOp() async throws {
+    let client = try await oracleClient()
+    let req = fixtureRequest()
+    let (data, response) = try await client.request(
+        method: req.method, path: req.path, headers: req.headers, body: req.body)
+    report(response, body: data)
+}
+
+// tokenAfterExchangeOp runs the fixture request, lets the exchange end (fully
+// read, abandoned after one chunk when close_early is set, or failed), then
+// reports whether the public token accessor still returns one (SPEC 6.3).
+func tokenAfterExchangeOp(_ ins: [String: Any]) async throws {
+    let client = try await oracleClient()
+    let req = fixtureRequest()
+    // The token is cleared only when the stream is dropped, so the exchange
+    // runs in its own function and the accessor is read after it returns.
+    func exchange() async throws {
+        if ins["close_early"] as? Bool == true {
+            let (stream, response) = try await client.requestStream(
+                method: req.method, path: req.path, headers: req.headers, body: req.body)
+            var iterator = stream.makeAsyncIterator()
+            _ = try await iterator.next()
+            report(response, body: nil)
+            return
+        }
+        let (data, response) = try await client.request(
+            method: req.method, path: req.path, headers: req.headers, body: req.body)
+        report(response, body: data)
+    }
+    var failure: Error?
+    do { try await exchange() } catch { failure = error }
+    res["token_after_exchange"] = (try? client.getSessionRecoveryToken()) != nil
+    if let failure { throw failure }
 }
 
 // tokenBeforeResponseOp sends the fixture request to the holding oracle route

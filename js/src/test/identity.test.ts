@@ -49,6 +49,8 @@ describe('Identity', () => {
     const config = await (await Identity.generate()).marshalConfig();
     config[2] = 0x10; // DHKEM(P-256)
     await assert.rejects(Identity.unmarshalPublicConfig(config), UnsupportedSuiteError);
+    // A short config whose KEM id is readable and foreign is still an unsupported suite.
+    await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, 3)), UnsupportedSuiteError);
     // A config too short to hold a KEM id is malformed, not an unsupported suite.
     await assert.rejects(Identity.unmarshalPublicConfig(config.slice(0, 2)), InvalidKeyConfigError);
     await assert.rejects(Identity.unmarshalPublicConfig(new Uint8Array(0)), InvalidKeyConfigError);

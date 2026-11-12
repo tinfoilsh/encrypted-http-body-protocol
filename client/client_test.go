@@ -732,29 +732,31 @@ func TestTransportGetSessionRecoveryToken(t *testing.T) {
 		assert.Nil(t, transport.GetSessionRecoveryToken())
 	})
 
-	t.Run("retained after response body is closed before EOF", func(t *testing.T) {
+	t.Run("cleared when the response body is closed before EOF", func(t *testing.T) {
+		// SPEC 6.3: an abandoned body ends the exchange like any other outcome.
 		req, err := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("test")))
 		assert.NoError(t, err)
 
 		resp, err := httpClient.Do(req)
 		assert.NoError(t, err)
+		assert.NotNil(t, transport.GetSessionRecoveryToken())
 		assert.NoError(t, resp.Body.Close())
 
-		assert.NotNil(t, transport.GetSessionRecoveryToken())
+		assert.Nil(t, transport.GetSessionRecoveryToken())
 	})
 
 	t.Run("updates on each new request", func(t *testing.T) {
 		req1, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("req1")))
 		resp1, err := httpClient.Do(req1)
 		assert.NoError(t, err)
-		resp1.Body.Close()
 		token1 := transport.GetSessionRecoveryToken()
+		resp1.Body.Close()
 
 		req2, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("req2")))
 		resp2, err := httpClient.Do(req2)
 		assert.NoError(t, err)
-		resp2.Body.Close()
 		token2 := transport.GetSessionRecoveryToken()
+		resp2.Body.Close()
 
 		assert.NotEqual(t, token1.ExportedSecret, token2.ExportedSecret,
 			"Tokens from different requests must have different exported secrets")
@@ -765,8 +767,8 @@ func TestTransportGetSessionRecoveryToken(t *testing.T) {
 		req1, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("body")))
 		resp1, err := httpClient.Do(req1)
 		assert.NoError(t, err)
-		resp1.Body.Close()
 		assert.NotNil(t, transport.GetSessionRecoveryToken())
+		resp1.Body.Close()
 
 		// GET without body should clear the token
 		req2, _ := http.NewRequest("GET", server.URL+"/plain", nil)
@@ -821,13 +823,14 @@ func TestTransportLatestRequestOwnsRecoveryToken(t *testing.T) {
 	assert.NoError(t, err)
 	secondResp, err := httpClient.Do(secondReq)
 	assert.NoError(t, err)
-	secondResp.Body.Close()
 	secondToken := append([]byte(nil), transport.GetSessionRecoveryToken().RequestEnc...)
 
 	close(releaseFirst)
 	assert.NoError(t, <-firstResult)
 	assert.Equal(t, secondToken, transport.GetSessionRecoveryToken().RequestEnc,
-		"an older response must not replace the latest token")
+		"an older response completing (and being closed) must not replace or clear the latest token")
+	secondResp.Body.Close()
+	assert.Nil(t, transport.GetSessionRecoveryToken(), "closing the latest body consumes its token (SPEC 6.3)")
 }
 
 func TestTransportInvalidatesRecoveryTokenWhenRequestStarts(t *testing.T) {
@@ -857,9 +860,9 @@ func TestTransportInvalidatesRecoveryTokenWhenRequestStarts(t *testing.T) {
 	assert.NoError(t, err)
 	initialResp, err := httpClient.Do(initialReq)
 	assert.NoError(t, err)
-	initialResp.Body.Close()
 	initialToken := transport.GetSessionRecoveryToken()
 	assert.NotNil(t, initialToken)
+	initialResp.Body.Close()
 
 	blockedResult := make(chan error, 1)
 	go func() {
@@ -883,7 +886,7 @@ func TestTransportInvalidatesRecoveryTokenWhenRequestStarts(t *testing.T) {
 	assert.NotEqual(t, initialToken.RequestEnc, inFlight.RequestEnc, "the in-flight token belongs to the new request")
 	close(releaseBlocked)
 	assert.NoError(t, <-blockedResult)
-	assert.NotNil(t, transport.GetSessionRecoveryToken())
+	assert.Nil(t, transport.GetSessionRecoveryToken(), "the blocked exchange was read and closed: consumed (SPEC 6.3)")
 }
 
 func TestTransportPublishesRecoveryTokenBeforeSending(t *testing.T) {

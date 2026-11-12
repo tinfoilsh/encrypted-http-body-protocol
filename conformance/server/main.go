@@ -105,26 +105,49 @@ func main() {
 	if err != nil {
 		log.Fatalf("oracle: main listener %s: %v", *addr, err)
 	}
-	badCT := serveBadConfig(net.JoinHostPort(host, "0"), id, "bad-ct")
-	non200 := serveBadConfig(net.JoinHostPort(host, "0"), id, "non200")
-	fmt.Printf("listening main=%s bad_ct=%s non200=%s\n", mainLn.Addr(), badCT, non200)
+	mainKeys := "http://" + mainLn.Addr().String() + protocol.KeysPath
+	aux := []string{"bad_ct", "non200", "ct_params", "status203", "redirect", "trailing"}
+	var line strings.Builder
+	line.WriteString("listening main=" + mainLn.Addr().String())
+	for _, mode := range aux {
+		line.WriteString(fmt.Sprintf(" %s=%s", mode, serveBadConfig(net.JoinHostPort(host, "0"), id, mode, mainKeys)))
+	}
+	fmt.Println(line.String())
 	log.Printf("oracle: public key %s", id.MarshalPublicKeyHex())
 	log.Fatal(http.Serve(mainLn, mux))
 }
 
-// serveBadConfig answers /.well-known/hpke-keys with a malformed discovery
-// response: "bad-ct" returns the valid config bytes under the wrong content type;
-// "non200" returns a 500.
-func serveBadConfig(addr string, id *identity.Identity, mode string) string {
+// serveBadConfig answers /.well-known/hpke-keys with a discovery variant
+// (SPEC 3.1): "bad_ct" serves the valid config under the wrong media type;
+// "non200" returns a 500; "ct_params" serves it under a mixed-case media type
+// with parameters (valid); "status203" serves it correctly but with status 203
+// (invalid: only 200 is accepted); "redirect" answers 302 to the main listener
+// (invalid: discovery never follows redirects); "trailing" appends 1 MiB of
+// junk after the config (valid: only the first key_config is read).
+func serveBadConfig(addr string, id *identity.Identity, mode string, mainKeys string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.KeysPath, cors(func(w http.ResponseWriter, r *http.Request) {
-		if mode == "non200" {
-			http.Error(w, "unavailable", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain") // wrong media type
 		cfg, _ := id.MarshalConfig()
-		_, _ = w.Write(cfg)
+		switch mode {
+		case "non200":
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+		case "bad_ct":
+			w.Header().Set("Content-Type", "text/plain") // wrong media type
+			_, _ = w.Write(cfg)
+		case "ct_params":
+			w.Header().Set("Content-Type", "Application/OHTTP-Keys; charset=utf-8")
+			_, _ = w.Write(cfg)
+		case "status203":
+			w.Header().Set("Content-Type", protocol.KeysMediaType)
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			_, _ = w.Write(cfg)
+		case "redirect":
+			w.Header().Set("Location", mainKeys)
+			w.WriteHeader(http.StatusFound)
+		case "trailing":
+			w.Header().Set("Content-Type", protocol.KeysMediaType)
+			_, _ = w.Write(append(cfg, make([]byte, 1<<20)...))
+		}
 	}))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -140,7 +163,9 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key")
+		// X-Caller is the caller-supplied header the request_meta scenario echoes
+		// (SPEC 5.1: caller headers are preserved); browsers preflight it.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key, X-Caller")
 		w.Header().Set("Access-Control-Expose-Headers", "Ehbp-Response-Nonce, Ehbp-Encapsulated-Key, Content-Type, X-Oracle-Public-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -183,6 +208,95 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, "plaintext for bodyless request")
+			return
+		case "drop_nonce_204":
+			// A 2xx with no nonce and no body: still MISSING_RESPONSE_NONCE (SPEC 5.1).
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "redirect_302":
+			// A redirect of an encrypted request is never followed (SPEC 5.1): it
+			// is a non-2xx without a nonce and passes through.
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Location", "/s/bodyless_plaintext")
+			w.WriteHeader(http.StatusFound)
+			io.WriteString(w, "redirecting")
+			return
+		case "problem_422_other_type":
+			// An application-level problem document: not a key-config problem.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"urn:example:validation","title":"bad field"}`)
+			return
+		case "problem_422_text_plain":
+			// The right type under the wrong media type is not a problem document.
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"stale"}`)
+			return
+		case "problem_422_numeric_title":
+			// type decides; a non-string title only loses its text (SPEC 5.4.2).
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":7}`)
+			return
+		case "problem_422_case_keys":
+			// JSON member names are case-sensitive: "Type" is not "type".
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"Type":"`+protocol.KeyConfigProblemType+`","Title":"stale"}`)
+			return
+		case "problem_422_oversized":
+			// A key-config type inside a document above 64 KiB is not parsed.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"`+strings.Repeat("x", 70_000)+`"}`)
+			return
+		case "problem_422_deep_array":
+			// 50 000 nested arrays: a recursive JSON parser must not take the
+			// client down; this is simply not a problem document.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":`+strings.Repeat("[", 50_000))
+			return
+		}
+
+		// Observation route for request headers (SPEC 4.1, 5.1, 7.4): reports
+		// what arrived, encrypted when the request was, so the harness can
+		// assert the key header is present iff a body is, lowercase, and that
+		// caller headers survive. The format is fixed: enc=<count>:<len>:<case>.
+		if name == "request_meta" {
+			raw, _ := io.ReadAll(r.Body)
+			keys := r.Header.Values(protocol.EncapsulatedKeyHeader)
+			first, kase := "", "none"
+			if len(keys) > 0 {
+				first = keys[0]
+				switch {
+				case first == strings.ToLower(first):
+					kase = "lower"
+				case first == strings.ToUpper(first):
+					kase = "upper"
+				default:
+					kase = "mixed"
+				}
+			}
+			line := fmt.Sprintf("enc=%d:%d:%s x-caller=%s", len(keys), len(first), kase, r.Header.Get("X-Caller"))
+			if len(keys) == 0 {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusOK)
+				io.WriteString(w, line)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			respCtx, err := id.DecryptRequestWithContext(r)
+			if err != nil || respCtx == nil {
+				http.Error(w, "bad encrypted request", http.StatusBadRequest)
+				return
+			}
+			if _, err := io.ReadAll(r.Body); err != nil {
+				http.Error(w, "request decryption failed", http.StatusBadRequest)
+				return
+			}
+			sealAndWrite(w, id, respCtx, []byte(line))
 			return
 		}
 
@@ -271,6 +385,34 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			writeEncrypted(w, emptyNonce, emptyFramed, http.StatusOK)
 		case "drop_nonce_200":
 			writeEncrypted(w, "", framed, http.StatusOK)
+		case "empty_nonce_200", "empty_nonce_502":
+			// The header is present with an empty value: malformed, not absent
+			// (SPEC 4.2), whatever the status.
+			w.Header().Set(protocol.ResponseNonceHeader, "")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if name == "empty_nonce_200" {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+			_, _ = w.Write(framed)
+		case "invalid_nonce_0x":
+			writeEncrypted(w, "0x"+nonce[:62], framed, http.StatusOK)
+		case "invalid_nonce_space":
+			writeEncrypted(w, nonce[:10]+" "+nonce[11:], framed, http.StatusOK)
+		case "encrypted_422_problem":
+			// A 422 that carries a nonce is ciphertext like any other response
+			// (SPEC 5.1); it is never a key-config problem.
+			problem := `{"type":"` + protocol.KeyConfigProblemType + `","title":"encrypted"}`
+			pNonce, pFramed, e := sealResponse(id, respCtx, []byte(problem))
+			if e != nil {
+				http.Error(w, "response setup failed", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(protocol.ResponseNonceHeader, pNonce)
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write(pFramed)
 		case "invalid_nonce_len":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 16)), framed, http.StatusOK)
 		case "invalid_nonce_hex":

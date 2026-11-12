@@ -19,12 +19,13 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 | `decrypt_request` | `mutation`, optional mutation parameters | decrypted request plaintext | `INVALID_ENCAPSULATED_KEY`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `KEY_CONFIG_MISMATCH` |
 | `middleware_request` | `mutation` | no body; the handler reads the request body to EOF and success means that read completed | `AEAD_DECRYPT_FAILED` (a later frame failed inside the handler's read; the authenticated prefix was delivered and is reported in `bytes_emitted_before_error`), `KEY_CONFIG_MISMATCH`, `INVALID_ENCAPSULATED_KEY` |
 | `request` | top-level `request` {`method`, `path`, `headers`, `body_hex`} against the oracle `server_scenario` | decrypted response body; `status`, `response_headers`, `passthrough` also reported | any client-side code: `MISSING_RESPONSE_NONCE`, `INVALID_RESPONSE_NONCE`, `DUPLICATE_RESPONSE_NONCE`, `KEY_CONFIG_MISMATCH`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `AEAD_DECRYPT_FAILED` |
-| `discover` | `target` (`ORACLE_URL`, `bad_ct`, `non200`) | none; success means the client accepted the key config | `INVALID_KEY_CONFIG` |
-| `reject_reserved_header` | none (adapter sets `Ehbp-Response-Nonce` itself) | none; the request MUST NOT be sent | `INVALID_INPUT` |
+| `discover` | `target`: the oracle (`ORACLE_URL`) or one of its discovery variants `bad_ct`, `non200`, `ct_params`, `status203`, `redirect`, `trailing`, exposed to adapters as `ORACLE_<TARGET>_URL` | none; success means the client accepted the key config | `INVALID_KEY_CONFIG` |
+| `reject_reserved_header` | `header`: the reserved header the adapter sets on the request (`Ehbp-Response-Nonce`, `Ehbp-Encapsulated-Key`, or `Host`) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `reject_cross_origin` | none (adapter targets an absolute URL on another origin) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `reject_url_credentials` | none (adapter configures a base URL with userinfo) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `large_body` (`heavy`) | `size_bytes`, `block_seed`; body is a 1 MiB block with `block[i] = (i + seed) & 0xff` repeated, generated lazily | the oracle's raw SHA-256 of the plaintext; `peak_rss_bytes` reported when measurable and failed above 512 MiB | as `request` |
 | `token_before_response` | top-level `request`; the oracle holds its reply 5 s, the adapter reads the session recovery token 500 ms after sending | echoed body; `token_before_response` (ASSERTED, cross-compared) is whether the token was readable while the response was pending | as `request` |
+| `token_after_exchange` | top-level `request` against `server_scenario`, optional `close_early` (read at most one frame of the body, then close it and report `body_hex` null); afterwards the adapter reads the public session-recovery-token accessor | as `request`; `token_after_exchange` (ASSERTED, also on error outcomes) is whether a token was still readable after the exchange ended (SPEC 6.3 requires `false`) | as `request` |
 
 ## Rules
 

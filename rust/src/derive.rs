@@ -16,7 +16,7 @@ use crate::{
     Code, Error, Result,
 };
 
-const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_RESPONSE_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ResponseKeyMaterial {
@@ -229,9 +229,14 @@ impl ResponseDecryptor {
         }
     }
 
+    /// True while bytes of an incomplete length prefix or frame are buffered.
+    pub(crate) fn has_partial_frame(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
     /// Validates that source EOF occurred on a frame boundary.
     pub fn finish(&self) -> Result<()> {
-        if self.buffer.is_empty() {
+        if !self.has_partial_frame() {
             Ok(())
         } else {
             Err(Error::Coded(

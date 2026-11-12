@@ -169,7 +169,9 @@ public final class Identity: Sendable {
     ///
     /// - Parameter config: RFC 9458 key configuration data
     public init(config: Data) throws {
-        guard config.count >= 7 else {
+        // The KEM is checked as soon as it is readable (UNSUPPORTED_SUITE);
+        // only a config too short to carry it is a truncation.
+        guard config.count >= 3 else {
             throw EHBPError(.invalidKeyConfig, "config too short")
         }
 
@@ -203,12 +205,14 @@ public final class Identity: Sendable {
         let cipherSuitesLength = Int(config[offset]) << 8 | Int(config[offset + 1])
         offset += 2
 
-        // Parse first cipher suite
-        guard cipherSuitesLength >= 4, config.count >= offset + 4 else {
-            throw EHBPError(.invalidKeyConfig, "no cipher suites in config")
-        }
         guard config.count >= offset + cipherSuitesLength else {
             throw EHBPError(.invalidKeyConfig, "truncated cipher suites")
+        }
+        guard cipherSuitesLength % 4 == 0 else {
+            throw EHBPError(.invalidKeyConfig, "cipher suites length is not a multiple of 4")
+        }
+        guard cipherSuitesLength > 0 else {
+            throw EHBPError(.invalidKeyConfig, "no cipher suites in config")
         }
         // SPEC 3.2: a key_config advertises exactly one suite.
         guard cipherSuitesLength == 4 else {

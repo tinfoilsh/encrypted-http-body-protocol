@@ -49,6 +49,16 @@ def test_decrypt_response_matches_shared_vector():
     assert plaintext.hex() == vector["plaintext"]
 
 
+@pytest.mark.parametrize(
+    "bad", ["0x" + "00" * 31, "00" * 16 + " " + "00" * 16, "00" * 32 + "\n", "00" * 31 + "0"]
+)
+def test_session_recovery_token_rejects_non_strict_hex(bad):
+    with pytest.raises(InvalidTokenError):
+        SessionRecoveryToken.from_dict({"exportedSecret": bad, "requestEnc": "00" * 32})
+    upper = SessionRecoveryToken.from_dict({"exportedSecret": "AB" * 32, "requestEnc": "cd" * 32})
+    assert upper.exported_secret == b"\xab" * 32
+
+
 def test_session_recovery_token_json_shape():
     vector = _load("session-recovery-token.json")
     token = SessionRecoveryToken.from_dict(vector)

@@ -1108,3 +1108,34 @@ func TestDecapsulationFailureIsAKeyConfigMismatch(t *testing.T) {
 	assert.Equal(t, protocol.HPKESetupFailed, protocol.CodeOf(err))
 	assert.True(t, IsKeyConfigError(err), "setup failure must map to 422, not 400 (SPEC 5.4.2)")
 }
+
+// unknownLengthReader hides the concrete type so http.NewRequest does not
+// recognise an empty body and substitute http.NoBody.
+type unknownLengthReader struct{ io.Reader }
+
+func TestEncryptRequestEmptyStreamSealsOneFrame(t *testing.T) {
+	serverID, err := NewIdentity()
+	require.NoError(t, err)
+	pub, err := FromPublicKeyBytes(serverID.MarshalPublicKey())
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/x", unknownLengthReader{strings.NewReader("")})
+	ctx, err := pub.EncryptRequestWithContext(req)
+	assert.NoError(t, err)
+	assert.NotNil(t, ctx, "an unknown-length body is encrypted")
+
+	framed, err := io.ReadAll(req.Body)
+	assert.NoError(t, err)
+	// SPEC 5.1: one frame of empty plaintext (4-byte prefix + 16-byte tag), never zero frames.
+	assert.Len(t, framed, 4+16)
+
+	// The server authenticates the frame (and so the encapsulated key) and sees an empty body.
+	srvReq := httptest.NewRequest(http.MethodPost, "/x", bytes.NewReader(framed))
+	srvReq.Header.Set(protocol.EncapsulatedKeyHeader, req.Header.Get(protocol.EncapsulatedKeyHeader))
+	respCtx, err := serverID.DecryptRequestWithContext(srvReq)
+	assert.NoError(t, err)
+	assert.NotNil(t, respCtx)
+	plain, err := io.ReadAll(srvReq.Body)
+	assert.NoError(t, err)
+	assert.Empty(t, plain)
+}
