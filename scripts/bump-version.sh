@@ -83,13 +83,19 @@ awk -v ver="$VERSION" '
 mv "$tmp" "$ROOT/rust/Cargo.lock"
 echo "  updated rust/Cargo.toml + Cargo.lock"
 
+# --- Kotlin: the Gradle project version and the JitPack coordinate in the README ---
+replace_in_file "s/^version *=.*/version = \"$VERSION\"/" "$ROOT/kotlin/build.gradle.kts"
+replace_in_file "s/(:ehbp:v)[0-9][^\"]*/\1$VERSION/" "$ROOT/kotlin/README.md"
+echo "  updated kotlin/build.gradle.kts + README.md"
+
 echo
 echo "Versions now set:"
 grep -E '^[[:space:]]*"version"|^version|^__version__' \
   "$ROOT/js/package.json" \
   "$ROOT/python/pyproject.toml" \
   "$ROOT/python/src/ehbp/__init__.py" \
-  "$ROOT/rust/Cargo.toml" || true
+  "$ROOT/rust/Cargo.toml" \
+  "$ROOT/kotlin/build.gradle.kts" || true
 
 echo
 echo "Go and Swift release via the git tag (v$VERSION) -- no files to change."

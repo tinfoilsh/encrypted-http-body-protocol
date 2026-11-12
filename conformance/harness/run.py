@@ -155,6 +155,18 @@ def build_adapters(names):
                 adapters["swift"] = [str(bin_path)]
         except (FileNotFoundError, subprocess.CalledProcessError):
             pass
+    if "kotlin" in names:
+        bin_path = ROOT / "conformance/adapters/kotlin/build/install/ehbp-adapter/bin/ehbp-adapter"
+        try:
+            # -PnoAndroid: the runner is a JVM program; never require an Android SDK here.
+            # No JDK means the runner is unavailable; a failed build propagates like Go's.
+            subprocess.run(["./gradlew", "-q", "-PnoAndroid", ":adapter:installDist"], cwd=ROOT / "kotlin", check=True,
+                           stdout=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+        else:
+            if bin_path.exists():
+                adapters["kotlin"] = [str(bin_path)]
     for eng in ("chromium", "firefox"):
         nm = f"js-{eng}"
         if nm in names:

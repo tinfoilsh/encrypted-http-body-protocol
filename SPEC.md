@@ -329,7 +329,7 @@ sequence number zero.
 
 - A session recovery token is equivalent in power to the ability to decrypt a single response. It MUST be treated as sensitive key material.
 - Tokens are scoped to a single request-response exchange. Each encrypted request produces a unique token; tokens cannot be reused across requests.
-- A token is considered consumed once the corresponding response has been fully decrypted, or once a new request supersedes it. Implementations MUST delete all representations of a consumed token immediately. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
+- A token is considered consumed once the corresponding exchange has ended, whatever the outcome: the response has been fully decrypted; a new request supersedes it; the response was passed through unauthenticated (Section 5.1); the server returned a key-configuration problem (Section 5.4.2); or the exchange failed with a transport error or a protocol failure (Section 5.4.1), including a body that stopped authenticating mid-stream. Implementations MUST delete all representations of a consumed token immediately, so no live key material outlives the exchange it belongs to. A client that wants to recover a response after an interruption therefore persists the token before sending the request (Section 6), not after a failure. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
 
 ## 7. Security Considerations
 
