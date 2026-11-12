@@ -1,13 +1,19 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+// AGP is needed only when android/ is part of the build (settings.gradle.kts includes
+// it when an SDK is present and -PnoAndroid is absent). It must load on the root build
+// classpath, in the same classloader as the Kotlin plugin, or kotlin("android") cannot
+// see AGP's classes; a conditional classpath keeps JVM-only and JitPack builds from
+// resolving it at all. kotlin("android") itself ships in the Kotlin plugin applied below.
+buildscript {
+    if (findProject(":android") != null) {
+        repositories { google(); mavenCentral() }
+        dependencies { classpath("com.android.tools.build:gradle:8.13.0") }
+    }
+}
+
 plugins {
     kotlin("jvm") version "2.2.20"
-    // Declared here, not in settings pluginManagement: the Kotlin plugin must load in
-    // the same classloader as AGP or kotlin("android") cannot see BaseVariant (CI failure).
-    // Tradeoff: JVM-only and JitPack builds resolve the AGP artifact from google() too,
-    // though it is never applied there.
-    kotlin("android") version "2.2.20" apply false
-    id("com.android.library") version "8.13.0" apply false
     `java-library`
     `maven-publish`
 }
