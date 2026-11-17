@@ -107,14 +107,14 @@ public func extractSessionRecoveryToken(context: RequestContext) throws -> Sessi
     )
 }
 
-/// Decrypts a response body using a session recovery token. Pass
-/// `requireFrame: true` for a response that claims success, so a body in
-/// which no chunk authenticated is refused.
+/// Decrypts a response body using a session recovery token. A body in which
+/// no chunk authenticated is refused; pass `requireFrame: false` only for a
+/// 4xx or 5xx response, which may be empty.
 public func decryptResponseBody(
     token: SessionRecoveryToken,
     responseNonce: Data,
     encryptedData: Data,
-    requireFrame: Bool = false
+    requireFrame: Bool = true
 ) throws -> Data {
     var decryptor = try token.makeResponseDecryptor(responseNonce: responseNonce)
     decryptor.requiresFrame = requireFrame

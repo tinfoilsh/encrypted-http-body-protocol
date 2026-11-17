@@ -214,7 +214,6 @@ final class DeriveTests: XCTestCase {
 
         // Nothing arrived, or only zero-length frames: nothing authenticated.
         var silent = ResponseDecryptor(keyMaterial: keyMaterial)
-        silent.requiresFrame = true
         XCTAssertTrue(try silent.push(Data([0, 0, 0, 0])).isEmpty)
         XCTAssertThrowsError(try silent.finish()) { error in
             XCTAssertEqual((error as? EHBPError)?.code, .framingTruncated)
@@ -225,12 +224,13 @@ final class DeriveTests: XCTestCase {
         var frame = Data([0, 0, 0, UInt8(ciphertext.count)])
         frame.append(ciphertext)
         var answered = ResponseDecryptor(keyMaterial: keyMaterial)
-        answered.requiresFrame = true
         XCTAssertEqual(try answered.push(frame).reduce(0) { $0 + $1.count }, 0)
         XCTAssertNoThrow(try answered.finish())
 
-        // Without the requirement an empty body stays acceptable.
-        XCTAssertNoThrow(try ResponseDecryptor(keyMaterial: keyMaterial).finish())
+        // An error response may be empty.
+        var failed = ResponseDecryptor(keyMaterial: keyMaterial)
+        failed.requiresFrame = false
+        XCTAssertNoThrow(try failed.finish())
     }
 
     func testEncryptDecryptChunk() throws {

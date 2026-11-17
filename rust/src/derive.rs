@@ -178,7 +178,9 @@ impl ResponseDecryptor {
         self
     }
 
-    /// Adds encrypted bytes and returns all newly authenticated plaintext frames.
+    /// Adds encrypted bytes and returns the newly authenticated plaintext
+    /// frames that carry data. A frame sealing an empty plaintext
+    /// authenticates the response and is not returned.
     pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.feed(data);
         let mut plaintext = Vec::new();

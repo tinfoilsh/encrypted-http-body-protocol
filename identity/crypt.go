@@ -271,6 +271,11 @@ type DerivedResponseWriter struct {
 
 // WriteHeader captures the status code and delegates to the underlying ResponseWriter
 func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
+	// 204 and 205 cannot carry the chunk a client needs to authenticate a
+	// success (SPEC 5.2), so they are sent as 200 with an empty body.
+	if statusCode == http.StatusNoContent || statusCode == http.StatusResetContent {
+		statusCode = http.StatusOK
+	}
 	if !w.wroteHeader {
 		w.ResponseWriter.Header().Del("Content-Length")
 		w.statusCode = statusCode
@@ -292,8 +297,8 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 }
 
 // Finish gives a response with no body one frame of empty plaintext, so the
-// client has something to authenticate (SPEC 5.3). A status that cannot carry
-// a body is left alone. Middleware calls it when the handler returns; code
+// client has something to authenticate (SPEC 5.3). A 101 or 304, which cannot
+// carry a body, is left alone. Middleware calls it when the handler returns; code
 // that drives the writer directly calls it once the response is complete.
 func (w *DerivedResponseWriter) Finish() error {
 	if w.wroteFrame {
@@ -302,8 +307,7 @@ func (w *DerivedResponseWriter) Finish() error {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
-	if w.statusCode < http.StatusOK || w.statusCode == http.StatusNoContent ||
-		w.statusCode == http.StatusResetContent || w.statusCode == http.StatusNotModified {
+	if w.statusCode == http.StatusSwitchingProtocols || w.statusCode == http.StatusNotModified {
 		return nil
 	}
 	_, err := w.writeFrame(nil)

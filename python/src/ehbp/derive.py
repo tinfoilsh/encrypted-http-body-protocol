@@ -124,7 +124,7 @@ def frame_chunk(ciphertext: bytes) -> bytes:
 
 
 def decrypt_framed_response(
-    km: ResponseKeyMaterial, body: bytes, *, require_frame: bool = False
+    km: ResponseKeyMaterial, body: bytes, *, require_frame: bool = True
 ) -> bytes:
     decryptor = FrameDecryptor(km, require_frame=require_frame)
     chunks = decryptor.push(body)
@@ -140,9 +140,9 @@ class FrameDecryptor:
     trailing chunk. Zero-length frames are skipped without consuming a sequence
     number, matching the framing rules in SPEC Section 4.3.
 
-    With ``require_frame``, :meth:`finish` also fails a stream in which no
-    chunk authenticated: a response that claims success must carry one
-    (SPEC Section 5.3).
+    :meth:`finish` also fails a stream in which no chunk authenticated: a
+    response that claims success must carry one (SPEC Section 5.3). Pass
+    ``require_frame=False`` only for a 4xx or 5xx response, which may be empty.
     """
 
     def __init__(
@@ -150,7 +150,7 @@ class FrameDecryptor:
         km: ResponseKeyMaterial,
         max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH,
         *,
-        require_frame: bool = False,
+        require_frame: bool = True,
     ) -> None:
         self._km = km
         self._require_frame = require_frame

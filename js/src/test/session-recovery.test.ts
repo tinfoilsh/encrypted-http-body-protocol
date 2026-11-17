@@ -539,17 +539,20 @@ describe('Session Recovery Token', () => {
       assert.strictEqual(text, 'full reply');
     });
 
-    it('should return the response as-is when body is null', async () => {
+    it('should return a bodyless error as-is and refuse a bodyless success without a nonce', async () => {
       const token: SessionRecoveryToken = {
         exportedSecret: new Uint8Array(32),
         requestEnc: new Uint8Array(32),
       };
 
-      const response = new Response(null, { status: 204 });
-      const result = await decryptResponseWithToken(response, token);
-
-      assert.strictEqual(result.status, 204);
+      const result = await decryptResponseWithToken(new Response(null, { status: 404 }), token);
+      assert.strictEqual(result.status, 404);
       assert.strictEqual(result.body, null);
+
+      await assert.rejects(
+        () => decryptResponseWithToken(new Response(null, { status: 204 }), token),
+        /MISSING_RESPONSE_NONCE/
+      );
     });
 
     it('should throw on missing response nonce header', async () => {
