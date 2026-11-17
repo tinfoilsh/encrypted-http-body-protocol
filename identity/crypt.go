@@ -87,18 +87,21 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	// Read some data from the underlying reader
 	chunkSize := min(8192, len(p)) // 8KB chunks
 
+	// A read may return no bytes and no error; only io.EOF ends the body.
 	plaintext := make([]byte, chunkSize)
-	bytesRead, err := r.reader.Read(plaintext)
-	if err != nil {
+	var bytesRead int
+	for bytesRead == 0 && !r.eof {
+		bytesRead, err = r.reader.Read(plaintext)
 		if err == io.EOF {
 			r.eof = true
-			if bytesRead == 0 {
-				return 0, io.EOF
-			}
-		} else {
+		} else if err != nil {
 			return 0, err
 		}
 	}
@@ -270,6 +273,13 @@ type DerivedResponseWriter struct {
 
 // WriteHeader captures the status code and delegates to the underlying ResponseWriter
 func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
+	// An informational response precedes the final one and does not replace it.
+	if statusCode >= http.StatusContinue && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
+		if !w.wroteHeader {
+			w.ResponseWriter.WriteHeader(statusCode)
+		}
+		return
+	}
 	if !w.wroteHeader {
 		w.ResponseWriter.Header().Del("Content-Length")
 		w.statusCode = statusCode
