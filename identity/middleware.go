@@ -138,7 +138,7 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				}
 				panic(http.ErrAbortHandler)
 			}
-			if err := encryptedWriter.finish(); err != nil {
+			if err := encryptedWriter.Finish(); err != nil {
 				panic(http.ErrAbortHandler)
 			}
 		})

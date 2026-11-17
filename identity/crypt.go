@@ -291,10 +291,11 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	return w.writeFrame(data)
 }
 
-// finish gives a response with no body one frame of empty plaintext, so the
+// Finish gives a response with no body one frame of empty plaintext, so the
 // client has something to authenticate (SPEC 5.3). A status that cannot carry
-// a body is left alone.
-func (w *DerivedResponseWriter) finish() error {
+// a body is left alone. Middleware calls it when the handler returns; code
+// that drives the writer directly calls it once the response is complete.
+func (w *DerivedResponseWriter) Finish() error {
 	if w.wroteFrame {
 		return nil
 	}
