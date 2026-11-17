@@ -18,6 +18,7 @@ from .errors import (
     InvalidResponseNonceError,
     KeyConfigMismatchError,
     MissingResponseNonceError,
+    UnexpectedRedirectError,
 )
 from .protocol import (
     KEY_CONFIG_PROBLEM_TYPE,
@@ -72,6 +73,11 @@ def response_nonce(headers: httpx.Headers) -> bytes:
 
 
 def response_nonce_for_status(status: int, headers: httpx.Headers) -> Optional[bytes]:
+    # A redirect is refused with or without a nonce: its Location is not
+    # authenticated, and following it can swap the encrypted exchange for a
+    # bodyless one that EHBP does not protect.
+    if status // 100 == 3:
+        raise UnexpectedRedirectError(f"status {status} in response to an encrypted request")
     if RESPONSE_NONCE_HEADER not in headers and status // 100 != 2:
         return None
     return response_nonce(headers)

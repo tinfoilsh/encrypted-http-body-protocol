@@ -27,6 +27,7 @@ from .errors import (
     KeyConfigMismatchError,
     MissingResponseNonceError,
     SequenceOverflowError,
+    UnexpectedRedirectError,
     UnsupportedSuiteError,
     code_of,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "InvalidEncapsulatedKeyError",
     "HPKESetupFailedError",
     "MissingResponseNonceError",
+    "UnexpectedRedirectError",
     "InvalidResponseNonceError",
     "DuplicateResponseNonceError",
     "KeyConfigMismatchError",

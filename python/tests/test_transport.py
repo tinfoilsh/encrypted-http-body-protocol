@@ -7,7 +7,12 @@ import pytest
 
 from conftest import MockServer
 from ehbp import AsyncEHBPTransport, EHBPTransport
-from ehbp.errors import ChunkTooLargeError, KeyConfigMismatchError, MissingResponseNonceError
+from ehbp.errors import (
+    ChunkTooLargeError,
+    KeyConfigMismatchError,
+    MissingResponseNonceError,
+    UnexpectedRedirectError,
+)
 from ehbp.identity import REQUEST_FRAME_SIZE
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER
 
@@ -86,7 +91,7 @@ def test_missing_response_nonce_fails_closed(make_server):
         client.post(URL, content=b"payload")
 
 
-@pytest.mark.parametrize("status_code", [300, 400, 503])
+@pytest.mark.parametrize("status_code", [400, 503])
 def test_unencrypted_non_success_response_passes_through(make_server, status_code):
     server = make_server(mode="unencrypted_response", status_code=status_code)
     with _sync_client(server) as client:
@@ -95,6 +100,31 @@ def test_unencrypted_non_success_response_passes_through(make_server, status_cod
     assert response.headers["content-type"] == "text/plain"
     assert response.headers["x-upstream"] == "proxy"
     assert response.content == b"upstream unavailable"
+
+
+@pytest.mark.parametrize("mode", ["unencrypted_response", "ok"])
+@pytest.mark.parametrize("status_code", [300, 303, 307, 308])
+def test_redirect_to_an_encrypted_request_is_refused(make_server, mode, status_code):
+    """With or without a nonce, and under a client that follows redirects."""
+    server = make_server(mode=mode, status_code=status_code)
+    transport = EHBPTransport.from_public_key_hex(
+        server.public_key_bytes.hex(), inner=httpx.MockTransport(server.handler)
+    )
+    with httpx.Client(transport=transport, follow_redirects=True) as client:
+        with pytest.raises(UnexpectedRedirectError):
+            client.post(URL, content=b"payload")
+
+
+@pytest.mark.parametrize("status_code", [303, 307])
+def test_async_redirect_to_an_encrypted_request_is_refused(make_server, status_code):
+    server = make_server(mode="unencrypted_response", status_code=status_code)
+
+    async def run() -> None:
+        async with _async_client(server) as client:
+            with pytest.raises(UnexpectedRedirectError):
+                await client.post(URL, content=b"payload")
+
+    asyncio.run(run())
 
 
 def test_streaming_unencrypted_non_success_response_passes_through(make_server):
