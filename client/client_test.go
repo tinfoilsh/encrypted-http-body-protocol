@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,70 +163,63 @@ func TestNewTransportWithIdentityRequiresIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// A RoundTripper must perform a single HTTP transaction: redirects have to
-// surface to the outer http.Client so its CheckRedirect policy and cookie jar
-// apply, instead of being swallowed by an internal client.
-func TestRoundTripSurfacesRedirectsToOuterClient(t *testing.T) {
+// A redirect answering an encrypted request is refused, with or without a
+// nonce, so no caller can be steered into a follow-up request that EHBP does
+// not protect.
+func TestTransportRejectsRedirects(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
-
-	middleware := serverIdentity.Middleware()
-	mux := http.NewServeMux()
-	mux.Handle("/redirect", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		http.Redirect(w, r, "/secure", http.StatusTemporaryRedirect)
-	})))
-	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-			return
-		}
-		_, _ = w.Write([]byte("Hello, " + string(body)))
-	})))
-
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
 	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
 	assert.NoError(t, err)
-	transport, err := NewTransportWithIdentity(pubIdentity)
-	assert.NoError(t, err)
 
-	t.Run("RoundTrip returns the redirect unfollowed", func(t *testing.T) {
-		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
-		assert.NoError(t, err)
+	const forged = "forged answer"
+	for _, tc := range []struct {
+		name   string
+		status int
+		nonce  string
+	}{
+		{"plaintext body under a redirect status", http.StatusMultipleChoices, ""},
+		{"see other without a nonce", http.StatusSeeOther, ""},
+		{"see other with a made-up nonce and no body", http.StatusSeeOther, strings.Repeat("ab", 32)},
+		{"temporary redirect", http.StatusTemporaryRedirect, ""},
+		{"permanent redirect", http.StatusPermanentRedirect, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var followUps atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/sealed", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				w.Header().Set("Location", "/followed")
+				if tc.nonce != "" {
+					w.Header().Set(protocol.ResponseNonceHeader, tc.nonce)
+					w.WriteHeader(tc.status)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(forged))
+			})
+			mux.HandleFunc("/followed", func(w http.ResponseWriter, r *http.Request) {
+				followUps.Add(1)
+				_, _ = w.Write([]byte(forged))
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
 
-		resp, err := transport.RoundTrip(req)
-		assert.NoError(t, err)
-		defer resp.Body.Close()
+			transport, err := NewTransportWithIdentity(pubIdentity)
+			assert.NoError(t, err)
 
-		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
-		assert.Equal(t, "/secure", resp.Header.Get("Location"))
-	})
-
-	t.Run("outer client follows and re-encrypts each hop", func(t *testing.T) {
-		redirectsSeen := 0
-		httpClient := &http.Client{
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				redirectsSeen++
-				return nil
-			},
-		}
-
-		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
-		assert.NoError(t, err)
-
-		resp, err := httpClient.Do(req)
-		assert.NoError(t, err)
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		assert.NoError(t, err)
-		assert.Equal(t, "Hello, test", string(body))
-		assert.Equal(t, 1, redirectsSeen)
-	})
+			// The default client follows redirects, as most callers' clients do.
+			req, err := http.NewRequest("POST", server.URL+"/sealed", bytes.NewBufferString("secret"))
+			assert.NoError(t, err)
+			resp, err := (&http.Client{Transport: transport}).Do(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			assert.Equal(t, protocol.UnexpectedRedirect, protocol.CodeOf(err))
+			assert.Zero(t, followUps.Load())
+			assert.Nil(t, transport.GetSessionRecoveryToken())
+		})
+	}
 }
 
 // TestTransportClearsRequestURI ensures the transport can carry a request that
