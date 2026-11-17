@@ -93,4 +93,4 @@ def response_nonce_for_status(status: int, headers: httpx.Headers) -> Optional[b
 
 def is_success(status: int) -> bool:
     """Whether a response claims success, and so must carry an authenticated chunk (SPEC 5.3)."""
-    return status // 100 == 2
+    return status < FIRST_ERROR_STATUS

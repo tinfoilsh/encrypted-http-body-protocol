@@ -472,7 +472,8 @@ export async function decryptResponseWithToken(
   onStreamComplete?: () => void,
 ): Promise<Response> {
   const responseNonceHex = response.headers.get(PROTOCOL.RESPONSE_NONCE_HEADER);
-  if (!response.body && !responseNonceHex) {
+  // Only an error status may come back without a nonce (SPEC 5.3).
+  if (!response.body && !responseNonceHex && response.status >= 400) {
     return response;
   }
 
@@ -492,7 +493,7 @@ export async function decryptResponseWithToken(
   // A response that claims success must carry a chunk that authenticates
   // (SPEC 5.3): any 32 bytes pass as a nonce, so the header alone shows
   // nothing. 204 and 205 cannot carry one.
-  const requireChunk = response.ok;
+  const requireChunk = response.status < 400;
   if (requireChunk && (!response.body || BODYLESS_SUCCESS_STATUSES.includes(response.status))) {
     throw new FramingTruncatedError(`status ${response.status} carries no authenticated chunk`);
   }

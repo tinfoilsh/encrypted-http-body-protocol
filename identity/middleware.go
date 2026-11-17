@@ -3,7 +3,6 @@ package identity
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
@@ -139,8 +138,7 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				}
 				panic(http.ErrAbortHandler)
 			}
-			// A handler that took over the connection has ended the response itself.
-			if err := encryptedWriter.Finish(); err != nil && !errors.Is(err, http.ErrHijacked) {
+			if err := encryptedWriter.Finish(); err != nil {
 				panic(http.ErrAbortHandler)
 			}
 		})

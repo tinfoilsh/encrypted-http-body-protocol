@@ -90,12 +90,12 @@ class SessionRecoveryToken:
         return cls.from_dict(decoded)
 
     def decrypt_response_body(
-        self, response_nonce: bytes, body: bytes, *, require_frame: bool = False
+        self, response_nonce: bytes, body: bytes, *, require_frame: bool = True
     ) -> bytes:
         """Decrypt a complete framed response body.
 
-        Pass ``require_frame=True`` for a response that claims success, so a
-        body in which no chunk authenticated is refused.
+        A body in which no chunk authenticated is refused. Pass
+        ``require_frame=False`` only for a 4xx or 5xx response, which may be empty.
         """
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
             raise InvalidResponseNonceError(
@@ -111,7 +111,7 @@ class SessionRecoveryToken:
         response_nonce: bytes,
         *,
         max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH,
-        require_frame: bool = False,
+        require_frame: bool = True,
     ) -> FrameDecryptor:
         """Create an incremental authenticated decryptor for this response.
 

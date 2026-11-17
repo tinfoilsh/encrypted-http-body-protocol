@@ -1226,6 +1226,22 @@ func TestTransportRequiresAnAuthenticatedFrameOnSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("the server answers 200 where a handler chose 204 or 205", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusResetContent} {
+			resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})))
+			if !assert.NoError(t, err) {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.NoError(t, err)
+			assert.Empty(t, body)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+	})
+
 	t.Run("an authenticated error may still be empty", func(t *testing.T) {
 		resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden)

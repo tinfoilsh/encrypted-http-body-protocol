@@ -113,7 +113,8 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		return fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
-	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+	// Anything below 400 is not an error, so it claims to be the server's answer.
+	success := resp.StatusCode < http.StatusBadRequest
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
 		// These cannot carry a body, so nothing could authenticate them.
 		return protocol.Errorf(protocol.FramingTruncated, "status %d cannot carry an authenticated frame", resp.StatusCode)

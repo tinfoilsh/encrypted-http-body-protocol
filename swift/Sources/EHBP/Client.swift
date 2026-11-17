@@ -485,7 +485,7 @@ public final class EHBPClient: @unchecked Sendable {
     /// Whether a response claims success, and so must carry an authenticated
     /// chunk (SPEC 5.3).
     private static func claimsSuccess(_ response: HTTPURLResponse) -> Bool {
-        (200..<300).contains(response.statusCode)
+        response.statusCode < 400
     }
 
     private static func responseNonceHex(

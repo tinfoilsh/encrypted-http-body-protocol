@@ -351,7 +351,7 @@ impl Client {
             inner: Box::pin(decrypt_response_stream(
                 response.bytes_stream(),
                 key_material,
-                status.is_success(),
+                !may_pass_through(status),
             )),
             generation,
             session: Arc::clone(&self.session),
@@ -467,7 +467,7 @@ impl Client {
         let response_nonce = response_nonce(&headers)?;
         refuse_bodyless_success(status)?;
         let mut decryptor = token.response_decryptor(&response_nonce)?;
-        if status.is_success() {
+        if !may_pass_through(status) {
             decryptor = decryptor.require_frame();
         }
         let decrypted = decryptor.push(&body)?.concat();
