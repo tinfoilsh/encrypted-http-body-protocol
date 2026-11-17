@@ -110,7 +110,7 @@ func main() {
 
 ## Limitations
 
-EHBP keeps a message body confidential from intermediaries and authenticates a response body as the server's answer. It does not protect the method, URL, headers or status, does not detect a body cut short or a request delivered twice, hides no message sizes, and has no forward secrecy. See [SPEC.md, Section 7.5](SPEC.md#75-limitations) before relying on it for more than that.
+EHBP keeps a message body confidential from intermediaries and authenticates a response body as the server's answer. It does not protect the method, URL, headers or status, does not detect truncation at a chunk boundary or a request delivered twice, hides no message sizes, and has no forward secrecy. See [SPEC.md, Section 7.5](SPEC.md#75-limitations) before relying on it for more than that.
 
 ## Reporting Vulnerabilities
 

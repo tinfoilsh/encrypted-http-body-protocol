@@ -190,4 +190,4 @@ See [SPEC.md](../SPEC.md) for the complete protocol specification.
 
 ## Security
 
-Report vulnerabilities to [security@tinfoil.sh](mailto:security@tinfoil.sh) or open a GitHub issue.
+See [SECURITY.md](../SECURITY.md).
