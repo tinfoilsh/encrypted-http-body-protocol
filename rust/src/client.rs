@@ -198,10 +198,12 @@ impl Client {
         let mut guard = token
             .as_ref()
             .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+        let sent_to = token.as_ref().map(|_| request.url().clone());
         let response = match self.http_client.execute(request).await {
             Ok(response) => response,
             Err(err) => return Err(err.into()),
         };
+        refuse_followed_redirect(sent_to.as_ref(), &response)?;
         let response = self.open_raw_response(response, token, generation).await?;
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
@@ -321,7 +323,7 @@ impl Client {
         refuse_redirect(status)?;
 
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            if status.is_success() {
+            if !may_pass_through(status) {
                 return Err(Error::Coded(
                     Code::MissingResponseNonce,
                     format!("missing {RESPONSE_NONCE_HEADER} header"),
@@ -420,7 +422,9 @@ impl Client {
         let guard = token
             .as_ref()
             .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+        let sent_to = token.as_ref().map(|_| request.url().clone());
         let response = self.http_client.execute(request).await?;
+        refuse_followed_redirect(sent_to.as_ref(), &response)?;
         Ok((response, token, generation, guard))
     }
 
@@ -449,7 +453,7 @@ impl Client {
         refuse_redirect(status)?;
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             check_key_config_mismatch(status, &headers, &body)?;
-            if !status.is_success() {
+            if may_pass_through(status) {
                 return Ok(Response {
                     status,
                     headers,
@@ -847,6 +851,24 @@ fn refuse_redirect(status: StatusCode) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A caller-supplied HTTP client may follow a redirect before the response is
+/// seen here. The answer then comes from another URL than the encrypted
+/// request went to, and is refused like the redirect itself.
+fn refuse_followed_redirect(sent_to: Option<&Url>, response: &reqwest::Response) -> Result<()> {
+    match sent_to {
+        Some(sent_to) if response.url() != sent_to => Err(Error::Coded(
+            Code::UnexpectedRedirect,
+            "the HTTP client followed a redirect from an encrypted request".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Only a 4xx or 5xx response may pass through without a nonce (SPEC 5.3).
+fn may_pass_through(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error()
 }
 
 fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
@@ -1394,6 +1416,54 @@ mod tests {
             reqwest::Client::new(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transport_refuses_an_answer_reached_through_a_followed_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The first connection is redirected; the second, the bodyless
+        // follow-up, is answered in plaintext.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for reply in [
+                "HTTP/1.1 303 See Other\r\nLocation: /followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nforged",
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        // reqwest's default client follows redirects.
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        let err = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::Coded(Code::UnexpectedRedirect, _)));
+        assert!(client.get_session_recovery_token().is_none());
     }
 
     #[tokio::test]

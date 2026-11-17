@@ -222,6 +222,36 @@ func TestTransportRejectsRedirects(t *testing.T) {
 	}
 }
 
+// A 101 hands the connection to another protocol; without a nonce it is not
+// an error to pass through, and its bytes must not reach the caller.
+func TestTransportRejectsNonceLessProtocolSwitch(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: forged\r\n\r\nforged answer")
+		_ = buf.Flush()
+	}))
+	defer server.Close()
+
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+
+	resp, err := transport.RoundTrip(req)
+	assert.Nil(t, resp)
+	assert.Equal(t, protocol.MissingResponseNonce, protocol.CodeOf(err))
+}
+
 // TestTransportClearsRequestURI ensures the transport can carry a request that
 // originated as an inbound server request, which is how httputil.ReverseProxy
 // drives a RoundTripper. Such requests have RequestURI populated, and

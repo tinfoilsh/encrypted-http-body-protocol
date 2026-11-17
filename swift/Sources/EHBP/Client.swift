@@ -62,8 +62,9 @@ public final class EHBPClient: @unchecked Sendable {
     ///     whole request. Overrides the session configuration's
     ///     `timeoutIntervalForRequest`, whether shorter or longer; nil keeps it.
     ///   - body: Request body (will be encrypted)
-    /// - Returns: Decrypted response data, or an untouched non-success response
+    /// - Returns: Decrypted response data, or an untouched 4xx or 5xx response
     ///   when an intermediary returns an unencrypted error
+    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
     public func request(
         method: String,
         path: String,
@@ -143,7 +144,8 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - timeoutInterval: Idle timeout for this request; see `request(method:path:headers:timeoutInterval:body:)`
     ///   - body: Request body (will be encrypted)
     /// - Returns: AsyncThrowingStream of decrypted response chunks, or untouched
-    ///   non-success response chunks when an intermediary returns an unencrypted error
+    ///   4xx or 5xx response chunks when an intermediary returns an unencrypted error
+    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
     public func requestStream(
         method: String,
         path: String,
@@ -489,7 +491,8 @@ public final class EHBPClient: @unchecked Sendable {
         if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
             return nonce
         }
-        guard !(200..<300).contains(response.statusCode) else {
+        // Only an error status may pass through without a nonce (SPEC 5.3).
+        guard response.statusCode >= 400 else {
             throw EHBPError(.missingResponseNonce, "missing \(EHBPProtocol.responseNonceHeader) header")
         }
         return nil

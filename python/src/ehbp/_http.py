@@ -32,6 +32,8 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = MAX_RESPONSE_CHUNK_LENGTH
 
 KEY_CONFIG_MISMATCH_STATUS = 422
+# Only 4xx and 5xx responses may pass through without a nonce (SPEC 5.3).
+FIRST_ERROR_STATUS = 400
 
 
 def media_type(headers: httpx.Headers) -> str:
@@ -78,6 +80,6 @@ def response_nonce_for_status(status: int, headers: httpx.Headers) -> Optional[b
     # bodyless one that EHBP does not protect.
     if status // 100 == 3:
         raise UnexpectedRedirectError(f"status {status} in response to an encrypted request")
-    if RESPONSE_NONCE_HEADER not in headers and status // 100 != 2:
+    if RESPONSE_NONCE_HEADER not in headers and status >= FIRST_ERROR_STATUS:
         return None
     return response_nonce(headers)
