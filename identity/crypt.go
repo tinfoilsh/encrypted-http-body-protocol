@@ -265,6 +265,7 @@ type DerivedResponseWriter struct {
 	http.ResponseWriter
 	aead        *ResponseAEAD
 	wroteHeader bool
+	wroteFrame  bool
 	statusCode  int
 }
 
@@ -287,7 +288,28 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
+	return w.writeFrame(data)
+}
 
+// finish gives a response with no body one frame of empty plaintext, so the
+// client has something to authenticate (SPEC 5.3). A status that cannot carry
+// a body is left alone.
+func (w *DerivedResponseWriter) finish() error {
+	if w.wroteFrame {
+		return nil
+	}
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.statusCode < http.StatusOK || w.statusCode == http.StatusNoContent ||
+		w.statusCode == http.StatusResetContent || w.statusCode == http.StatusNotModified {
+		return nil
+	}
+	_, err := w.writeFrame(nil)
+	return err
+}
+
+func (w *DerivedResponseWriter) writeFrame(data []byte) (int, error) {
 	// Encrypt the chunk (nonce is computed and sequence incremented automatically)
 	encrypted := w.aead.Seal(data, nil)
 
@@ -301,6 +323,7 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if _, err := w.ResponseWriter.Write(encrypted); err != nil {
 		return 0, err
 	}
+	w.wroteFrame = true
 
 	return len(data), nil
 }
@@ -497,6 +520,11 @@ type DerivedStreamingDecryptReader struct {
 	buffer      []byte
 	eof         bool
 	terminalErr error
+	// requireFrame makes a body that ends before any frame authenticated a
+	// failure: the response claims success, and without a frame nothing
+	// shows the server produced it (SPEC 5.3).
+	requireFrame  bool
+	authenticated bool
 }
 
 // Read implements io.Reader, decrypting chunks as they are read.
@@ -522,6 +550,9 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		bytesRead, err = io.ReadFull(r.reader, chunkLenBytes)
 		if err != nil {
 			if err == io.EOF && bytesRead == 0 {
+				if r.requireFrame && !r.authenticated {
+					return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "response ended before any authenticated frame"))
+				}
 				r.eof = true
 				return 0, io.EOF
 			}
@@ -547,6 +578,10 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 		if err != nil {
 			return 0, r.fail(err)
+		}
+		r.authenticated = true
+		if len(decryptedChunk) == 0 {
+			continue
 		}
 
 		// Return as much as fits, buffer the rest
