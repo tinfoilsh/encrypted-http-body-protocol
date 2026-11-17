@@ -489,6 +489,13 @@ export async function decryptResponseWithToken(
   if (responseNonce.length !== RESPONSE_NONCE_LENGTH) {
     throw new InvalidResponseNonceError(`invalid response nonce length: expected ${RESPONSE_NONCE_LENGTH}, got ${responseNonce.length}`);
   }
+  // A response that claims success must carry a chunk that authenticates
+  // (SPEC 5.3): any 32 bytes pass as a nonce, so the header alone shows
+  // nothing. 204 and 205 cannot carry one.
+  const requireChunk = response.ok;
+  if (requireChunk && (!response.body || BODYLESS_SUCCESS_STATUSES.includes(response.status))) {
+    throw new FramingTruncatedError(`status ${response.status} carries no authenticated chunk`);
+  }
   if (!response.body) {
     onStreamComplete?.();
     return response;
@@ -498,6 +505,7 @@ export async function decryptResponseWithToken(
   const decryptedStream = createDecryptStream(
     response.body,
     km,
+    requireChunk,
     onStreamError,
     onStreamComplete,
   );
@@ -518,10 +526,13 @@ export async function decryptResponseWithToken(
 }
 
 const MAX_RESPONSE_CHUNK_BYTES = 64 * 1024 * 1024;
+/** 204 No Content and 205 Reset Content. */
+const BODYLESS_SUCCESS_STATUSES: readonly number[] = [204, 205];
 
 function createDecryptStream(
   body: ReadableStream<Uint8Array>,
   km: ResponseKeyMaterial,
+  requireChunk: boolean,
   onStreamError?: () => void,
   onStreamComplete?: () => void,
 ): ReadableStream<Uint8Array> {
@@ -569,6 +580,11 @@ function createDecryptStream(
 
             try {
               const plaintext = await decryptChunk(km, seq++, ciphertext);
+              // A chunk sealing an empty plaintext authenticates the response
+              // and carries no data.
+              if (plaintext.length === 0) {
+                continue;
+              }
               controller.enqueue(plaintext);
               return;
             } catch (error) {
@@ -600,6 +616,8 @@ function createDecryptStream(
           }
           if (buffer.length !== 0) {
             fail(new FramingTruncatedError('truncated encrypted response chunk'));
+          } else if (requireChunk && seq === 0) {
+            fail(new FramingTruncatedError('response ended before any authenticated chunk'));
           } else {
             onStreamComplete?.();
             controller.close();
