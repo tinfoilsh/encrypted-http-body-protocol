@@ -62,6 +62,10 @@ func IsKeyConfigError(err error) bool {
 	return errors.As(err, &keyErr)
 }
 
+// maxConsecutiveEmptyReads bounds reads that return no bytes and no error,
+// the same limit bufio applies.
+const maxConsecutiveEmptyReads = 100
+
 // StreamingEncryptReader wraps an io.Reader for streaming encryption
 type StreamingEncryptReader struct {
 	reader io.Reader
@@ -94,10 +98,14 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	// Read some data from the underlying reader
 	chunkSize := min(8192, len(p)) // 8KB chunks
 
-	// A read may return no bytes and no error; only io.EOF ends the body.
+	// A read may return no bytes and no error; only io.EOF ends the body. A
+	// reader that keeps doing so is reported rather than waited on forever.
 	plaintext := make([]byte, chunkSize)
 	var bytesRead int
-	for bytesRead == 0 && !r.eof {
+	for empty := 0; bytesRead == 0 && !r.eof; empty++ {
+		if empty == maxConsecutiveEmptyReads {
+			return 0, io.ErrNoProgress
+		}
 		bytesRead, err = r.reader.Read(plaintext)
 		if err == io.EOF {
 			r.eof = true

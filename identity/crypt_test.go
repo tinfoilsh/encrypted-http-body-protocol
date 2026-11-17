@@ -1108,3 +1108,19 @@ func TestDecapsulationFailureIsAKeyConfigMismatch(t *testing.T) {
 	assert.Equal(t, protocol.HPKESetupFailed, protocol.CodeOf(err))
 	assert.True(t, IsKeyConfigError(err), "setup failure must map to 422, not 400 (SPEC 5.4.2)")
 }
+
+// stalledReader never returns data, an error, or the end of the stream.
+type stalledReader struct{}
+
+func (stalledReader) Read([]byte) (int, error) { return 0, nil }
+
+func TestStreamingEncryptReaderGivesUpOnAReaderThatMakesNoProgress(t *testing.T) {
+	serverIdentity, err := NewIdentity()
+	require.NoError(t, err)
+	req := httptest.NewRequest("POST", "/test", stalledReader{})
+	_, err = serverIdentity.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+
+	_, err = req.Body.Read(make([]byte, 64))
+	assert.ErrorIs(t, err, io.ErrNoProgress)
+}
