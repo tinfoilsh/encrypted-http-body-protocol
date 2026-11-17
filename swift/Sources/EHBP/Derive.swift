@@ -235,6 +235,7 @@ public enum EHBPErrorCode: String, Sendable {
     case invalidEncapsulatedKey = "INVALID_ENCAPSULATED_KEY"
     case hpkeSetupFailed = "HPKE_SETUP_FAILED"
     case missingResponseNonce = "MISSING_RESPONSE_NONCE"
+    case unexpectedRedirect = "UNEXPECTED_REDIRECT"
     case invalidResponseNonce = "INVALID_RESPONSE_NONCE"
     case duplicateResponseNonce = "DUPLICATE_RESPONSE_NONCE"
     case keyConfigMismatch = "KEY_CONFIG_MISMATCH"
