@@ -1138,6 +1138,9 @@ func TestReadChunkReturnsTheWholeChunk(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
 
-	_, err = readChunk(bytes.NewReader(want[:len(want)-1]), uint32(len(want)))
-	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	// Cut inside a step, and exactly between two steps.
+	for _, cut := range []int{len(want) - 1, chunkReadStep} {
+		_, err = readChunk(bytes.NewReader(want[:cut]), uint32(len(want)))
+		assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	}
 }

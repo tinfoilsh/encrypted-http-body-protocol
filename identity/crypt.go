@@ -503,6 +503,10 @@ func readChunk(r io.Reader, length uint32) ([]byte, error) {
 		chunk = slices.Grow(chunk, step)
 		n, err := io.ReadFull(r, chunk[len(chunk):len(chunk)+step])
 		chunk = chunk[:len(chunk)+n]
+		// The end of the stream inside a chunk is a truncation wherever it falls.
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
 		if err != nil {
 			return nil, err
 		}
