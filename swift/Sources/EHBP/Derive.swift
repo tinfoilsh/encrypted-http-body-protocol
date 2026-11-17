@@ -132,6 +132,12 @@ public struct ResponseDecryptor {
     private var buffer = [UInt8]()
     private var readOffset = 0
     private var sequence: UInt64
+    private var authenticated = false
+
+    /// When set, ``finish()`` fails a body in which no chunk authenticated.
+    /// Set it for a response that claims success, which must carry one
+    /// (SPEC Section 5.3).
+    public var requiresFrame = false
 
     init(
         keyMaterial: ResponseKeyMaterial,
@@ -207,6 +213,7 @@ public struct ResponseDecryptor {
             )
             readOffset = frameEnd
             sequence += 1
+            authenticated = true
             return opened
         }
 
@@ -219,10 +226,14 @@ public struct ResponseDecryptor {
         readOffset = 0
     }
 
-    /// Validates that source EOF occurred on a frame boundary.
+    /// Validates that source EOF occurred on a frame boundary and, when a
+    /// frame is required, that one authenticated.
     public func finish() throws {
         guard buffer.count == readOffset else {
             throw EHBPError(.framingTruncated, "truncated encrypted response chunk")
+        }
+        guard authenticated || !requiresFrame else {
+            throw EHBPError(.framingTruncated, "response ended before any authenticated chunk")
         }
     }
 }

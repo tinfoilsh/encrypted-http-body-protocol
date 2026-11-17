@@ -128,7 +128,8 @@ public final class EHBPClient: @unchecked Sendable {
         let decryptedData = try EHBP.decryptResponseBody(
             token: token!,
             responseNonce: responseNonce,
-            encryptedData: data
+            encryptedData: data,
+            requireFrame: EHBPClient.claimsSuccess(httpResponse)
         )
 
         return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
@@ -246,7 +247,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (stream, httpResponse)
         }
 
-        let responseDecryptor: ResponseDecryptor
+        var responseDecryptor: ResponseDecryptor
         do {
             responseDecryptor = try token!.makeResponseDecryptor(
                 responseNonce: try parseResponseNonce(responseNonceHex)
@@ -256,6 +257,7 @@ public final class EHBPClient: @unchecked Sendable {
             clearToken(for: generation)
             throw error
         }
+        responseDecryptor.requiresFrame = EHBPClient.claimsSuccess(httpResponse)
 
         let decryptor = PullDrivenResponseDecryptor(
             iterator: iterator,
@@ -475,6 +477,15 @@ public final class EHBPClient: @unchecked Sendable {
         tokenLock.unlock()
     }
 
+    /// 204 No Content and 205 Reset Content.
+    private static let bodylessSuccessStatuses: Set<Int> = [204, 205]
+
+    /// Whether a response claims success, and so must carry an authenticated
+    /// chunk (SPEC 5.3).
+    private static func claimsSuccess(_ response: HTTPURLResponse) -> Bool {
+        (200..<300).contains(response.statusCode)
+    }
+
     private static func responseNonceHex(
         from response: HTTPURLResponse,
         requestWasEncrypted: Bool
@@ -487,6 +498,10 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError(.unexpectedRedirect, "status \(response.statusCode) in response to an encrypted request")
         }
         if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
+            // 204 and 205 cannot carry a body, so nothing could authenticate them.
+            guard !bodylessSuccessStatuses.contains(response.statusCode) else {
+                throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
+            }
             return nonce
         }
         guard !(200..<300).contains(response.statusCode) else {
