@@ -123,6 +123,22 @@ class MockServer:
                 content=json.dumps(problem).encode("utf-8"),
             )
 
+        if self.mode == "no_frames":
+            # What a relay can produce by itself: any 32 bytes pass as a nonce.
+            return httpx.Response(
+                self.status_code,
+                headers={RESPONSE_NONCE_HEADER: os.urandom(RESPONSE_NONCE_LENGTH).hex()},
+            )
+
+        if self.mode == "empty_frame":
+            response_nonce = os.urandom(RESPONSE_NONCE_LENGTH)
+            key_material = derive_response_keys(exported, enc, response_nonce)
+            return httpx.Response(
+                self.status_code,
+                headers={RESPONSE_NONCE_HEADER: response_nonce.hex()},
+                content=frame_chunk(encrypt_chunk(key_material, 0, b"")),
+            )
+
         response_plaintext = b"echo:" + request_plaintext
         response_nonce, framed = self._encrypt_response(exported, enc, response_plaintext)
         headers = {}

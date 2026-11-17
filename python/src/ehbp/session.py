@@ -89,8 +89,14 @@ class SessionRecoveryToken:
             raise InvalidTokenError("invalid session recovery token: expected JSON object")
         return cls.from_dict(decoded)
 
-    def decrypt_response_body(self, response_nonce: bytes, body: bytes) -> bytes:
-        """Decrypt a complete framed response body."""
+    def decrypt_response_body(
+        self, response_nonce: bytes, body: bytes, *, require_frame: bool = False
+    ) -> bytes:
+        """Decrypt a complete framed response body.
+
+        Pass ``require_frame=True`` for a response that claims success, so a
+        body in which no chunk authenticated is refused.
+        """
         if len(response_nonce) != RESPONSE_NONCE_LENGTH:
             raise InvalidResponseNonceError(
                 f"response nonce must be {RESPONSE_NONCE_LENGTH} bytes, got {len(response_nonce)}"
@@ -98,13 +104,14 @@ class SessionRecoveryToken:
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
         )
-        return decrypt_framed_response(key_material, body)
+        return decrypt_framed_response(key_material, body, require_frame=require_frame)
 
     def create_response_decryptor(
         self,
         response_nonce: bytes,
         *,
         max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH,
+        require_frame: bool = False,
     ) -> FrameDecryptor:
         """Create an incremental authenticated decryptor for this response.
 
@@ -119,4 +126,6 @@ class SessionRecoveryToken:
         key_material = derive_response_keys(
             self._exported_secret, self._request_enc, response_nonce
         )
-        return FrameDecryptor(key_material, max_chunk_length=max_chunk_length)
+        return FrameDecryptor(
+            key_material, max_chunk_length=max_chunk_length, require_frame=require_frame
+        )

@@ -10,6 +10,7 @@ from conftest import DEFAULT_BASE_URL, MockServer
 from ehbp import Client, ServerIdentity
 from ehbp.errors import (
     ChunkTooLargeError,
+    FramingTruncatedError,
     InvalidInputError,
     InvalidKeyConfigError,
     KeyConfigMismatchError,
@@ -251,6 +252,25 @@ def test_redirect_to_an_encrypted_request_is_refused(make_server, mode, status_c
         with client.stream("POST", "/v1/echo", body=b"payload"):
             pass
     assert client.get_session_recovery_token() is None
+
+
+def test_success_without_an_authenticated_chunk_is_refused(make_server):
+    server = make_server(mode="no_frames")
+    client = server.make_client()
+    with pytest.raises(FramingTruncatedError):
+        client.post("/v1/echo", body=b"payload")
+    with pytest.raises(FramingTruncatedError):
+        with client.stream("POST", "/v1/echo", body=b"payload") as response:
+            b"".join(response.iter_bytes())
+    assert client.get_session_recovery_token() is None
+
+
+def test_empty_success_is_authenticated_by_an_empty_chunk(make_server):
+    server = make_server(mode="empty_frame")
+    client = server.make_client()
+    assert client.post("/v1/echo", body=b"payload").content == b""
+    with client.stream("POST", "/v1/echo", body=b"payload") as response:
+        assert b"".join(response.iter_bytes()) == b""
 
 
 def test_streaming_unencrypted_non_success_response_passes_through(make_server):
