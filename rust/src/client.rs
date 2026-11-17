@@ -318,6 +318,8 @@ impl Client {
         let status = response.status();
         let mut headers = response.headers().clone();
 
+        refuse_redirect(status)?;
+
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             if status.is_success() {
                 return Err(Error::Coded(
@@ -444,6 +446,7 @@ impl Client {
             });
         };
 
+        refuse_redirect(status)?;
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             check_key_config_mismatch(status, &headers, &body)?;
             if !status.is_success() {
@@ -831,6 +834,19 @@ fn clear_session_recovery_token_if_current(session: &Arc<Mutex<SessionState>>, g
 fn strip_encrypted_framing_headers(headers: &mut HeaderMap) {
     headers.remove(CONTENT_LENGTH);
     headers.remove(TRANSFER_ENCODING);
+}
+
+/// A redirect answering an encrypted request is refused with or without a
+/// nonce (SPEC 5.3): its Location is not authenticated, and following it can
+/// swap the encrypted exchange for a bodyless one that EHBP does not protect.
+fn refuse_redirect(status: StatusCode) -> Result<()> {
+    if status.is_redirection() {
+        return Err(Error::Coded(
+            Code::UnexpectedRedirect,
+            format!("status {status} in response to an encrypted request"),
+        ));
+    }
+    Ok(())
 }
 
 fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
@@ -1459,6 +1475,39 @@ mod tests {
 
         assert!(matches!(err, Error::Coded(Code::MissingResponseNonce, _)));
         assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_refuses_redirects_to_encrypted_requests() {
+        for status in [
+            StatusCode::MULTIPLE_CHOICES,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let client = client_with_unencrypted_response(status).await;
+
+            let buffered = client.post("/secure").unwrap().body("secret").send().await;
+            assert!(matches!(
+                buffered.err().unwrap(),
+                Error::Coded(Code::UnexpectedRedirect, _)
+            ));
+            assert!(client.get_session_recovery_token().is_none());
+
+            // The fixture server answers one connection.
+            let client = client_with_unencrypted_response(status).await;
+            let streamed = client
+                .post("/secure")
+                .unwrap()
+                .body("secret")
+                .send_stream()
+                .await;
+            assert!(matches!(
+                streamed.err().unwrap(),
+                Error::Coded(Code::UnexpectedRedirect, _)
+            ));
+            assert!(client.get_session_recovery_token().is_none());
+        }
     }
 
     fn dummy_client() -> Client {
