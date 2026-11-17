@@ -159,6 +159,7 @@ export class Transport {
     // for a bodyless one that EHBP does not protect. `redirected` covers a
     // fetch that followed one despite being asked not to.
     if (response.type === 'opaqueredirect' || response.redirected || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel().catch(() => {});
       throw new UnexpectedRedirectError('redirect in response to an encrypted request');
     }
 
@@ -168,7 +169,8 @@ export class Transport {
 
     await Transport.checkKeyConfigMismatch(response);
 
-    if (!response.ok) {
+    // Only an error status may pass through without a nonce (SPEC 5.3).
+    if (response.status >= 400) {
       return false;
     }
 

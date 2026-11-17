@@ -391,8 +391,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, protocol.Errorf(protocol.UnexpectedRedirect, "status %d in response to an encrypted request", resp.StatusCode)
 		}
 
-		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
-			(resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+		if resp.Header.Get(protocol.ResponseNonceHeader) == "" && resp.StatusCode >= http.StatusBadRequest {
 			// Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
 			t.setToken(generation, nil)
 			return resp, nil

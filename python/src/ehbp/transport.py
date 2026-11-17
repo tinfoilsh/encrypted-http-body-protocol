@@ -203,7 +203,11 @@ class EHBPTransport(httpx.BaseTransport):
             if nonce is None:
                 return _buffered_response(response, body)
         else:
-            nonce = response_nonce_for_status(response.status_code, response.headers)
+            try:
+                nonce = response_nonce_for_status(response.status_code, response.headers)
+            except BaseException:
+                response.close()
+                raise
 
         assert nonce is not None
         decryptor = _make_decryptor(token, nonce, self._max_response_bytes, response.status_code)
@@ -278,7 +282,11 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
             if nonce is None:
                 return _buffered_response(response, body)
         else:
-            nonce = response_nonce_for_status(response.status_code, response.headers)
+            try:
+                nonce = response_nonce_for_status(response.status_code, response.headers)
+            except BaseException:
+                await response.aclose()
+                raise
 
         assert nonce is not None
         decryptor = _make_decryptor(token, nonce, self._max_response_bytes, response.status_code)

@@ -172,6 +172,13 @@ def test_async_success_without_an_authenticated_chunk_is_refused(make_server):
     asyncio.run(run())
 
 
+def test_protocol_switch_without_a_nonce_is_refused(make_server):
+    """Only 4xx and 5xx pass through; a 101 is not an error to hand to the caller."""
+    server = make_server(mode="unencrypted_response", status_code=101)
+    with _sync_client(server) as client, pytest.raises(MissingResponseNonceError):
+        client.post(URL, content=b"payload")
+
+
 def test_streaming_unencrypted_non_success_response_passes_through(make_server):
     server = make_server(mode="unencrypted_response", status_code=429)
     with _sync_client(server) as client, client.stream(
