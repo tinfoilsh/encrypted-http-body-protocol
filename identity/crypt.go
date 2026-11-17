@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
@@ -209,8 +210,7 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	}
 
 	// Read encrypted chunk
-	encryptedChunk := make([]byte, chunkLen)
-	_, err = io.ReadFull(r.reader, encryptedChunk)
+	encryptedChunk, err := readChunk(r.reader, chunkLen)
 	if err != nil {
 		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 	}
@@ -488,6 +488,28 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 // frame is authenticated.
 const maxChunkBytes = 64 << 20
 
+// chunkReadStep is how much of a chunk is allocated ahead of the bytes that
+// have arrived.
+const chunkReadStep = 64 << 10
+
+// readChunk reads a chunk of the announced length. Memory grows with the
+// bytes received rather than with the length prefix, which is not
+// authenticated: a peer that announces a large chunk and sends nothing holds
+// one step, not the whole chunk.
+func readChunk(r io.Reader, length uint32) ([]byte, error) {
+	chunk := make([]byte, 0, min(int(length), chunkReadStep))
+	for len(chunk) < int(length) {
+		step := min(int(length)-len(chunk), chunkReadStep)
+		chunk = slices.Grow(chunk, step)
+		n, err := io.ReadFull(r, chunk[len(chunk):len(chunk)+step])
+		chunk = chunk[:len(chunk)+n]
+		if err != nil {
+			return nil, err
+		}
+	}
+	return chunk, nil
+}
+
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
 // It emits each plaintext chunk as soon as the complete encrypted frame has
 // been authenticated and rejects truncated framing at end-of-stream.
@@ -537,8 +559,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		}
 
 		// Read encrypted chunk
-		encryptedChunk := make([]byte, chunkLen)
-		_, err = io.ReadFull(r.reader, encryptedChunk)
+		encryptedChunk, err := readChunk(r.reader, chunkLen)
 		if err != nil {
 			return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 		}

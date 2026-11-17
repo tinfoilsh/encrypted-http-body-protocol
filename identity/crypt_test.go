@@ -10,8 +10,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1107,4 +1109,35 @@ func TestDecapsulationFailureIsAKeyConfigMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, protocol.HPKESetupFailed, protocol.CodeOf(err))
 	assert.True(t, IsKeyConfigError(err), "setup failure must map to 422, not 400 (SPEC 5.4.2)")
+}
+
+func TestReadChunkAllocatesWithReceivedBytes(t *testing.T) {
+	// A length prefix announcing the largest chunk, followed by a few bytes
+	// and then silence, must not reserve the whole chunk.
+	prefix := binary.BigEndian.AppendUint32(nil, maxChunkBytes)
+	const sent = 100
+	body := append(prefix, make([]byte, sent)...)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	reader := &StreamingDecryptReader{reader: bytes.NewReader(body)}
+	_, err := reader.Read(make([]byte, 16))
+	runtime.ReadMemStats(&after)
+
+	assert.Equal(t, protocol.FramingTruncated, protocol.CodeOf(err))
+	assert.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4*chunkReadStep))
+}
+
+func TestReadChunkReturnsTheWholeChunk(t *testing.T) {
+	want := make([]byte, 3*chunkReadStep+17)
+	_, err := rand.Read(want)
+	require.NoError(t, err)
+
+	// One byte per read exercises every partial-read path.
+	got, err := readChunk(iotest.OneByteReader(bytes.NewReader(want)), uint32(len(want)))
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	_, err = readChunk(bytes.NewReader(want[:len(want)-1]), uint32(len(want)))
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
