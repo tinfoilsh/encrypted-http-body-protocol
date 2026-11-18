@@ -156,6 +156,7 @@ pub struct ResponseDecryptor {
     buffer: BytesMut,
     sequence: u64,
     max_chunk_length: usize,
+    require_frame: bool,
 }
 
 impl ResponseDecryptor {
@@ -165,16 +166,29 @@ impl ResponseDecryptor {
             buffer: BytesMut::new(),
             sequence: 0,
             max_chunk_length: DEFAULT_MAX_RESPONSE_CHUNK_BYTES,
+            require_frame: false,
         }
     }
 
-    /// Adds encrypted bytes and returns all newly authenticated plaintext frames.
+    /// Makes [`Self::finish`] fail a body in which no frame authenticated.
+    /// Use it for a response that claims success, which must carry one
+    /// (SPEC 5.3).
+    pub fn require_frame(mut self) -> Self {
+        self.require_frame = true;
+        self
+    }
+
+    /// Adds encrypted bytes and returns the newly authenticated plaintext
+    /// frames that carry data. A frame sealing an empty plaintext
+    /// authenticates the response and is not returned.
     pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.feed(data);
         let mut plaintext = Vec::new();
 
         while let Some(frame) = self.next_frame()? {
-            plaintext.push(frame);
+            if !frame.is_empty() {
+                plaintext.push(frame);
+            }
         }
 
         Ok(plaintext)
@@ -229,16 +243,22 @@ impl ResponseDecryptor {
         }
     }
 
-    /// Validates that source EOF occurred on a frame boundary.
+    /// Validates that source EOF occurred on a frame boundary and, when a
+    /// frame is required, that one authenticated.
     pub fn finish(&self) -> Result<()> {
-        if self.buffer.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Coded(
+        if !self.buffer.is_empty() {
+            return Err(Error::Coded(
                 Code::FramingTruncated,
                 "truncated encrypted response chunk".into(),
-            ))
+            ));
         }
+        if self.require_frame && self.sequence == 0 {
+            return Err(Error::Coded(
+                Code::FramingTruncated,
+                "response ended before any authenticated chunk".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -312,6 +332,29 @@ mod tests {
         coalesced.extend_from_slice(&[0, 0, 0, 0]);
         assert_eq!(decryptor.push(&coalesced).unwrap(), [b"second".to_vec()]);
         decryptor.finish().unwrap();
+    }
+
+    #[test]
+    fn response_decryptor_can_require_an_authenticated_frame() {
+        // Nothing arrived, or only zero-length frames: nothing authenticated.
+        let mut silent = ResponseDecryptor::from_key_material(key_material()).require_frame();
+        assert!(silent.push(&[0, 0, 0, 0]).unwrap().is_empty());
+        assert!(matches!(
+            silent.finish(),
+            Err(Error::Coded(Code::FramingTruncated, _))
+        ));
+
+        // A frame sealing an empty plaintext authenticates and yields no data.
+        let key_material = key_material();
+        let empty = encrypted_frame(&key_material, 0, b"");
+        let mut answered = ResponseDecryptor::from_key_material(key_material).require_frame();
+        assert!(answered.push(&empty).unwrap().is_empty());
+        answered.finish().unwrap();
+
+        // Without the requirement an empty body stays acceptable.
+        ResponseDecryptor::from_key_material(self::key_material())
+            .finish()
+            .unwrap();
     }
 
     #[test]

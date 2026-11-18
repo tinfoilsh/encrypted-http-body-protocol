@@ -402,6 +402,44 @@
     }
   },
   {
+    "id": "e2e-redirect-failclosed",
+    "description": "A redirect answering an encrypted request MUST fail and MUST NOT be followed.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "redirect_303",
+    "request": {
+      "method": "POST",
+      "path": "/s/redirect_303",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNEXPECTED_REDIRECT",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
+    "id": "e2e-redirect-with-nonce-failclosed",
+    "description": "A nonce does not make a redirect acceptable: any 32 bytes pass as one.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "redirect_303_nonce",
+    "request": {
+      "method": "POST",
+      "path": "/s/redirect_303_nonce",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNEXPECTED_REDIRECT",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
+    }
+  },
+  {
     "id": "e2e-plaintext-200-failclosed",
     "description": "2xx plaintext MUST fail closed.",
     "category": "e2e",
@@ -422,7 +460,25 @@
   },
   {
     "id": "e2e-empty-response",
-    "description": "Encrypted response with a nonce but zero frames decrypts to an empty body.",
+    "description": "An empty response carries one frame sealing an empty plaintext and decrypts to an empty body.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "empty_frame",
+    "request": {
+      "method": "POST",
+      "path": "/s/empty_frame",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": ""
+    }
+  },
+  {
+    "id": "e2e-no-frames-failclosed",
+    "description": "A 2xx with a nonce but zero frames MUST fail closed: nothing authenticates it.",
     "category": "e2e",
     "operation": "request",
     "server_scenario": "empty_encrypted",
@@ -433,9 +489,10 @@
       "headers": {}
     },
     "expect": {
-      "outcome": "ok",
-      "status": 200,
-      "body_hex": ""
+      "outcome": "error",
+      "error_code": "FRAMING_TRUNCATED",
+      "plaintext_emitted_before_error": false,
+      "bytes_emitted_before_error": 0
     }
   },
   {

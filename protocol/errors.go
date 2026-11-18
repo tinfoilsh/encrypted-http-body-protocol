@@ -15,6 +15,7 @@ const (
 	InvalidEncapsulatedKey Code = "INVALID_ENCAPSULATED_KEY"
 	HPKESetupFailed        Code = "HPKE_SETUP_FAILED"
 	MissingResponseNonce   Code = "MISSING_RESPONSE_NONCE"
+	UnexpectedRedirect     Code = "UNEXPECTED_REDIRECT"
 	InvalidResponseNonce   Code = "INVALID_RESPONSE_NONCE"
 	DuplicateResponseNonce Code = "DUPLICATE_RESPONSE_NONCE"
 	KeyConfigMismatch      Code = "KEY_CONFIG_MISMATCH"

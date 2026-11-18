@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
@@ -220,8 +221,7 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	}
 
 	// Read encrypted chunk
-	encryptedChunk := make([]byte, chunkLen)
-	_, err = io.ReadFull(r.reader, encryptedChunk)
+	encryptedChunk, err := readChunk(r.reader, chunkLen)
 	if err != nil {
 		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 	}
@@ -276,6 +276,7 @@ type DerivedResponseWriter struct {
 	http.ResponseWriter
 	aead        *ResponseAEAD
 	wroteHeader bool
+	wroteFrame  bool
 	statusCode  int
 }
 
@@ -287,6 +288,11 @@ func (w *DerivedResponseWriter) WriteHeader(statusCode int) {
 			w.ResponseWriter.WriteHeader(statusCode)
 		}
 		return
+	}
+	// 204 and 205 cannot carry the chunk a client needs to authenticate a
+	// success (SPEC 5.2), so they are sent as 200 with an empty body.
+	if statusCode == http.StatusNoContent || statusCode == http.StatusResetContent {
+		statusCode = http.StatusOK
 	}
 	if !w.wroteHeader {
 		w.ResponseWriter.Header().Del("Content-Length")
@@ -305,7 +311,28 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
 	}
+	return w.writeFrame(data)
+}
 
+// Finish gives a response with no body one frame of empty plaintext, so the
+// client has something to authenticate (SPEC 5.3). A 101 or 304, which cannot
+// carry a body, is left alone. Middleware calls it when the handler returns; code
+// that drives the writer directly calls it once the response is complete.
+func (w *DerivedResponseWriter) Finish() error {
+	if w.wroteFrame {
+		return nil
+	}
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.statusCode == http.StatusSwitchingProtocols || w.statusCode == http.StatusNotModified {
+		return nil
+	}
+	_, err := w.writeFrame(nil)
+	return err
+}
+
+func (w *DerivedResponseWriter) writeFrame(data []byte) (int, error) {
 	// Encrypt the chunk (nonce is computed and sequence incremented automatically)
 	encrypted := w.aead.Seal(data, nil)
 
@@ -319,6 +346,7 @@ func (w *DerivedResponseWriter) Write(data []byte) (int, error) {
 	if _, err := w.ResponseWriter.Write(encrypted); err != nil {
 		return 0, err
 	}
+	w.wroteFrame = true
 
 	return len(data), nil
 }
@@ -506,6 +534,32 @@ func (ctx *RequestContext) DecryptResponse(resp *http.Response) error {
 // frame is authenticated.
 const maxChunkBytes = 64 << 20
 
+// chunkReadStep is how much of a chunk is allocated ahead of the bytes that
+// have arrived.
+const chunkReadStep = 64 << 10
+
+// readChunk reads a chunk of the announced length. Memory grows with the
+// bytes received rather than with the length prefix, which is not
+// authenticated: a peer that announces a large chunk and sends nothing holds
+// one step, not the whole chunk.
+func readChunk(r io.Reader, length uint32) ([]byte, error) {
+	chunk := make([]byte, 0, min(int(length), chunkReadStep))
+	for len(chunk) < int(length) {
+		step := min(int(length)-len(chunk), chunkReadStep)
+		chunk = slices.Grow(chunk, step)
+		n, err := io.ReadFull(r, chunk[len(chunk):len(chunk)+step])
+		chunk = chunk[:len(chunk)+n]
+		// The end of the stream inside a chunk is a truncation wherever it falls.
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return chunk, nil
+}
+
 // DerivedStreamingDecryptReader decrypts response chunks using derived keys.
 // It emits each plaintext chunk as soon as the complete encrypted frame has
 // been authenticated and rejects truncated framing at end-of-stream.
@@ -515,6 +569,11 @@ type DerivedStreamingDecryptReader struct {
 	buffer      []byte
 	eof         bool
 	terminalErr error
+	// requireFrame makes a body that ends before any frame authenticated a
+	// failure: the response claims success, and without a frame nothing
+	// shows the server produced it (SPEC 5.3).
+	requireFrame  bool
+	authenticated bool
 }
 
 // Read implements io.Reader, decrypting chunks as they are read.
@@ -540,6 +599,9 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		bytesRead, err = io.ReadFull(r.reader, chunkLenBytes)
 		if err != nil {
 			if err == io.EOF && bytesRead == 0 {
+				if r.requireFrame && !r.authenticated {
+					return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "response ended before any authenticated frame"))
+				}
 				r.eof = true
 				return 0, io.EOF
 			}
@@ -555,8 +617,7 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		}
 
 		// Read encrypted chunk
-		encryptedChunk := make([]byte, chunkLen)
-		_, err = io.ReadFull(r.reader, encryptedChunk)
+		encryptedChunk, err := readChunk(r.reader, chunkLen)
 		if err != nil {
 			return 0, r.fail(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 		}
@@ -565,6 +626,10 @@ func (r *DerivedStreamingDecryptReader) Read(p []byte) (n int, err error) {
 		decryptedChunk, err := r.aead.Open(encryptedChunk, nil)
 		if err != nil {
 			return 0, r.fail(err)
+		}
+		r.authenticated = true
+		if len(decryptedChunk) == 0 {
+			continue
 		}
 
 		// Return as much as fits, buffer the rest

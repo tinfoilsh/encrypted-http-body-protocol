@@ -22,6 +22,7 @@ import httpx
 from ._http import (
     DEFAULT_MAX_RESPONSE_BYTES,
     raise_for_key_config_mismatch,
+    is_success,
     response_nonce_for_status,
 )
 from .derive import FrameDecryptor, derive_response_keys
@@ -98,10 +99,10 @@ def _buffered_response(response: httpx.Response, body: bytes) -> httpx.Response:
 
 
 def _make_decryptor(
-    token: SessionRecoveryToken, nonce: bytes, max_bytes: int
+    token: SessionRecoveryToken, nonce: bytes, max_bytes: int, status: int
 ) -> FrameDecryptor:
     key_material = derive_response_keys(token.exported_secret, token.request_enc, nonce)
-    return FrameDecryptor(key_material, max_bytes)
+    return FrameDecryptor(key_material, max_bytes, require_frame=is_success(status))
 
 
 class _DecryptingByteStream(httpx.SyncByteStream):
@@ -202,10 +203,14 @@ class EHBPTransport(httpx.BaseTransport):
             if nonce is None:
                 return _buffered_response(response, body)
         else:
-            nonce = response_nonce_for_status(response.status_code, response.headers)
+            try:
+                nonce = response_nonce_for_status(response.status_code, response.headers)
+            except BaseException:
+                response.close()
+                raise
 
         assert nonce is not None
-        decryptor = _make_decryptor(token, nonce, self._max_response_bytes)
+        decryptor = _make_decryptor(token, nonce, self._max_response_bytes, response.status_code)
         return httpx.Response(
             status_code=response.status_code,
             headers=_decrypted_headers(response),
@@ -277,10 +282,14 @@ class AsyncEHBPTransport(httpx.AsyncBaseTransport):
             if nonce is None:
                 return _buffered_response(response, body)
         else:
-            nonce = response_nonce_for_status(response.status_code, response.headers)
+            try:
+                nonce = response_nonce_for_status(response.status_code, response.headers)
+            except BaseException:
+                await response.aclose()
+                raise
 
         assert nonce is not None
-        decryptor = _make_decryptor(token, nonce, self._max_response_bytes)
+        decryptor = _make_decryptor(token, nonce, self._max_response_bytes, response.status_code)
         return httpx.Response(
             status_code=response.status_code,
             headers=_decrypted_headers(response),

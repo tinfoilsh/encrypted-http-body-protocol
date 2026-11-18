@@ -149,9 +149,9 @@ This derivation ensures:
 - Inbound response:
 
   - For requests with encrypted bodies: Require `Ehbp-Response-Nonce` (subject to the error pass-through rule below); derive response keys using the procedure in Section 4.4 (using the retained HPKE sender context from the request). Stream-decrypt the chunked body using the derived AES-256-GCM key.
-  - If `Ehbp-Response-Nonce` is present, the client decrypts the response regardless of HTTP status code; servers encrypt error responses too whenever a receiver context was established (Section 5.2).
-  - If `Ehbp-Response-Nonce` is invalid, or absent on a response with a 2xx status code, the client MUST fail the request and MUST NOT treat the response body as authenticated application data. The client MAY parse plaintext error details only for diagnostics and recovery (Section 5.4), but this does not make the response trustworthy.
-  - If `Ehbp-Response-Nonce` is absent on a response with a non-2xx status code, the client MAY pass the response through to the caller unchanged as an unauthenticated plaintext error (see Section 5.3 for the trust implications). Any session recovery token for that exchange (Section 6) MUST be treated as consumed.
+  - If `Ehbp-Response-Nonce` is present, the client decrypts the response regardless of HTTP status code, except a 3xx, which it fails (Section 5.3); servers encrypt error responses too whenever a receiver context was established (Section 5.2).
+  - If `Ehbp-Response-Nonce` is invalid, or absent on a response with a 1xx or 2xx status code, the client MUST fail the request and MUST NOT treat the response body as authenticated application data. The client MAY parse plaintext error details only for diagnostics and recovery (Section 5.4), but this does not make the response trustworthy.
+  - If `Ehbp-Response-Nonce` is absent on a response with a 4xx or 5xx status code, the client MAY pass the response through to the caller unchanged as an unauthenticated plaintext error (see Section 5.3 for the trust implications). Any session recovery token for that exchange (Section 6) MUST be treated as consumed.
   - For bodyless requests: The response is unencrypted. Process as a normal HTTP response.
 
 ### 5.2 Server
@@ -168,6 +168,7 @@ This derivation ensures:
 - Response handling:
 
   - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce` and carry the framed body as described in Section 4.2.
+    - A response whose body is empty MUST still carry one chunk, sealing an empty plaintext, so that the client has something to authenticate (Section 5.3). A status that cannot carry a body (204, 205) therefore MUST NOT answer an encrypted request: the server sends 200 with an empty body in its place.
   - If no HPKE context was established (plaintext request or bodyless request), the response is sent as plaintext without any EHBP headers.
 
 ### 5.3 Mode Detection
@@ -179,10 +180,14 @@ The presence or absence of `Ehbp-Response-Nonce` in the response indicates wheth
 
 Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is present before treating a response body as authenticated application data:
 
-- If the header is missing on a response with a 2xx status code, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
-- If the header is missing on a response with a non-2xx status code, the client MAY pass the response through to the caller unchanged. Such responses are typically produced by intermediaries (load balancers, CDNs, rate limiters) that reject or fail the request without it ever reaching the EHBP server. These bodies are unauthenticated: an on-path attacker can forge them, or strip the nonce header from a genuine encrypted error response and substitute arbitrary plaintext. Callers MUST treat pass-through error bodies as untrusted diagnostics and MUST NOT act on them as authenticated application data.
+- If the header is missing on a response with a 1xx or 2xx status code, the client MUST fail the request rather than falling back to reading plaintext. This prevents body substitution attacks where an attacker strips the nonce header and replaces the encrypted body with attacker-controlled plaintext.
+- If the header is missing on a response with a 4xx or 5xx status code, the client MAY pass the response through to the caller unchanged. Such responses are typically produced by intermediaries (load balancers, CDNs, rate limiters) that reject or fail the request without it ever reaching the EHBP server. These bodies are unauthenticated: an on-path attacker can forge them, or strip the nonce header from a genuine encrypted error response and substitute arbitrary plaintext. Callers MUST treat pass-through error bodies as untrusted diagnostics and MUST NOT act on them as authenticated application data.
 
-The pass-through allowance applies only to non-2xx responses; exchanges that claim success always fail closed without a valid nonce.
+- If the response has a 3xx status code, the client MUST fail the request, whether or not the header is present, and MUST NOT follow the redirect. The `Location` of a redirect is not authenticated, and a followed redirect can replace the encrypted exchange with a bodyless request, which EHBP does not protect (Section 7.4): the answer to that request would be returned as the answer to the encrypted one.
+
+- If the response has a 1xx or 2xx status code and the header is present, the client MUST fail the request unless at least one chunk of the body authenticates (`FRAMING_TRUNCATED`). The header alone proves nothing: any 32-byte value is accepted as a nonce, and a body with no chunks leaves nothing to check it against. A 204 or 205 response cannot carry a chunk and MUST be failed. A chunk that seals an empty plaintext counts, and yields no data.
+
+The pass-through allowance applies only to 4xx and 5xx responses. A 1xx is not an error: the only one a client receives as a final response is 101, which hands the connection to another protocol; exchanges that claim success always fail closed without a valid nonce and an authenticated chunk.
 
 ### 5.4 Error Handling and Recovery
 
@@ -195,8 +200,10 @@ EHBP implementations MUST treat these as protocol failures:
 - invalid `Ehbp-Encapsulated-Key` (format, length, or unsupported parameters)
 - HPKE setup/decapsulation failure
 - chunk framing violation
+- a 1xx or 2xx response to an encrypted request in which no chunk authenticates (Section 5.3)
 - AEAD authentication/decryption failure
-- invalid `Ehbp-Response-Nonce`, or `Ehbp-Response-Nonce` missing from a 2xx response, when an encrypted response is expected (a missing nonce on a non-2xx response is handled per Section 5.3 and is not a protocol failure)
+- invalid `Ehbp-Response-Nonce`, or `Ehbp-Response-Nonce` missing from a 1xx or 2xx response, when an encrypted response is expected (a missing nonce on a 4xx or 5xx response is handled per Section 5.3 and is not a protocol failure)
+- a 3xx response to an encrypted request
 
 Implementations MUST fail closed: no plaintext fallback for encrypted exchanges and no decrypted data exposure after an authentication failure. Plaintext released before the failure, chunk by chunk as each authenticated (Section 4.3), is an authentic prefix and is not a failure of this rule; nothing from the failing chunk or any later chunk is ever released.
 
@@ -255,11 +262,12 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | `UNSUPPORTED_SUITE` | client | Key config advertises a KEM, KDF, or AEAD other than the suite in Section 3.2, or more than one cipher suite |
 | `INVALID_ENCAPSULATED_KEY` | server | `Ehbp-Encapsulated-Key` not hex, wrong length, or repeated; or absent where the server requires encryption (Section 5.2 pass-through is not a failure) |
 | `HPKE_SETUP_FAILED` | both | HPKE setup, seal, export, or response key derivation failed |
-| `MISSING_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` absent on a 2xx response to an encrypted request |
+| `MISSING_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` absent on a 1xx or 2xx response to an encrypted request |
+| `UNEXPECTED_REDIRECT` | client | 3xx response to an encrypted request |
 | `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |
 | `KEY_CONFIG_MISMATCH` | client | Server returned the Section 5.4.2 key-configuration problem response |
-| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or inside a frame's ciphertext |
+| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or inside a frame's ciphertext; or a 1xx or 2xx response to an encrypted request ended before any chunk authenticated |
 | `CHUNK_TOO_LARGE` | both | Frame length prefix exceeds the receiver's maximum; rejected before allocation |
 | `AEAD_DECRYPT_FAILED` | both | AEAD authentication failed for a frame |
 | `SEQUENCE_OVERFLOW` | both | Frame sequence number exhausted |
@@ -372,6 +380,20 @@ This vulnerability does not exist for requests with bodies because substituting 
 Applications requiring confidential responses to bodyless requests should either:
 - Include a minimal body (even if semantically empty) to enable EHBP protection
 - Use an alternative mechanism such as TLS with mutual authentication
+
+### 7.5 Limitations
+
+An intermediary that carries EHBP traffic can do the following without any key. Applications that need protection against them must provide it themselves.
+
+- **Change everything outside the body.** The method, URL, request headers, response status and response headers are neither encrypted nor bound to the sealed body. A sealed request can be delivered to a different path or with different headers, including different credentials, and a response can be given a different status. Do not treat any of them as coming from the peer.
+- **Replay a request.** A sealed request is accepted each time it is delivered. Operations that must not run twice need their own replay protection.
+- **Cut a body short.** A message ends where the HTTP body ends (Section 4.3), so a request or response truncated at a chunk boundary is a valid, shorter message. Clients only require that a successful response carries one authenticated chunk (Section 5.3). Use a format that fails when incomplete, or an application-level end marker.
+- **Answer with an unauthenticated error.** A 4xx or 5xx response without a nonce may be passed through (Section 5.3) and may be forged.
+- **Observe sizes and timing.** Chunk lengths are visible and nothing is padded. When a server writes one chunk per unit of output, such as a token of generated text, the length of every unit is revealed.
+- **Read or answer anything that is not a sealed body.** Requests without a body (Section 7.4), protocol upgrades such as WebSocket, and CONNECT tunnels are outside EHBP.
+- **Drop, delay or reorder exchanges.**
+
+EHBP does not support forward secrecy.
 
 ## 8. References
 

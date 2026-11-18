@@ -7,9 +7,10 @@ import XCTest
 @testable import EHBP
 
 final class UnencryptedResponseTests: XCTestCase {
-    private func makeClient(statusCode: Int) throws -> EHBPClient {
+    private func makeClient(statusCode: Int, madeUpNonce: Bool = false) throws -> EHBPClient {
         let serverPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         UnencryptedResponseURLProtocol.statusCode = statusCode
+        UnencryptedResponseURLProtocol.madeUpNonce = madeUpNonce
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [UnencryptedResponseURLProtocol.self]
         return try EHBPClient(
@@ -24,11 +25,12 @@ final class UnencryptedResponseTests: XCTestCase {
         UnencryptedResponseURLProtocol.finishLoading = nil
         UnencryptedResponseURLProtocol.streamWithoutFinishing = false
         UnencryptedResponseURLProtocol.statusCode = 500
+        UnencryptedResponseURLProtocol.madeUpNonce = false
         super.tearDown()
     }
 
     func testRequestPassesThroughUnencryptedNonSuccessResponses() async throws {
-        for statusCode in [300, 400, 503] {
+        for statusCode in [400, 503] {
             let client = try makeClient(statusCode: statusCode)
             let (data, response) = try await client.request(
                 method: "POST",
@@ -59,6 +61,44 @@ final class UnencryptedResponseTests: XCTestCase {
         XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "text/plain")
         XCTAssertEqual(data, Data("upstream unavailable".utf8))
         XCTAssertThrowsError(try client.getSessionRecoveryToken())
+    }
+
+    func testRedirectToAnEncryptedRequestIsRefused() async throws {
+        for statusCode in [300, 303, 307, 308] {
+            let client = try makeClient(statusCode: statusCode)
+            do {
+                _ = try await client.request(method: "POST", path: "/secure", body: Data("hello".utf8))
+                XCTFail("Expected status \(statusCode) to be refused")
+            } catch let error as EHBPError where error.code == .unexpectedRedirect {
+                XCTAssertThrowsError(try client.getSessionRecoveryToken())
+            }
+
+            do {
+                _ = try await client.requestStream(method: "POST", path: "/secure", body: Data("hello".utf8))
+                XCTFail("Expected streamed status \(statusCode) to be refused")
+            } catch let error as EHBPError where error.code == .unexpectedRedirect {
+                XCTAssertThrowsError(try client.getSessionRecoveryToken())
+            }
+        }
+    }
+
+    func testSuccessWithoutAnAuthenticatedChunkIsRefused() async throws {
+        for statusCode in [200, 204, 205] {
+            let client = try makeClient(statusCode: statusCode, madeUpNonce: true)
+            do {
+                _ = try await client.request(method: "POST", path: "/secure", body: Data("hello".utf8))
+                XCTFail("Expected status \(statusCode) with no chunk to be refused")
+            } catch let error as EHBPError where error.code == .framingTruncated {
+                XCTAssertThrowsError(try client.getSessionRecoveryToken())
+            }
+        }
+    }
+
+    func testAuthenticatedErrorMayCarryNoChunk() async throws {
+        let client = try makeClient(statusCode: 403, madeUpNonce: true)
+        let (data, response) = try await client.request(method: "POST", path: "/secure", body: Data("hello".utf8))
+        XCTAssertEqual(response.statusCode, 403)
+        XCTAssertTrue(data.isEmpty)
     }
 
     func testSuccessfulUnencryptedResponseRemainsRejected() async throws {
@@ -133,6 +173,8 @@ final class UnencryptedResponseTests: XCTestCase {
 
 private final class UnencryptedResponseURLProtocol: URLProtocol {
     nonisolated(unsafe) static var statusCode = 500
+    /// Answers with a nonce header and no body: what a relay can produce by itself.
+    nonisolated(unsafe) static var madeUpNonce = false
     nonisolated(unsafe) static var streamWithoutFinishing = false
     nonisolated(unsafe) static var finishLoading: (() -> Void)?
     static let streamingChunkSize = 16 * 1024
@@ -142,6 +184,17 @@ private final class UnencryptedResponseURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if Self.madeUpNonce {
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: Self.statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: [EHBPProtocol.responseNonceHeader: String(repeating: "ab", count: 32)]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: Self.statusCode,

@@ -62,8 +62,9 @@ public final class EHBPClient: @unchecked Sendable {
     ///     whole request. Overrides the session configuration's
     ///     `timeoutIntervalForRequest`, whether shorter or longer; nil keeps it.
     ///   - body: Request body (will be encrypted)
-    /// - Returns: Decrypted response data, or an untouched non-success response
+    /// - Returns: Decrypted response data, or an untouched 4xx or 5xx response
     ///   when an intermediary returns an unencrypted error
+    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
     public func request(
         method: String,
         path: String,
@@ -104,7 +105,10 @@ public final class EHBPClient: @unchecked Sendable {
         if let token { publishToken(token, for: generation) }
         defer { clearToken(for: generation) }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(
+            for: request,
+            delegate: requestContext == nil ? nil : RedirectRefusal()
+        )
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
@@ -125,7 +129,8 @@ public final class EHBPClient: @unchecked Sendable {
         let decryptedData = try EHBP.decryptResponseBody(
             token: token!,
             responseNonce: responseNonce,
-            encryptedData: data
+            encryptedData: data,
+            requireFrame: EHBPClient.claimsSuccess(httpResponse)
         )
 
         return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
@@ -140,7 +145,8 @@ public final class EHBPClient: @unchecked Sendable {
     ///   - timeoutInterval: Idle timeout for this request; see `request(method:path:headers:timeoutInterval:body:)`
     ///   - body: Request body (will be encrypted)
     /// - Returns: AsyncThrowingStream of decrypted response chunks, or untouched
-    ///   non-success response chunks when an intermediary returns an unencrypted error
+    ///   4xx or 5xx response chunks when an intermediary returns an unencrypted error
+    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
     public func requestStream(
         method: String,
         path: String,
@@ -179,7 +185,10 @@ public final class EHBPClient: @unchecked Sendable {
 
         let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
         do {
-            (asyncBytes, response) = try await session.bytes(for: request)
+            (asyncBytes, response) = try await session.bytes(
+                for: request,
+                delegate: requestContext == nil ? nil : RedirectRefusal()
+            )
         } catch {
             prepared.cleanup()
             clearToken(for: generation)
@@ -240,7 +249,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (stream, httpResponse)
         }
 
-        let responseDecryptor: ResponseDecryptor
+        var responseDecryptor: ResponseDecryptor
         do {
             responseDecryptor = try token!.makeResponseDecryptor(
                 responseNonce: try parseResponseNonce(responseNonceHex)
@@ -250,6 +259,7 @@ public final class EHBPClient: @unchecked Sendable {
             clearToken(for: generation)
             throw error
         }
+        responseDecryptor.requiresFrame = EHBPClient.claimsSuccess(httpResponse)
 
         let decryptor = PullDrivenResponseDecryptor(
             iterator: iterator,
@@ -469,15 +479,35 @@ public final class EHBPClient: @unchecked Sendable {
         tokenLock.unlock()
     }
 
+    /// 204 No Content and 205 Reset Content.
+    private static let bodylessSuccessStatuses: Set<Int> = [204, 205]
+
+    /// Whether a response claims success, and so must carry an authenticated
+    /// chunk (SPEC 5.3).
+    private static func claimsSuccess(_ response: HTTPURLResponse) -> Bool {
+        response.statusCode < 400
+    }
+
     private static func responseNonceHex(
         from response: HTTPURLResponse,
         requestWasEncrypted: Bool
     ) throws -> String? {
         guard requestWasEncrypted else { return nil }
+        // A redirect is refused with or without a nonce (SPEC 5.3): its
+        // Location is not authenticated, and following it can swap the
+        // encrypted exchange for a bodyless one that EHBP does not protect.
+        guard !(300..<400).contains(response.statusCode) else {
+            throw EHBPError(.unexpectedRedirect, "status \(response.statusCode) in response to an encrypted request")
+        }
         if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
+            // 204 and 205 cannot carry a body, so nothing could authenticate them.
+            guard !bodylessSuccessStatuses.contains(response.statusCode) else {
+                throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
+            }
             return nonce
         }
-        guard !(200..<300).contains(response.statusCode) else {
+        // Only an error status may pass through without a nonce (SPEC 5.3).
+        guard response.statusCode >= 400 else {
             throw EHBPError(.missingResponseNonce, "missing \(EHBPProtocol.responseNonceHeader) header")
         }
         return nil
@@ -678,4 +708,18 @@ func parseResponseNonce(_ hex: String) throws -> Data {
         throw EHBPError(.invalidResponseNonce, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(nonce.count)")
     }
     return nonce
+}
+
+/// Stops URLSession from following a redirect, so the redirect itself is the
+/// response and is refused where the response is classified.
+private final class RedirectRefusal: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
 }

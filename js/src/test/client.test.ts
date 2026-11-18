@@ -6,7 +6,9 @@ import {
   createTransport,
   InvalidInputError,
   KeyConfigMismatchError,
+  FramingTruncatedError,
   MissingResponseNonceError,
+  UnexpectedRedirectError,
 } from '../index.js';
 import { encryptFrames, setSpoolThresholdForTests, type SessionRecoveryToken } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
@@ -42,7 +44,8 @@ function toArrayBuffer(bytes: Uint8Array<ArrayBufferLike>): ArrayBuffer {
 async function buildEncryptedResponse(
   request: Request,
   serverIdentity: Identity,
-  status = 200
+  status = 200,
+  responseBody?: Uint8Array
 ): Promise<Response> {
   const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
   assert(requestEncHex, `Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header`);
@@ -87,7 +90,7 @@ async function buildEncryptedResponse(
   const responseCiphertext = await encryptChunk(
     keyMaterial,
     0,
-    new TextEncoder().encode(responseText)
+    responseBody ?? new TextEncoder().encode(responseText)
   );
 
   return new Response(toArrayBuffer(encodeSingleChunk(responseCiphertext)), {
@@ -478,6 +481,49 @@ describe('Transport', () => {
     }
   });
 
+  it('should refuse a redirect in response to an encrypted request', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+    const originalFetch = globalThis.fetch;
+
+    const cases: { name: string; response: () => Response }[] = [
+      { name: 'see other', response: () => new Response(null, { status: 303, headers: { location: '/followed' } }) },
+      { name: 'temporary redirect with a body', response: () => new Response('forged', { status: 307, headers: { location: '/followed' } }) },
+      {
+        name: 'made-up nonce',
+        response: () => new Response(null, { status: 303, headers: { location: '/followed', [PROTOCOL.RESPONSE_NONCE_HEADER]: 'ab'.repeat(32) } }),
+      },
+      {
+        // What a fetch that followed the redirect anyway hands back.
+        name: 'already followed',
+        response: () => Object.defineProperty(new Response('forged', { status: 200 }), 'redirected', { value: true }),
+      },
+    ];
+
+    try {
+      for (const { name, response } of cases) {
+        const redirectModes: (string | undefined)[] = [];
+        globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          redirectModes.push(init?.redirect);
+          return response();
+        }) as typeof fetch;
+
+        await assert.rejects(
+          () => transport.post('https://server.test/secure', 'hello'),
+          (err: unknown) => {
+            assert(err instanceof UnexpectedRedirectError, name);
+            assert.match(err.message, /UNEXPECTED_REDIRECT/);
+            return true;
+          }
+        );
+        assert.deepStrictEqual(redirectModes, ['manual'], name);
+        assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/, name);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('should reject a nonce-less 2xx response', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
@@ -568,7 +614,43 @@ describe('Transport', () => {
     }
   });
 
-  it('should not publish a token for a nonce-bearing null-body response', async () => {
+  it('should refuse a success that carries no authenticated chunk', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+    const madeUpNonce = bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH));
+    const originalFetch = globalThis.fetch;
+
+    try {
+      // An empty body, or only zero-length frames: nothing authenticates.
+      for (const body of [new Uint8Array(0), new Uint8Array(8)]) {
+        globalThis.fetch = (async (): Promise<Response> =>
+          new Response(toArrayBuffer(body), { status: 200, headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: madeUpNonce } })) as typeof fetch;
+        const response = await transport.post('https://server.test/secure', 'hello');
+        await assert.rejects(() => response.arrayBuffer(), (err: unknown) => {
+          assert(err instanceof FramingTruncatedError);
+          return true;
+        });
+      }
+
+      // An authenticated error may be empty; only success needs a chunk.
+      globalThis.fetch = (async (): Promise<Response> =>
+        new Response(new Uint8Array(0), { status: 403, headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: madeUpNonce } })) as typeof fetch;
+      const forbidden = await transport.post('https://server.test/secure', 'hello');
+      assert.strictEqual(forbidden.status, 403);
+      assert.strictEqual((await forbidden.arrayBuffer()).byteLength, 0);
+
+      // A chunk sealing an empty plaintext authenticates an empty success.
+      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> =>
+        buildEncryptedResponse(input as Request, serverIdentity, 200, new Uint8Array(0))) as typeof fetch;
+      const empty = await transport.post('https://server.test/secure', 'hello');
+      assert.strictEqual(empty.status, 200);
+      assert.strictEqual((await empty.arrayBuffer()).byteLength, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should refuse a nonce-bearing null-body response and publish no token', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
 
@@ -587,10 +669,13 @@ describe('Transport', () => {
     }) as typeof fetch;
 
     try {
-      const response = await transport.post('https://server.test/secure', 'hello');
-
-      assert.strictEqual(response.status, 204);
-      assert.strictEqual(response.body, null);
+      await assert.rejects(
+        () => transport.post('https://server.test/secure', 'hello'),
+        (err: unknown) => {
+          assert(err instanceof FramingTruncatedError);
+          return true;
+        }
+      );
       assert.throws(
         () => transport.getSessionRecoveryToken(),
         /No session recovery token available/

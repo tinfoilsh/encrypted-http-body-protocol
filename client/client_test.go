@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,70 +163,93 @@ func TestNewTransportWithIdentityRequiresIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// A RoundTripper must perform a single HTTP transaction: redirects have to
-// surface to the outer http.Client so its CheckRedirect policy and cookie jar
-// apply, instead of being swallowed by an internal client.
-func TestRoundTripSurfacesRedirectsToOuterClient(t *testing.T) {
+// A redirect answering an encrypted request is refused, with or without a
+// nonce, so no caller can be steered into a follow-up request that EHBP does
+// not protect.
+func TestTransportRejectsRedirects(t *testing.T) {
 	serverIdentity, err := identity.NewIdentity()
 	assert.NoError(t, err)
-
-	middleware := serverIdentity.Middleware()
-	mux := http.NewServeMux()
-	mux.Handle("/redirect", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		http.Redirect(w, r, "/secure", http.StatusTemporaryRedirect)
-	})))
-	mux.Handle("/secure", middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-			return
-		}
-		_, _ = w.Write([]byte("Hello, " + string(body)))
-	})))
-
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
 	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
 	assert.NoError(t, err)
-	transport, err := NewTransportWithIdentity(pubIdentity)
+
+	const forged = "forged answer"
+	for _, tc := range []struct {
+		name   string
+		status int
+		nonce  string
+	}{
+		{"plaintext body under a redirect status", http.StatusMultipleChoices, ""},
+		{"see other without a nonce", http.StatusSeeOther, ""},
+		{"see other with a made-up nonce and no body", http.StatusSeeOther, strings.Repeat("ab", 32)},
+		{"temporary redirect", http.StatusTemporaryRedirect, ""},
+		{"permanent redirect", http.StatusPermanentRedirect, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var followUps atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/sealed", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.ReadAll(r.Body)
+				w.Header().Set("Location", "/followed")
+				if tc.nonce != "" {
+					w.Header().Set(protocol.ResponseNonceHeader, tc.nonce)
+					w.WriteHeader(tc.status)
+					return
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(forged))
+			})
+			mux.HandleFunc("/followed", func(w http.ResponseWriter, r *http.Request) {
+				followUps.Add(1)
+				_, _ = w.Write([]byte(forged))
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			transport, err := NewTransportWithIdentity(pubIdentity)
+			assert.NoError(t, err)
+
+			// The default client follows redirects, as most callers' clients do.
+			req, err := http.NewRequest("POST", server.URL+"/sealed", bytes.NewBufferString("secret"))
+			assert.NoError(t, err)
+			resp, err := (&http.Client{Transport: transport}).Do(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			assert.Equal(t, protocol.UnexpectedRedirect, protocol.CodeOf(err))
+			assert.Zero(t, followUps.Load())
+			assert.Nil(t, transport.GetSessionRecoveryToken())
+		})
+	}
+}
+
+// A 101 hands the connection to another protocol; without a nonce it is not
+// an error to pass through, and its bytes must not reach the caller.
+func TestTransportRejectsNonceLessProtocolSwitch(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
 	assert.NoError(t, err)
 
-	t.Run("RoundTrip returns the redirect unfollowed", func(t *testing.T) {
-		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
-		assert.NoError(t, err)
-
-		resp, err := transport.RoundTrip(req)
-		assert.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
-		assert.Equal(t, "/secure", resp.Header.Get("Location"))
-	})
-
-	t.Run("outer client follows and re-encrypts each hop", func(t *testing.T) {
-		redirectsSeen := 0
-		httpClient := &http.Client{
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				redirectsSeen++
-				return nil
-			},
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
 		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: forged\r\n\r\nforged answer")
+		_ = buf.Flush()
+	}))
+	defer server.Close()
 
-		req, err := http.NewRequest("POST", server.URL+"/redirect", bytes.NewBufferString("test"))
-		assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
 
-		resp, err := httpClient.Do(req)
-		assert.NoError(t, err)
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		assert.NoError(t, err)
-		assert.Equal(t, "Hello, test", string(body))
-		assert.Equal(t, 1, redirectsSeen)
-	})
+	resp, err := transport.RoundTrip(req)
+	assert.Nil(t, resp)
+	assert.Equal(t, protocol.MissingResponseNonce, protocol.CodeOf(err))
 }
 
 // TestTransportClearsRequestURI ensures the transport can carry a request that
@@ -1219,4 +1243,90 @@ func TestInformationalResponseKeepsTheFinalStatus(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.Equal(t, "forbidden", string(body))
+}
+
+// A response that claims success must carry at least one frame the client
+// can authenticate; without one, nothing shows the server produced it.
+func TestTransportRequiresAnAuthenticatedFrameOnSuccess(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	madeUpNonce := strings.Repeat("ab", 32)
+
+	post := func(t *testing.T, handler http.Handler) (*http.Response, error) {
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		transport, err := NewTransportWithIdentity(pubIdentity)
+		assert.NoError(t, err)
+		req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+		assert.NoError(t, err)
+		return transport.RoundTrip(req)
+	}
+
+	t.Run("an empty success with a made-up nonce fails when read", func(t *testing.T) {
+		resp, err := post(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(protocol.ResponseNonceHeader, madeUpNonce)
+			w.WriteHeader(http.StatusOK)
+		}))
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+		assert.Equal(t, protocol.FramingTruncated, protocol.CodeOf(err))
+	})
+
+	t.Run("a status that cannot carry a frame is refused", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusResetContent} {
+			resp, err := post(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(protocol.ResponseNonceHeader, madeUpNonce)
+				w.WriteHeader(status)
+			}))
+			assert.Nil(t, resp)
+			assert.Equal(t, protocol.FramingTruncated, protocol.CodeOf(err))
+		}
+	})
+
+	t.Run("a handler that writes nothing still answers with a frame", func(t *testing.T) {
+		for _, handler := range []http.HandlerFunc{
+			func(w http.ResponseWriter, r *http.Request) { _, _ = io.ReadAll(r.Body) },
+			func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) },
+		} {
+			resp, err := post(t, serverIdentity.Middleware()(handler))
+			if !assert.NoError(t, err) {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.NoError(t, err)
+			assert.Empty(t, body)
+		}
+	})
+
+	t.Run("the server answers 200 where a handler chose 204 or 205", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusResetContent} {
+			resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})))
+			if !assert.NoError(t, err) {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.NoError(t, err)
+			assert.Empty(t, body)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+	})
+
+	t.Run("an authenticated error may still be empty", func(t *testing.T) {
+		resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		})))
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Empty(t, body)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
 }

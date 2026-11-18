@@ -113,11 +113,20 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		return fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
+	// A 1xx or 2xx response must carry an authenticated chunk (SPEC 5.3). The
+	// client refuses a redirect before it reaches this point.
+	success := resp.StatusCode < http.StatusBadRequest
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+		// These cannot carry a body, so nothing could authenticate them.
+		return protocol.Errorf(protocol.FramingTruncated, "status %d cannot carry an authenticated frame", resp.StatusCode)
+	}
+
 	resp.Body = &DerivedStreamingDecryptReader{
-		reader: resp.Body,
-		aead:   aead,
-		buffer: nil,
-		eof:    false,
+		reader:       resp.Body,
+		aead:         aead,
+		buffer:       nil,
+		eof:          false,
+		requireFrame: success,
 	}
 	resp.ContentLength = -1
 	// Any Content-Length header describes the encrypted body, not the

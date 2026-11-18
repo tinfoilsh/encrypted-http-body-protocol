@@ -37,6 +37,7 @@
             "INVALID_ENCAPSULATED_KEY",
             "HPKE_SETUP_FAILED",
             "MISSING_RESPONSE_NONCE",
+            "UNEXPECTED_REDIRECT",
             "INVALID_RESPONSE_NONCE",
             "DUPLICATE_RESPONSE_NONCE",
             "KEY_CONFIG_MISMATCH",

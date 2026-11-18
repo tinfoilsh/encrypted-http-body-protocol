@@ -177,6 +177,16 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, "unauthenticated plaintext")
 			return
+		case "redirect_303", "redirect_303_nonce":
+			// A redirect answering an encrypted request, towards a route that
+			// serves plaintext to the bodyless follow-up. Clients MUST fail it
+			// and MUST NOT follow it, nonce or not (SPEC 5.3).
+			w.Header().Set("Location", "/s/bodyless_plaintext")
+			if name == "redirect_303_nonce" {
+				w.Header().Set(protocol.ResponseNonceHeader, strings.Repeat("ab", 32))
+			}
+			w.WriteHeader(http.StatusSeeOther)
+			return
 		case "bodyless_plaintext":
 			// A bodyless request carries no encapsulated key; the response is
 			// plaintext and the client returns it as normal (SPEC 7.4).
@@ -260,9 +270,22 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			// probe at 500 ms, so this is a 10x timing margin, not a handshake.
 			time.Sleep(5 * time.Second)
 			writeEncrypted(w, nonce, framed, http.StatusOK)
+		case "empty_frame":
+			// An empty response as a conforming server sends it: one frame
+			// sealing an empty plaintext, which the client authenticates.
+			rec := httptest.NewRecorder()
+			dw, e := id.SetupDerivedResponseEncryption(rec, respCtx)
+			if e == nil {
+				e = dw.Finish()
+			}
+			if e != nil {
+				http.Error(w, "response setup failed", http.StatusInternalServerError)
+				return
+			}
+			writeEncrypted(w, rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes(), http.StatusOK)
 		case "empty_encrypted":
-			// A valid encrypted response with a nonce but zero frames; the client
-			// must decrypt it to an empty body.
+			// A nonce but zero frames: nothing authenticates the success, so
+			// the client must fail it (SPEC 5.3).
 			emptyNonce, emptyFramed, e := sealResponse(id, respCtx, nil)
 			if e != nil {
 				http.Error(w, "response setup failed", http.StatusInternalServerError)

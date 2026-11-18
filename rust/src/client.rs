@@ -198,10 +198,12 @@ impl Client {
         let mut guard = token
             .as_ref()
             .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+        let sent_to = token.as_ref().map(|_| request.url().clone());
         let response = match self.http_client.execute(request).await {
             Ok(response) => response,
             Err(err) => return Err(err.into()),
         };
+        refuse_followed_redirect(sent_to.as_ref(), &response)?;
         let response = self.open_raw_response(response, token, generation).await?;
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
@@ -318,8 +320,10 @@ impl Client {
         let status = response.status();
         let mut headers = response.headers().clone();
 
+        refuse_redirect(status)?;
+
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
-            if status.is_success() {
+            if !may_pass_through(status) {
                 return Err(Error::Coded(
                     Code::MissingResponseNonce,
                     format!("missing {RESPONSE_NONCE_HEADER} header"),
@@ -339,6 +343,7 @@ impl Client {
         }
 
         let response_nonce = response_nonce(&headers)?;
+        refuse_bodyless_success(status)?;
         let key_material =
             derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)?;
         strip_encrypted_framing_headers(&mut headers);
@@ -346,6 +351,7 @@ impl Client {
             inner: Box::pin(decrypt_response_stream(
                 response.bytes_stream(),
                 key_material,
+                !may_pass_through(status),
             )),
             generation,
             session: Arc::clone(&self.session),
@@ -418,7 +424,9 @@ impl Client {
         let guard = token
             .as_ref()
             .map(|_| SessionGuard::new(generation, Arc::clone(&self.session)));
+        let sent_to = token.as_ref().map(|_| request.url().clone());
         let response = self.http_client.execute(request).await?;
+        refuse_followed_redirect(sent_to.as_ref(), &response)?;
         Ok((response, token, generation, guard))
     }
 
@@ -444,9 +452,10 @@ impl Client {
             });
         };
 
+        refuse_redirect(status)?;
         if !headers.contains_key(RESPONSE_NONCE_HEADER) {
             check_key_config_mismatch(status, &headers, &body)?;
-            if !status.is_success() {
+            if may_pass_through(status) {
                 return Ok(Response {
                     status,
                     headers,
@@ -456,7 +465,13 @@ impl Client {
         }
 
         let response_nonce = response_nonce(&headers)?;
-        let decrypted = token.decrypt_response_body(&response_nonce, &body)?;
+        refuse_bodyless_success(status)?;
+        let mut decryptor = token.response_decryptor(&response_nonce)?;
+        if !may_pass_through(status) {
+            decryptor = decryptor.require_frame();
+        }
+        let decrypted = decryptor.push(&body)?.concat();
+        decryptor.finish()?;
         self.clear_session_recovery_token_if_current(generation);
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
@@ -833,6 +848,49 @@ fn strip_encrypted_framing_headers(headers: &mut HeaderMap) {
     headers.remove(TRANSFER_ENCODING);
 }
 
+/// A redirect answering an encrypted request is refused with or without a
+/// nonce (SPEC 5.3): its Location is not authenticated, and following it can
+/// swap the encrypted exchange for a bodyless one that EHBP does not protect.
+fn refuse_redirect(status: StatusCode) -> Result<()> {
+    if status.is_redirection() {
+        return Err(Error::Coded(
+            Code::UnexpectedRedirect,
+            format!("status {status} in response to an encrypted request"),
+        ));
+    }
+    Ok(())
+}
+
+/// 204 and 205 cannot carry a body, so nothing could authenticate them as
+/// the server's answer (SPEC 5.3).
+fn refuse_bodyless_success(status: StatusCode) -> Result<()> {
+    if status == StatusCode::NO_CONTENT || status == StatusCode::RESET_CONTENT {
+        return Err(Error::Coded(
+            Code::FramingTruncated,
+            format!("status {status} cannot carry an authenticated chunk"),
+        ));
+    }
+    Ok(())
+}
+
+/// A caller-supplied HTTP client may follow a redirect before the response is
+/// seen here. The answer then comes from another URL than the encrypted
+/// request went to, and is refused like the redirect itself.
+fn refuse_followed_redirect(sent_to: Option<&Url>, response: &reqwest::Response) -> Result<()> {
+    match sent_to {
+        Some(sent_to) if response.url() != sent_to => Err(Error::Coded(
+            Code::UnexpectedRedirect,
+            "the HTTP client followed a redirect from an encrypted request".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Only a 4xx or 5xx response may pass through without a nonce (SPEC 5.3).
+fn may_pass_through(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error()
+}
+
 fn response_nonce(headers: &HeaderMap) -> Result<Vec<u8>> {
     let mut values = headers.get_all(RESPONSE_NONCE_HEADER).iter();
     let nonce = values.next().ok_or_else(|| {
@@ -1074,15 +1132,21 @@ impl Drop for SessionClearingStream {
 fn decrypt_response_stream(
     mut stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
     key_material: crate::derive::ResponseKeyMaterial,
+    require_frame: bool,
 ) -> impl Stream<Item = Result<Bytes>> + Send {
     async_stream::try_stream! {
         let mut decryptor = ResponseDecryptor::from_key_material(key_material);
+        if require_frame {
+            decryptor = decryptor.require_frame();
+        }
 
         while let Some(chunk) = poll_next(&mut stream).await {
             let chunk = chunk?;
             decryptor.feed(&chunk);
             while let Some(plaintext) = decryptor.next_frame()? {
-                yield Bytes::from(plaintext);
+                if !plaintext.is_empty() {
+                    yield Bytes::from(plaintext);
+                }
             }
         }
 
@@ -1179,7 +1243,11 @@ mod tests {
             .chunks(3)
             .map(|chunk| Ok::<Bytes, reqwest::Error>(Bytes::copy_from_slice(chunk)))
             .collect();
-        let mut stream = Box::pin(decrypt_response_stream(stream::iter(chunks), key_material));
+        let mut stream = Box::pin(decrypt_response_stream(
+            stream::iter(chunks),
+            key_material,
+            false,
+        ));
 
         let mut plaintext = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -1205,7 +1273,7 @@ mod tests {
             first: Some(Bytes::from(hex::decode(vector.encrypted_response).unwrap())),
             dropped: Arc::clone(&source_dropped),
         };
-        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material, false));
 
         let plaintext = decrypted
             .next()
@@ -1251,7 +1319,7 @@ mod tests {
         let mut coalesced = hex::decode(vector.encrypted_response).unwrap();
         coalesced.extend_from_slice(&crate::derive::frame_chunk(&second).unwrap());
         let source = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(coalesced))]);
-        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material, false));
 
         let first = decrypted.next().await.unwrap().unwrap();
         assert_eq!(hex::encode(first), vector.plaintext);
@@ -1310,7 +1378,7 @@ mod tests {
         // A length prefix declaring a ~4 GiB chunk must be rejected before buffering.
         let framed = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
         let chunks = stream::iter([Ok::<Bytes, reqwest::Error>(framed)]);
-        let mut stream = Box::pin(decrypt_response_stream(chunks, key_material));
+        let mut stream = Box::pin(decrypt_response_stream(chunks, key_material, false));
 
         let err = stream
             .next()
@@ -1378,6 +1446,54 @@ mod tests {
             reqwest::Client::new(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn transport_refuses_an_answer_reached_through_a_followed_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The first connection is redirected; the second, the bodyless
+        // follow-up, is answered in plaintext.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for reply in [
+                "HTTP/1.1 303 See Other\r\nLocation: /followed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nforged",
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                }
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+
+        let identity = ServerIdentity::from_public_key_bytes(&[7u8; 32]).unwrap();
+        // reqwest's default client follows redirects.
+        let client = Client::with_identity_and_http_client(
+            Url::parse(&format!("http://{addr}/")).unwrap(),
+            identity,
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        let err = client
+            .post("/secure")
+            .unwrap()
+            .body("secret")
+            .send()
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, Error::Coded(Code::UnexpectedRedirect, _)));
+        assert!(client.get_session_recovery_token().is_none());
     }
 
     #[tokio::test]
@@ -1459,6 +1575,39 @@ mod tests {
 
         assert!(matches!(err, Error::Coded(Code::MissingResponseNonce, _)));
         assert!(client.get_session_recovery_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_refuses_redirects_to_encrypted_requests() {
+        for status in [
+            StatusCode::MULTIPLE_CHOICES,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let client = client_with_unencrypted_response(status).await;
+
+            let buffered = client.post("/secure").unwrap().body("secret").send().await;
+            assert!(matches!(
+                buffered.err().unwrap(),
+                Error::Coded(Code::UnexpectedRedirect, _)
+            ));
+            assert!(client.get_session_recovery_token().is_none());
+
+            // The fixture server answers one connection.
+            let client = client_with_unencrypted_response(status).await;
+            let streamed = client
+                .post("/secure")
+                .unwrap()
+                .body("secret")
+                .send_stream()
+                .await;
+            assert!(matches!(
+                streamed.err().unwrap(),
+                Error::Coded(Code::UnexpectedRedirect, _)
+            ));
+            assert!(client.get_session_recovery_token().is_none());
+        }
     }
 
     fn dummy_client() -> Client {
