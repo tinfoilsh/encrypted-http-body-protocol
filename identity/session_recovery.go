@@ -113,7 +113,8 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		return fmt.Errorf("failed to create AEAD: %w", err)
 	}
 
-	// Anything below 400 is not an error, so it claims to be the server's answer.
+	// A 1xx or 2xx response must carry an authenticated chunk (SPEC 5.3). The
+	// client refuses a redirect before it reaches this point.
 	success := resp.StatusCode < http.StatusBadRequest
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
 		// These cannot carry a body, so nothing could authenticate them.
