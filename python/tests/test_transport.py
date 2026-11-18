@@ -9,6 +9,7 @@ from conftest import MockServer
 from ehbp import AsyncEHBPTransport, EHBPTransport
 from ehbp.errors import (
     ChunkTooLargeError,
+    FramingTruncatedError,
     KeyConfigMismatchError,
     MissingResponseNonceError,
     UnexpectedRedirectError,
@@ -122,6 +123,50 @@ def test_async_redirect_to_an_encrypted_request_is_refused(make_server, status_c
     async def run() -> None:
         async with _async_client(server) as client:
             with pytest.raises(UnexpectedRedirectError):
+                await client.post(URL, content=b"payload")
+
+    asyncio.run(run())
+
+
+def test_success_without_an_authenticated_chunk_is_refused(make_server):
+    server = make_server(mode="no_frames")
+    with _sync_client(server) as client:
+        with pytest.raises(FramingTruncatedError):
+            client.post(URL, content=b"payload")
+        with pytest.raises(FramingTruncatedError):
+            with client.stream("POST", URL, content=b"payload") as response:
+                b"".join(response.iter_bytes())
+
+
+@pytest.mark.parametrize("status_code", [204, 205])
+def test_success_status_that_cannot_carry_a_chunk_is_refused(make_server, status_code):
+    server = make_server(mode="no_frames", status_code=status_code)
+    with _sync_client(server) as client, pytest.raises(FramingTruncatedError):
+        client.post(URL, content=b"payload")
+
+
+def test_empty_success_is_authenticated_by_an_empty_chunk(make_server):
+    server = make_server(mode="empty_frame")
+    with _sync_client(server) as client:
+        response = client.post(URL, content=b"payload")
+    assert response.status_code == 200
+    assert response.content == b""
+
+
+def test_authenticated_error_may_carry_no_chunk(make_server):
+    server = make_server(mode="no_frames", status_code=403)
+    with _sync_client(server) as client:
+        response = client.post(URL, content=b"payload")
+    assert response.status_code == 403
+    assert response.content == b""
+
+
+def test_async_success_without_an_authenticated_chunk_is_refused(make_server):
+    server = make_server(mode="no_frames")
+
+    async def run() -> None:
+        async with _async_client(server) as client:
+            with pytest.raises(FramingTruncatedError):
                 await client.post(URL, content=b"payload")
 
     asyncio.run(run())

@@ -205,6 +205,34 @@ final class DeriveTests: XCTestCase {
 
     // MARK: - Encrypt/Decrypt Tests
 
+    func testResponseDecryptorCanRequireAnAuthenticatedChunk() throws {
+        let keyMaterial = try deriveResponseKeys(
+            exportedSecret: Data(repeating: 0xAB, count: 32),
+            requestEnc: Data(repeating: 0xCD, count: 32),
+            responseNonce: Data(repeating: 0xEF, count: 32)
+        )
+
+        // Nothing arrived, or only zero-length frames: nothing authenticated.
+        var silent = ResponseDecryptor(keyMaterial: keyMaterial)
+        XCTAssertTrue(try silent.push(Data([0, 0, 0, 0])).isEmpty)
+        XCTAssertThrowsError(try silent.finish()) { error in
+            XCTAssertEqual((error as? EHBPError)?.code, .framingTruncated)
+        }
+
+        // A chunk sealing an empty plaintext authenticates and carries no data.
+        let ciphertext = try encryptChunk(keyMaterial: keyMaterial, seq: 0, plaintext: Data())
+        var frame = Data([0, 0, 0, UInt8(ciphertext.count)])
+        frame.append(ciphertext)
+        var answered = ResponseDecryptor(keyMaterial: keyMaterial)
+        XCTAssertEqual(try answered.push(frame).reduce(0) { $0 + $1.count }, 0)
+        XCTAssertNoThrow(try answered.finish())
+
+        // An error response may be empty.
+        var failed = ResponseDecryptor(keyMaterial: keyMaterial)
+        failed.requiresFrame = false
+        XCTAssertNoThrow(try failed.finish())
+    }
+
     func testEncryptDecryptChunk() throws {
         let exportedSecret = Data(repeating: 0xAB, count: 32)
         let requestEnc = Data(repeating: 0xCD, count: 32)

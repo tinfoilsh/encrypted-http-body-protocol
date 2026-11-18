@@ -343,6 +343,7 @@ impl Client {
         }
 
         let response_nonce = response_nonce(&headers)?;
+        refuse_bodyless_success(status)?;
         let key_material =
             derive_response_keys(&token.exported_secret, &token.request_enc, &response_nonce)?;
         strip_encrypted_framing_headers(&mut headers);
@@ -350,6 +351,7 @@ impl Client {
             inner: Box::pin(decrypt_response_stream(
                 response.bytes_stream(),
                 key_material,
+                !may_pass_through(status),
             )),
             generation,
             session: Arc::clone(&self.session),
@@ -463,7 +465,13 @@ impl Client {
         }
 
         let response_nonce = response_nonce(&headers)?;
-        let decrypted = token.decrypt_response_body(&response_nonce, &body)?;
+        refuse_bodyless_success(status)?;
+        let mut decryptor = token.response_decryptor(&response_nonce)?;
+        if !may_pass_through(status) {
+            decryptor = decryptor.require_frame();
+        }
+        let decrypted = decryptor.push(&body)?.concat();
+        decryptor.finish()?;
         self.clear_session_recovery_token_if_current(generation);
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
@@ -853,6 +861,18 @@ fn refuse_redirect(status: StatusCode) -> Result<()> {
     Ok(())
 }
 
+/// 204 and 205 cannot carry a body, so nothing could authenticate them as
+/// the server's answer (SPEC 5.3).
+fn refuse_bodyless_success(status: StatusCode) -> Result<()> {
+    if status == StatusCode::NO_CONTENT || status == StatusCode::RESET_CONTENT {
+        return Err(Error::Coded(
+            Code::FramingTruncated,
+            format!("status {status} cannot carry an authenticated chunk"),
+        ));
+    }
+    Ok(())
+}
+
 /// A caller-supplied HTTP client may follow a redirect before the response is
 /// seen here. The answer then comes from another URL than the encrypted
 /// request went to, and is refused like the redirect itself.
@@ -1112,15 +1132,21 @@ impl Drop for SessionClearingStream {
 fn decrypt_response_stream(
     mut stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + Unpin + 'static,
     key_material: crate::derive::ResponseKeyMaterial,
+    require_frame: bool,
 ) -> impl Stream<Item = Result<Bytes>> + Send {
     async_stream::try_stream! {
         let mut decryptor = ResponseDecryptor::from_key_material(key_material);
+        if require_frame {
+            decryptor = decryptor.require_frame();
+        }
 
         while let Some(chunk) = poll_next(&mut stream).await {
             let chunk = chunk?;
             decryptor.feed(&chunk);
             while let Some(plaintext) = decryptor.next_frame()? {
-                yield Bytes::from(plaintext);
+                if !plaintext.is_empty() {
+                    yield Bytes::from(plaintext);
+                }
             }
         }
 
@@ -1217,7 +1243,11 @@ mod tests {
             .chunks(3)
             .map(|chunk| Ok::<Bytes, reqwest::Error>(Bytes::copy_from_slice(chunk)))
             .collect();
-        let mut stream = Box::pin(decrypt_response_stream(stream::iter(chunks), key_material));
+        let mut stream = Box::pin(decrypt_response_stream(
+            stream::iter(chunks),
+            key_material,
+            false,
+        ));
 
         let mut plaintext = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -1243,7 +1273,7 @@ mod tests {
             first: Some(Bytes::from(hex::decode(vector.encrypted_response).unwrap())),
             dropped: Arc::clone(&source_dropped),
         };
-        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material, false));
 
         let plaintext = decrypted
             .next()
@@ -1289,7 +1319,7 @@ mod tests {
         let mut coalesced = hex::decode(vector.encrypted_response).unwrap();
         coalesced.extend_from_slice(&crate::derive::frame_chunk(&second).unwrap());
         let source = stream::iter([Ok::<Bytes, reqwest::Error>(Bytes::from(coalesced))]);
-        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material));
+        let mut decrypted = Box::pin(decrypt_response_stream(source, key_material, false));
 
         let first = decrypted.next().await.unwrap().unwrap();
         assert_eq!(hex::encode(first), vector.plaintext);
@@ -1348,7 +1378,7 @@ mod tests {
         // A length prefix declaring a ~4 GiB chunk must be rejected before buffering.
         let framed = Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
         let chunks = stream::iter([Ok::<Bytes, reqwest::Error>(framed)]);
-        let mut stream = Box::pin(decrypt_response_stream(chunks, key_material));
+        let mut stream = Box::pin(decrypt_response_stream(chunks, key_material, false));
 
         let err = stream
             .next()

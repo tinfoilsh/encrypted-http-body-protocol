@@ -123,8 +123,10 @@ def frame_chunk(ciphertext: bytes) -> bytes:
     return struct.pack(">I", length) + bytes(ciphertext)
 
 
-def decrypt_framed_response(km: ResponseKeyMaterial, body: bytes) -> bytes:
-    decryptor = FrameDecryptor(km)
+def decrypt_framed_response(
+    km: ResponseKeyMaterial, body: bytes, *, require_frame: bool = True
+) -> bytes:
+    decryptor = FrameDecryptor(km, require_frame=require_frame)
     chunks = decryptor.push(body)
     decryptor.finish()
     return b"".join(chunks)
@@ -137,12 +139,21 @@ class FrameDecryptor:
     chunks) and call :meth:`finish` at end-of-stream to detect a truncated
     trailing chunk. Zero-length frames are skipped without consuming a sequence
     number, matching the framing rules in SPEC Section 4.3.
+
+    :meth:`finish` also fails a stream in which no chunk authenticated: a
+    response that claims success must carry one (SPEC Section 5.3). Pass
+    ``require_frame=False`` only for a 4xx or 5xx response, which may be empty.
     """
 
     def __init__(
-        self, km: ResponseKeyMaterial, max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH
+        self,
+        km: ResponseKeyMaterial,
+        max_chunk_length: int = MAX_RESPONSE_CHUNK_LENGTH,
+        *,
+        require_frame: bool = True,
     ) -> None:
         self._km = km
+        self._require_frame = require_frame
         self._buffer = bytearray()
         self._seq = 0
         self._max_chunk_length = max_chunk_length
@@ -167,7 +178,9 @@ class FrameDecryptor:
                 self._buffer[LENGTH_PREFIX_SIZE : LENGTH_PREFIX_SIZE + chunk_len]
             )
             del self._buffer[: LENGTH_PREFIX_SIZE + chunk_len]
-            chunks.append(decrypt_chunk(self._km, self._seq, ciphertext))
+            plaintext = decrypt_chunk(self._km, self._seq, ciphertext)
+            if plaintext:
+                chunks.append(plaintext)
             if self._seq >= MAX_SEQUENCE:
                 raise SequenceOverflowError("response chunk sequence overflow")
             self._seq += 1
@@ -177,3 +190,5 @@ class FrameDecryptor:
     def finish(self) -> None:
         if self._buffer:
             raise FramingTruncatedError("truncated encrypted response chunk")
+        if self._require_frame and self._seq == 0:
+            raise FramingTruncatedError("response ended before any authenticated chunk")

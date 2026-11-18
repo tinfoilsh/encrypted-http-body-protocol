@@ -29,6 +29,7 @@ from ._http import (
     raise_for_key_config_mismatch as _raise_for_key_config_mismatch,
 )
 from ._http import (
+    is_success as _is_success,
     response_nonce_for_status as _response_nonce_for_status,
 )
 from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
@@ -240,7 +241,9 @@ class Client:
             if response_nonce is None:
                 self._clear_token_if_current(generation)
                 return Response(status, response_headers, raw)
-            decrypted = token.decrypt_response_body(response_nonce, raw)
+            decrypted = token.decrypt_response_body(
+                response_nonce, raw, require_frame=_is_success(status)
+            )
         except BaseException:
             self._clear_token_if_current(generation)
             raise
@@ -353,7 +356,7 @@ class Client:
                 yield StreamingResponse(
                     status,
                     response_headers,
-                    self._decrypt_stream(resp, token, response_nonce, generation),
+                    self._decrypt_stream(resp, token, response_nonce, generation, status),
                 )
         except GeneratorExit:
             raise
@@ -367,9 +370,12 @@ class Client:
         token: SessionRecoveryToken,
         response_nonce: bytes,
         generation: int,
+        status: int,
     ) -> Iterator[bytes]:
         decryptor = token.create_response_decryptor(
-            response_nonce, max_chunk_length=self._max_response_bytes
+            response_nonce,
+            max_chunk_length=self._max_response_bytes,
+            require_frame=_is_success(status),
         )
         try:
             for chunk in resp.iter_bytes():

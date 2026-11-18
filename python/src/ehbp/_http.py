@@ -15,6 +15,7 @@ import httpx
 
 from .errors import (
     DuplicateResponseNonceError,
+    FramingTruncatedError,
     InvalidResponseNonceError,
     KeyConfigMismatchError,
     MissingResponseNonceError,
@@ -32,6 +33,8 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RESPONSE_BYTES = MAX_RESPONSE_CHUNK_LENGTH
 
 KEY_CONFIG_MISMATCH_STATUS = 422
+# 204 No Content and 205 Reset Content: no body, so nothing to authenticate.
+BODYLESS_SUCCESS_STATUSES = frozenset({204, 205})
 # Only 4xx and 5xx responses may pass through without a nonce (SPEC 5.3).
 FIRST_ERROR_STATUS = 400
 
@@ -82,4 +85,12 @@ def response_nonce_for_status(status: int, headers: httpx.Headers) -> Optional[b
         raise UnexpectedRedirectError(f"status {status} in response to an encrypted request")
     if RESPONSE_NONCE_HEADER not in headers and status >= FIRST_ERROR_STATUS:
         return None
-    return response_nonce(headers)
+    nonce = response_nonce(headers)
+    if status in BODYLESS_SUCCESS_STATUSES:
+        raise FramingTruncatedError(f"status {status} cannot carry an authenticated chunk")
+    return nonce
+
+
+def is_success(status: int) -> bool:
+    """Whether a response claims success, and so must carry an authenticated chunk (SPEC 5.3)."""
+    return status < FIRST_ERROR_STATUS

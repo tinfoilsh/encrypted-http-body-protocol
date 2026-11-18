@@ -168,6 +168,7 @@ This derivation ensures:
 - Response handling:
 
   - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce` and carry the framed body as described in Section 4.2.
+    - A response whose body is empty MUST still carry one chunk, sealing an empty plaintext, so that the client has something to authenticate (Section 5.3). A status that cannot carry a body (204, 205) therefore MUST NOT answer an encrypted request: the server sends 200 with an empty body in its place.
   - If no HPKE context was established (plaintext request or bodyless request), the response is sent as plaintext without any EHBP headers.
 
 ### 5.3 Mode Detection
@@ -184,7 +185,9 @@ Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is presen
 
 - If the response has a 3xx status code, the client MUST fail the request, whether or not the header is present, and MUST NOT follow the redirect. The `Location` of a redirect is not authenticated, and a followed redirect can replace the encrypted exchange with a bodyless request, which EHBP does not protect (Section 7.4): the answer to that request would be returned as the answer to the encrypted one.
 
-The pass-through allowance applies only to 4xx and 5xx responses. A 1xx is not an error: the only one a client receives as a final response is 101, which hands the connection to another protocol; exchanges that claim success always fail closed without a valid nonce.
+- If the response has a 1xx or 2xx status code and the header is present, the client MUST fail the request unless at least one chunk of the body authenticates (`FRAMING_TRUNCATED`). The header alone proves nothing: any 32-byte value is accepted as a nonce, and a body with no chunks leaves nothing to check it against. A 204 or 205 response cannot carry a chunk and MUST be failed. A chunk that seals an empty plaintext counts, and yields no data.
+
+The pass-through allowance applies only to 4xx and 5xx responses. A 1xx is not an error: the only one a client receives as a final response is 101, which hands the connection to another protocol; exchanges that claim success always fail closed without a valid nonce and an authenticated chunk.
 
 ### 5.4 Error Handling and Recovery
 
@@ -197,6 +200,7 @@ EHBP implementations MUST treat these as protocol failures:
 - invalid `Ehbp-Encapsulated-Key` (format, length, or unsupported parameters)
 - HPKE setup/decapsulation failure
 - chunk framing violation
+- a 1xx or 2xx response to an encrypted request in which no chunk authenticates (Section 5.3)
 - AEAD authentication/decryption failure
 - invalid `Ehbp-Response-Nonce`, or `Ehbp-Response-Nonce` missing from a 1xx or 2xx response, when an encrypted response is expected (a missing nonce on a 4xx or 5xx response is handled per Section 5.3 and is not a protocol failure)
 - a 3xx response to an encrypted request
@@ -263,7 +267,7 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |
 | `KEY_CONFIG_MISMATCH` | client | Server returned the Section 5.4.2 key-configuration problem response |
-| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or inside a frame's ciphertext |
+| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or inside a frame's ciphertext; or a 1xx or 2xx response to an encrypted request ended before any chunk authenticated |
 | `CHUNK_TOO_LARGE` | both | Frame length prefix exceeds the receiver's maximum; rejected before allocation |
 | `AEAD_DECRYPT_FAILED` | both | AEAD authentication failed for a frame |
 | `SEQUENCE_OVERFLOW` | both | Frame sequence number exhausted |

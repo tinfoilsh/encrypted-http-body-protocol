@@ -1168,3 +1168,89 @@ func TestTransportDoesNotReplayPlaintextOnRefusedStream(t *testing.T) {
 		assert.NotContains(t, string(body), secret, "stream %d carried the plaintext body", i)
 	}
 }
+
+// A response that claims success must carry at least one frame the client
+// can authenticate; without one, nothing shows the server produced it.
+func TestTransportRequiresAnAuthenticatedFrameOnSuccess(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	madeUpNonce := strings.Repeat("ab", 32)
+
+	post := func(t *testing.T, handler http.Handler) (*http.Response, error) {
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		transport, err := NewTransportWithIdentity(pubIdentity)
+		assert.NoError(t, err)
+		req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+		assert.NoError(t, err)
+		return transport.RoundTrip(req)
+	}
+
+	t.Run("an empty success with a made-up nonce fails when read", func(t *testing.T) {
+		resp, err := post(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set(protocol.ResponseNonceHeader, madeUpNonce)
+			w.WriteHeader(http.StatusOK)
+		}))
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+		assert.Equal(t, protocol.FramingTruncated, protocol.CodeOf(err))
+	})
+
+	t.Run("a status that cannot carry a frame is refused", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusResetContent} {
+			resp, err := post(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(protocol.ResponseNonceHeader, madeUpNonce)
+				w.WriteHeader(status)
+			}))
+			assert.Nil(t, resp)
+			assert.Equal(t, protocol.FramingTruncated, protocol.CodeOf(err))
+		}
+	})
+
+	t.Run("a handler that writes nothing still answers with a frame", func(t *testing.T) {
+		for _, handler := range []http.HandlerFunc{
+			func(w http.ResponseWriter, r *http.Request) { _, _ = io.ReadAll(r.Body) },
+			func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusAccepted) },
+		} {
+			resp, err := post(t, serverIdentity.Middleware()(handler))
+			if !assert.NoError(t, err) {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.NoError(t, err)
+			assert.Empty(t, body)
+		}
+	})
+
+	t.Run("the server answers 200 where a handler chose 204 or 205", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusResetContent} {
+			resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+			})))
+			if !assert.NoError(t, err) {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			assert.NoError(t, err)
+			assert.Empty(t, body)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+	})
+
+	t.Run("an authenticated error may still be empty", func(t *testing.T) {
+		resp, err := post(t, serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		})))
+		assert.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Empty(t, body)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+}
