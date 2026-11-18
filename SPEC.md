@@ -381,6 +381,20 @@ Applications requiring confidential responses to bodyless requests should either
 - Include a minimal body (even if semantically empty) to enable EHBP protection
 - Use an alternative mechanism such as TLS with mutual authentication
 
+### 7.5 Limitations
+
+An intermediary that carries EHBP traffic can do the following without any key. Applications that need protection against them must provide it themselves.
+
+- **Change everything outside the body.** The method, URL, request headers, response status and response headers are neither encrypted nor bound to the sealed body. A sealed request can be delivered to a different path or with different headers, including different credentials, and a response can be given a different status. Do not treat any of them as coming from the peer.
+- **Replay a request.** A sealed request is accepted each time it is delivered. Operations that must not run twice need their own replay protection.
+- **Cut a body short.** A message ends where the HTTP body ends (Section 4.3), so a request or response truncated at a chunk boundary is a valid, shorter message. Clients only require that a successful response carries one authenticated chunk (Section 5.3). Use a format that fails when incomplete, or an application-level end marker.
+- **Answer with an unauthenticated error.** A 4xx or 5xx response without a nonce may be passed through (Section 5.3) and may be forged.
+- **Observe sizes and timing.** Chunk lengths are visible and nothing is padded. When a server writes one chunk per unit of output, such as a token of generated text, the length of every unit is revealed.
+- **Read or answer anything that is not a sealed body.** Requests without a body (Section 7.4), protocol upgrades such as WebSocket, and CONNECT tunnels are outside EHBP.
+- **Drop, delay or reorder exchanges.**
+
+EHBP does not support forward secrecy.
+
 ## 8. References
 
 - RFC 9180: Hybrid Public Key Encryption (HPKE)
