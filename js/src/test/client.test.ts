@@ -7,6 +7,7 @@ import {
   InvalidInputError,
   KeyConfigMismatchError,
   MissingResponseNonceError,
+  UnexpectedRedirectError,
 } from '../index.js';
 import { encryptFrames, setSpoolThresholdForTests, type SessionRecoveryToken } from '../identity.js';
 import { PROTOCOL } from '../protocol.js';
@@ -473,6 +474,49 @@ describe('Transport', () => {
       const response = await transport.post('https://server.test/secure', 'hello');
       assert.strictEqual(response.status, 422);
       assert.strictEqual(await response.text(), oversizedProblem);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should refuse a redirect in response to an encrypted request', async () => {
+    const serverIdentity = await Identity.generate();
+    const transport = new Transport(serverIdentity, 'server.test');
+    const originalFetch = globalThis.fetch;
+
+    const cases: { name: string; response: () => Response }[] = [
+      { name: 'see other', response: () => new Response(null, { status: 303, headers: { location: '/followed' } }) },
+      { name: 'temporary redirect with a body', response: () => new Response('forged', { status: 307, headers: { location: '/followed' } }) },
+      {
+        name: 'made-up nonce',
+        response: () => new Response(null, { status: 303, headers: { location: '/followed', [PROTOCOL.RESPONSE_NONCE_HEADER]: 'ab'.repeat(32) } }),
+      },
+      {
+        // What a fetch that followed the redirect anyway hands back.
+        name: 'already followed',
+        response: () => Object.defineProperty(new Response('forged', { status: 200 }), 'redirected', { value: true }),
+      },
+    ];
+
+    try {
+      for (const { name, response } of cases) {
+        const redirectModes: (string | undefined)[] = [];
+        globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          redirectModes.push(init?.redirect);
+          return response();
+        }) as typeof fetch;
+
+        await assert.rejects(
+          () => transport.post('https://server.test/secure', 'hello'),
+          (err: unknown) => {
+            assert(err instanceof UnexpectedRedirectError, name);
+            assert.match(err.message, /UNEXPECTED_REDIRECT/);
+            return true;
+          }
+        );
+        assert.deepStrictEqual(redirectModes, ['manual'], name);
+        assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/, name);
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

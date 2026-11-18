@@ -10,6 +10,7 @@ export const Code = {
   INVALID_ENCAPSULATED_KEY: 'INVALID_ENCAPSULATED_KEY',
   HPKE_SETUP_FAILED: 'HPKE_SETUP_FAILED',
   MISSING_RESPONSE_NONCE: 'MISSING_RESPONSE_NONCE',
+  UNEXPECTED_REDIRECT: 'UNEXPECTED_REDIRECT',
   INVALID_RESPONSE_NONCE: 'INVALID_RESPONSE_NONCE',
   DUPLICATE_RESPONSE_NONCE: 'DUPLICATE_RESPONSE_NONCE',
   KEY_CONFIG_MISMATCH: 'KEY_CONFIG_MISMATCH',
@@ -48,6 +49,10 @@ export class HpkeSetupFailedError extends EhbpError {
 }
 export class MissingResponseNonceError extends EhbpError {
   constructor(detail: string, options?: Opts) { super(Code.MISSING_RESPONSE_NONCE, detail, options); this.name = 'MissingResponseNonceError'; }
+}
+/** A redirect answered an encrypted request (SPEC §5.3). */
+export class UnexpectedRedirectError extends EhbpError {
+  constructor(detail: string, options?: Opts) { super(Code.UNEXPECTED_REDIRECT, detail, options); this.name = 'UnexpectedRedirectError'; }
 }
 export class InvalidResponseNonceError extends EhbpError {
   constructor(detail: string, options?: Opts) { super(Code.INVALID_RESPONSE_NONCE, detail, options); this.name = 'InvalidResponseNonceError'; }

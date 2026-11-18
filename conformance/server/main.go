@@ -177,6 +177,16 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, "unauthenticated plaintext")
 			return
+		case "redirect_303", "redirect_303_nonce":
+			// A redirect answering an encrypted request, towards a route that
+			// serves plaintext to the bodyless follow-up. Clients MUST fail it
+			// and MUST NOT follow it, nonce or not (SPEC 5.3).
+			w.Header().Set("Location", "/s/bodyless_plaintext")
+			if name == "redirect_303_nonce" {
+				w.Header().Set(protocol.ResponseNonceHeader, strings.Repeat("ab", 32))
+			}
+			w.WriteHeader(http.StatusSeeOther)
+			return
 		case "bodyless_plaintext":
 			// A bodyless request carries no encapsulated key; the response is
 			// plaintext and the client returns it as normal (SPEC 7.4).

@@ -14,7 +14,8 @@ does produce; the mismatch is a fix target, not grounds to relax the fixture.
 | `UNSUPPORTED_SUITE` | client | 3.2 | Config advertises a KEM/KDF/AEAD other than X25519-HKDF-SHA256 / HKDF-SHA256 / AES-256-GCM. |
 | `INVALID_ENCAPSULATED_KEY` | server | 4.1, 4.2, 5.4.1 | Request `Ehbp-Encapsulated-Key` missing, duplicated, not hex, or wrong length. |
 | `HPKE_SETUP_FAILED` | both | 5.4.1 | HPKE setup or decapsulation failed. |
-| `MISSING_RESPONSE_NONCE` | client | 4.2, 5.3 | `Ehbp-Response-Nonce` absent on a 2xx to an encrypted request. |
+| `MISSING_RESPONSE_NONCE` | client | 4.2, 5.3 | `Ehbp-Response-Nonce` absent on a 1xx or 2xx to an encrypted request. |
+| `UNEXPECTED_REDIRECT` | client | 5.3 | 3xx status in response to an encrypted request, with or without a nonce. |
 | `INVALID_RESPONSE_NONCE` | client | 4.2 | `Ehbp-Response-Nonce` not hex or not 32 bytes. |
 | `DUPLICATE_RESPONSE_NONCE` | client | 4.2 | More than one `Ehbp-Response-Nonce` header. |
 | `KEY_CONFIG_MISMATCH` | client | 5.4.2 | 422 `application/problem+json`, type `urn:ietf:params:ehbp:error:key-config`. |
@@ -57,8 +58,8 @@ message, so they are exempt.
 ## Fail-closed
 
 For any error code, `plaintext_emitted_before_error` MUST be `false` and
-`bytes_emitted_before_error` MUST be `0`. A sanctioned pass-through (non-2xx, no
-nonce) is reported `outcome: ok` with `passthrough: true`. It MUST NOT be reported
+`bytes_emitted_before_error` MUST be `0`. A sanctioned pass-through (4xx or 5xx,
+no nonce) is reported `outcome: ok` with `passthrough: true`. It MUST NOT be reported
 as a decrypted body.
 
 Authenticated plaintext from a complete earlier frame may be reported before a

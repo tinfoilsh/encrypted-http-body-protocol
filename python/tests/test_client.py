@@ -14,6 +14,7 @@ from ehbp.errors import (
     InvalidKeyConfigError,
     KeyConfigMismatchError,
     MissingResponseNonceError,
+    UnexpectedRedirectError,
 )
 from ehbp.identity import REQUEST_FRAME_SIZE
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
@@ -227,7 +228,7 @@ def test_missing_response_nonce_fails_closed(make_server):
     assert client.get_session_recovery_token() is None
 
 
-@pytest.mark.parametrize("status_code", [300, 400, 503])
+@pytest.mark.parametrize("status_code", [400, 503])
 def test_unencrypted_non_success_response_passes_through(make_server, status_code):
     server = make_server(mode="unencrypted_response", status_code=status_code)
     client = server.make_client()
@@ -236,6 +237,19 @@ def test_unencrypted_non_success_response_passes_through(make_server, status_cod
     assert response.headers["content-type"] == "text/plain"
     assert response.headers["x-upstream"] == "proxy"
     assert response.content == b"upstream unavailable"
+    assert client.get_session_recovery_token() is None
+
+
+@pytest.mark.parametrize("mode", ["unencrypted_response", "ok"])
+@pytest.mark.parametrize("status_code", [300, 303, 307, 308])
+def test_redirect_to_an_encrypted_request_is_refused(make_server, mode, status_code):
+    server = make_server(mode=mode, status_code=status_code)
+    client = server.make_client()
+    with pytest.raises(UnexpectedRedirectError):
+        client.post("/v1/echo", body=b"payload")
+    with pytest.raises(UnexpectedRedirectError):
+        with client.stream("POST", "/v1/echo", body=b"payload"):
+            pass
     assert client.get_session_recovery_token() is None
 
 

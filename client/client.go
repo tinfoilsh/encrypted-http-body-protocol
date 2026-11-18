@@ -357,9 +357,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Send through a RoundTripper rather than a nested http.Client: a
-	// RoundTripper performs a single HTTP transaction, so redirects surface
-	// to the outer client, whose CheckRedirect and cookie jar then apply
-	// (and each redirected attempt is re-encrypted for its target).
+	// RoundTripper performs a single HTTP transaction, so a redirect is
+	// seen here and is never followed on the caller's behalf.
 	resp, err := t.roundTripper().RoundTrip(newReq)
 	if err != nil {
 		t.setToken(generation, nil)
@@ -383,8 +382,16 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "%s", title))
 		}
 
-		if resp.Header.Get(protocol.ResponseNonceHeader) == "" &&
-			(resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+		// A redirect is refused whether or not it carries a nonce (SPEC 5.3):
+		// its Location is unauthenticated, and following it can turn the
+		// encrypted exchange into a bodyless one that EHBP does not protect.
+		if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+			resp.Body.Close()
+			t.setToken(generation, nil)
+			return nil, protocol.Errorf(protocol.UnexpectedRedirect, "status %d in response to an encrypted request", resp.StatusCode)
+		}
+
+		if resp.Header.Get(protocol.ResponseNonceHeader) == "" && resp.StatusCode >= http.StatusBadRequest {
 			// Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
 			t.setToken(generation, nil)
 			return resp, nil

@@ -3,7 +3,7 @@ import { extractSessionRecoveryToken, decryptResponseWithToken, canStreamUpload 
 import type { SessionRecoveryToken } from './identity.js';
 import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { InvalidInputError, InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError } from './errors.js';
+import { InvalidInputError, InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError, UnexpectedRedirectError } from './errors.js';
 import type { Key } from 'hpke';
 
 interface ProblemDetails {
@@ -154,13 +154,23 @@ export class Transport {
   }
 
   private static async shouldDecryptResponse(response: Response): Promise<boolean> {
+    // A redirect is refused with or without a nonce (SPEC 5.3): its Location
+    // is not authenticated, and following it can swap the encrypted exchange
+    // for a bodyless one that EHBP does not protect. `redirected` covers a
+    // fetch that followed one despite being asked not to.
+    if (response.type === 'opaqueredirect' || response.redirected || (response.status >= 300 && response.status < 400)) {
+      await response.body?.cancel().catch(() => {});
+      throw new UnexpectedRedirectError('redirect in response to an encrypted request');
+    }
+
     if (response.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER)) {
       return true;
     }
 
     await Transport.checkKeyConfigMismatch(response);
 
-    if (!response.ok) {
+    // Only an error status may pass through without a nonce (SPEC 5.3).
+    if (response.status >= 400) {
       return false;
     }
 
@@ -313,7 +323,9 @@ export class Transport {
     let response: Response;
     let shouldDecrypt: boolean;
     try {
-      response = await this.fetchImpl(encryptedRequest);
+      // Never followed: a redirect is returned and refused below, unless the
+      // caller already asked for it to fail the fetch.
+      response = await this.fetchImpl(encryptedRequest, encryptedRequest.redirect === 'error' ? undefined : { redirect: 'manual' });
       shouldDecrypt = await Transport.shouldDecryptResponse(response);
     } catch (err) {
       clearToken();

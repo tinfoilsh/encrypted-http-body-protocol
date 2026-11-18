@@ -21,6 +21,7 @@ export {
   InvalidEncapsulatedKeyError,
   HpkeSetupFailedError,
   MissingResponseNonceError,
+  UnexpectedRedirectError,
   InvalidResponseNonceError,
   DuplicateResponseNonceError,
   KeyConfigMismatchError,

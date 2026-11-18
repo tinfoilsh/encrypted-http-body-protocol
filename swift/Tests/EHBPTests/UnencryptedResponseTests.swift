@@ -28,7 +28,7 @@ final class UnencryptedResponseTests: XCTestCase {
     }
 
     func testRequestPassesThroughUnencryptedNonSuccessResponses() async throws {
-        for statusCode in [300, 400, 503] {
+        for statusCode in [400, 503] {
             let client = try makeClient(statusCode: statusCode)
             let (data, response) = try await client.request(
                 method: "POST",
@@ -59,6 +59,25 @@ final class UnencryptedResponseTests: XCTestCase {
         XCTAssertEqual(response.value(forHTTPHeaderField: "Content-Type"), "text/plain")
         XCTAssertEqual(data, Data("upstream unavailable".utf8))
         XCTAssertThrowsError(try client.getSessionRecoveryToken())
+    }
+
+    func testRedirectToAnEncryptedRequestIsRefused() async throws {
+        for statusCode in [300, 303, 307, 308] {
+            let client = try makeClient(statusCode: statusCode)
+            do {
+                _ = try await client.request(method: "POST", path: "/secure", body: Data("hello".utf8))
+                XCTFail("Expected status \(statusCode) to be refused")
+            } catch let error as EHBPError where error.code == .unexpectedRedirect {
+                XCTAssertThrowsError(try client.getSessionRecoveryToken())
+            }
+
+            do {
+                _ = try await client.requestStream(method: "POST", path: "/secure", body: Data("hello".utf8))
+                XCTFail("Expected streamed status \(statusCode) to be refused")
+            } catch let error as EHBPError where error.code == .unexpectedRedirect {
+                XCTAssertThrowsError(try client.getSessionRecoveryToken())
+            }
+        }
     }
 
     func testSuccessfulUnencryptedResponseRemainsRejected() async throws {
