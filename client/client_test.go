@@ -1169,6 +1169,82 @@ func TestTransportDoesNotReplayPlaintextOnRefusedStream(t *testing.T) {
 	}
 }
 
+// pausingReader yields its parts one per read, with a read of no bytes and no
+// error before each, as io.Reader permits.
+type pausingReader struct {
+	parts  []string
+	paused bool
+}
+
+func (r *pausingReader) Read(p []byte) (int, error) {
+	if len(r.parts) == 0 {
+		return 0, io.EOF
+	}
+	if !r.paused {
+		r.paused = true
+		return 0, nil
+	}
+	r.paused = false
+	n := copy(p, r.parts[0])
+	r.parts = r.parts[1:]
+	return n, nil
+}
+
+func TestTransportSendsTheWholeBodyAcrossEmptyReads(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	server := httptest.NewServer(serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	})))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, &pausingReader{parts: []string{"first part, ", "second part"}})
+	assert.NoError(t, err)
+	resp, err := transport.RoundTrip(req)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, "first part, second part", string(body))
+}
+
+func TestInformationalResponseKeepsTheFinalStatus(t *testing.T) {
+	serverIdentity, err := identity.NewIdentity()
+	assert.NoError(t, err)
+	server := httptest.NewServer(serverIdentity.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("forbidden"))
+	})))
+	defer server.Close()
+
+	pubIdentity, err := identity.FromPublicKeyHex(serverIdentity.MarshalPublicKeyHex())
+	assert.NoError(t, err)
+	transport, err := NewTransportWithIdentity(pubIdentity)
+	assert.NoError(t, err)
+
+	req, err := http.NewRequest("POST", server.URL, bytes.NewBufferString("secret"))
+	assert.NoError(t, err)
+	resp, err := transport.RoundTrip(req)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, "forbidden", string(body))
+}
+
 // A response that claims success must carry at least one frame the client
 // can authenticate; without one, nothing shows the server produced it.
 func TestTransportRequiresAnAuthenticatedFrameOnSuccess(t *testing.T) {
