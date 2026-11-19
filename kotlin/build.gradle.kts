@@ -22,7 +22,7 @@ plugins {
 // (com.github.tinfoilsh), so this group only
 // matters for a future Maven Central publication and must not be the JitPack one.
 group = "sh.tinfoil"
-version = "0.6.0"
+version = "0.7.0"
 
 repositories { mavenCentral() }
 
