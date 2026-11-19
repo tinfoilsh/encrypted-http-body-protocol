@@ -76,8 +76,8 @@ func run() async throws {
         res["skip_reason"] = "swift-client-has-no-discovery-or-request-guards"
     case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
         try await hardeningOp(op)
-    case "request":
-        try await requestOp()
+    case "request", "request_stream":
+        try await requestOp(streaming: op == "request_stream")
     case "large_body":
         try await largeBodyOp(ins)
     case "token_before_response":
@@ -142,7 +142,7 @@ func oracleClient() async throws -> EHBPClient {
     return try EHBPClient(baseURL: base, config: config)
 }
 
-func requestOp() async throws {
+func requestOp(streaming: Bool) async throws {
     let client = try await oracleClient()
 
     let req = fx["request"] as? [String: Any] ?? [:]
@@ -153,10 +153,17 @@ func requestOp() async throws {
     var body: Data?
     if let bh = req["body_hex"] as? String { body = Data(hexString: bh) }
 
-    let (data, response) = try await client.request(
-        method: (req["method"] as? String) ?? "POST",
-        path: (req["path"] as? String) ?? "/",
-        headers: headers, body: body)
+    let method = (req["method"] as? String) ?? "POST"
+    let path = (req["path"] as? String) ?? "/"
+    let (data, response): (Data, HTTPURLResponse)
+    if streaming {
+        (data, response) = try await client.request(method: method, path: path, headers: headers, bodySource: {
+            defer { body = nil }
+            return body
+        })
+    } else {
+        (data, response) = try await client.request(method: method, path: path, headers: headers, body: body)
+    }
 
     res["status"] = response.statusCode
     var hdrs = [String: String]()

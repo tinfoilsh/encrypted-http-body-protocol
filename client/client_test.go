@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
@@ -790,15 +791,15 @@ func TestTransportGetSessionRecoveryToken(t *testing.T) {
 		// First make a POST to set a token
 		req1, _ := http.NewRequest("POST", server.URL+"/secure", bytes.NewBuffer([]byte("body")))
 		resp1, err := httpClient.Do(req1)
-		assert.NoError(t, err)
-		assert.NotNil(t, transport.GetSessionRecoveryToken())
-		resp1.Body.Close()
+		require.NoError(t, err)
+		defer resp1.Body.Close()
+		require.NotNil(t, transport.GetSessionRecoveryToken())
 
 		// GET without body should clear the token
 		req2, _ := http.NewRequest("GET", server.URL+"/plain", nil)
 		resp2, err := httpClient.Do(req2)
-		assert.NoError(t, err)
-		resp2.Body.Close()
+		require.NoError(t, err)
+		defer resp2.Body.Close()
 
 		assert.Nil(t, transport.GetSessionRecoveryToken(),
 			"Token should be cleared after bodyless request")
