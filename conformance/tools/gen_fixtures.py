@@ -682,7 +682,7 @@ def main() -> None:
                       {"outcome": "ok", "status": 200, "body_hex": response.encode().hex(),
                        ("response_headers_present" if body else "response_headers_absent"): ["ehbp-response-nonce"]},
                       "Select the exchange mode from the plaintext produced by an unknown-length stream.",
-                      body=body, runners=["go", "kotlin", "python", "rust", "js"], operation="request_stream")
+                      body=body, operation="request_stream")
         e2e_list.append(fixture)
 
     early_close = e2e("e2e-token-consumed-on-early-close", "echo",

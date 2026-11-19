@@ -533,14 +533,7 @@
       "response_headers_absent": [
         "ehbp-response-nonce"
       ]
-    },
-    "runners": [
-      "go",
-      "kotlin",
-      "python",
-      "rust",
-      "js"
-    ]
+    }
   },
   {
     "id": "e2e-unknown-length-payload",
@@ -561,14 +554,7 @@
       "response_headers_present": [
         "ehbp-response-nonce"
       ]
-    },
-    "runners": [
-      "go",
-      "kotlin",
-      "python",
-      "rust",
-      "js"
-    ]
+    }
   },
   {
     "id": "e2e-token-consumed-on-early-close",
