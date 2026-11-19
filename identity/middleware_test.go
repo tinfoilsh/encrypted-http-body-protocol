@@ -225,44 +225,47 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, "failed to read decrypted request body", problem["title"])
 	})
 
-	t.Run("probe eof clears stale content-length header", func(t *testing.T) {
-		client := newTestClient(t)
+	t.Run("key requires an authenticated frame before dispatch", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			body   io.ReadCloser
+			length int64
+		}{
+			{"known empty", http.NoBody, 0},
+			{"unknown empty", io.NopCloser(strings.NewReader("")), -1},
+			{"empty stream with stale length", io.NopCloser(strings.NewReader("")), 24},
+			{"padding only", io.NopCloser(bytes.NewReader(make([]byte, 4))), 4},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest("POST", "/test", nil)
+				newTestClient(t).encryptRequest(t, req, serverIdentity.MarshalPublicKey())
+				req.Body, req.ContentLength = tc.body, tc.length
+				w := httptest.NewRecorder()
+				middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+					t.Fatal("handler ran without an authenticated request frame")
+				})).ServeHTTP(w, req)
+				assert.Equal(t, http.StatusBadRequest, w.Code)
+				assert.Empty(t, w.Header().Get(protocol.ResponseNonceHeader))
+			})
+		}
+	})
 
-		req := httptest.NewRequest("POST", "/test", strings.NewReader("test"))
-		client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
-
-		staleLength := req.ContentLength
-		assert.Greater(t, staleLength, int64(0))
-
-		// Force probe read to hit EOF immediately while preserving a stale encrypted length.
-		req.Body = io.NopCloser(bytes.NewReader(nil))
-		req.ContentLength = staleLength
-		req.Header.Set("Content-Length", fmt.Sprintf("%d", staleLength))
-
-		var seenHeaderValue string
-		var seenContentLength int64
-
-		inspectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			seenHeaderValue = r.Header.Get("Content-Length")
-			seenContentLength = r.ContentLength
-
-			body, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			assert.Empty(t, body)
-
-			w.Write([]byte("ok"))
-		})
-
-		wrappedInspect := middleware(inspectHandler)
+	t.Run("authenticated empty upload reaches handler", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/test", unknownLengthReader{strings.NewReader("")})
+		ctx, err := serverIdentity.EncryptRequestWithContext(req)
+		require.NoError(t, err)
+		require.NotNil(t, ctx)
+		req.Header.Set("Content-Length", "20")
 		w := httptest.NewRecorder()
-		wrappedInspect.ServeHTTP(w, req)
-
-		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Empty(t, seenHeaderValue)
-		assert.Equal(t, int64(0), seenContentLength)
-
-		decryptedResponse := client.decryptResponse(t, w)
-		assert.Equal(t, "ok", string(decryptedResponse))
+		middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Empty(t, r.Header.Get("Content-Length"))
+			got, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			assert.Empty(t, got)
+			w.WriteHeader(http.StatusCreated)
+		})).ServeHTTP(w, req)
+		assert.Equal(t, http.StatusCreated, w.Code)
+		assert.NotEmpty(t, w.Header().Get(protocol.ResponseNonceHeader))
 	})
 }
 

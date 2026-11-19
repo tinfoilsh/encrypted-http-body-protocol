@@ -73,6 +73,7 @@ type StreamingEncryptReader struct {
 	sender *hpke.Sender
 	buffer []byte
 	eof    bool
+	sealed bool // at least one frame has been produced
 }
 
 // Read implements io.Reader, encrypting data as it's read
@@ -115,7 +116,8 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	if bytesRead == 0 {
+	// An empty encrypted request still needs one frame to authenticate its key.
+	if bytesRead == 0 && r.sealed {
 		return 0, io.EOF
 	}
 
@@ -124,6 +126,8 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		return 0, protocol.Errorf(protocol.HPKESetupFailed, "failed to encrypt chunk: %w", err)
 	}
+
+	r.sealed = true
 
 	// Chunk with length prefix
 	chunkHeader := make([]byte, 4)
@@ -175,30 +179,49 @@ func NewStreamingDecryptReader(reader io.Reader, recipient *hpke.Recipient) *Str
 
 // Read implements io.Reader, decrypting data as it's read. A protocol failure
 // is sticky: every later Read returns it and Err exposes it.
-func (r *StreamingDecryptReader) Read(p []byte) (n int, err error) {
+func (r *StreamingDecryptReader) Read(p []byte) (int, error) {
 	if r.failure != nil {
 		return 0, r.failure
 	}
-	n, err = r.read(p)
-	if err != nil && err != io.EOF {
-		r.failure = err
+	if len(p) == 0 {
+		return 0, nil
 	}
-	return n, err
+	for len(r.buffer) == 0 {
+		if err := r.nextFrame(); err != nil {
+			return 0, err
+		}
+	}
+	n := copy(p, r.buffer)
+	r.buffer = r.buffer[n:]
+	return n, nil
 }
 
-func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
+// authenticateFirstFrame leaves any plaintext buffered for the application.
+func (r *StreamingDecryptReader) authenticateFirstFrame() error {
+	if r.failure != nil || r.opened {
+		return r.failure
+	}
+	return r.nextFrame()
+}
+
+func (r *StreamingDecryptReader) nextFrame() error {
 	if r.eof {
-		return 0, io.EOF
+		return io.EOF
 	}
-
-	// If we have buffered decrypted data, return it first
-	if len(r.buffer) > 0 {
-		n = copy(p, r.buffer)
-		r.buffer = r.buffer[n:]
-		return n, nil
+	plain, err := r.openFrame()
+	switch err {
+	case nil:
+		r.opened = true
+		r.buffer = plain
+	case io.EOF:
+		r.eof = true
+	default:
+		r.failure = err
 	}
+	return err
+}
 
-	// Read chunk length (4 bytes)
+func (r *StreamingDecryptReader) openFrame() ([]byte, error) {
 	// Read the length prefix, skipping zero-length chunks (SPEC 4.3) in a
 	// loop so a burst of empty frames cannot grow the stack.
 	chunkLenBytes := make([]byte, 4)
@@ -206,24 +229,26 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 	for chunkLen == 0 {
 		if _, err := io.ReadFull(r.reader, chunkLenBytes); err != nil {
 			if err == io.EOF {
-				r.eof = true
-				return 0, io.EOF
+				if !r.opened {
+					return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "encrypted request ended before its first authenticated frame"))
+				}
+				return nil, io.EOF
 			}
 			if err == io.ErrUnexpectedEOF {
-				return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
+				return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "invalid chunk length framing: %w", err))
 			}
-			return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
+			return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read chunk length: %w", err))
 		}
 		chunkLen = binary.BigEndian.Uint32(chunkLenBytes)
 	}
 	if chunkLen > maxChunkBytes {
-		return 0, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
+		return nil, NewClientError(protocol.Errorf(protocol.ChunkTooLarge, "encrypted request chunk exceeds maximum allowed size"))
 	}
 
 	// Read encrypted chunk
 	encryptedChunk, err := readChunk(r.reader, chunkLen)
 	if err != nil {
-		return 0, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
+		return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "failed to read encrypted chunk: %w", err))
 	}
 
 	// Decrypt chunk
@@ -235,19 +260,11 @@ func (r *StreamingDecryptReader) read(p []byte) (n int, err error) {
 		if r.opened {
 			// An earlier chunk authenticated, so the key is right: this is
 			// corruption or tampering (400), not a stale key (422). SPEC 5.4.2.
-			return 0, NewClientError(perr)
+			return nil, NewClientError(perr)
 		}
-		return 0, NewKeyConfigError(perr)
+		return nil, NewKeyConfigError(perr)
 	}
-	r.opened = true
-
-	// Return as much as fits in p, buffer the rest
-	n = copy(p, decryptedChunk)
-	if n < len(decryptedChunk) {
-		r.buffer = decryptedChunk[n:]
-	}
-
-	return n, nil
+	return decryptedChunk, nil
 }
 
 // Close implements io.Closer
@@ -363,12 +380,13 @@ func (w *DerivedResponseWriter) Flush() {
 // The returned ResponseContext contains the HPKE recipient which can be used to
 // export the shared secret for response key derivation.
 func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContext, error) {
-	if req.Body == nil || req.Body == http.NoBody {
+	keys := req.Header.Values(protocol.EncapsulatedKeyHeader)
+	if len(keys) == 0 && (req.Body == nil || req.Body == http.NoBody) {
 		return nil, nil
 	}
 
 	// Get the encapsulated key header
-	if len(req.Header.Values(protocol.EncapsulatedKeyHeader)) > 1 {
+	if len(keys) > 1 {
 		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "duplicate %s header", protocol.EncapsulatedKeyHeader))
 	}
 	encapKeyHex := req.Header.Get(protocol.EncapsulatedKeyHeader)
@@ -385,6 +403,9 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 	// fails to decapsulate is treated as a key-configuration mismatch.
 	if len(encapKey) != RequestEncLength {
 		return nil, NewClientError(protocol.Errorf(protocol.InvalidEncapsulatedKey, "encapsulated key must be %d bytes, got %d", RequestEncLength, len(encapKey)))
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "encrypted request has no frame"))
 	}
 
 	// Create recipient and setup decryption
@@ -406,6 +427,7 @@ func (i *Identity) DecryptRequestWithContext(req *http.Request) (*ResponseContex
 
 	req.Body = streamingReader
 	req.ContentLength = -1
+	req.Header.Del("Content-Length")
 
 	// Return the context for response encryption
 	return &ResponseContext{
@@ -423,6 +445,13 @@ func (i *Identity) SetupDerivedResponseEncryption(
 ) (*DerivedResponseWriter, error) {
 	if respCtx == nil {
 		return nil, protocol.Errorf(protocol.InvalidInput, "response context is nil")
+	}
+	if respCtx.decryptor == nil {
+		return nil, protocol.Errorf(protocol.InvalidInput, "response context requires an encrypted request")
+	}
+
+	if err := respCtx.decryptor.authenticateFirstFrame(); err != nil {
+		return nil, err
 	}
 
 	// Export secret from the request's HPKE context

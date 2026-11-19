@@ -18,7 +18,7 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 | `marshal_config` | `publicKey` (32), optional `keyId` | marshaled config bytes | `INVALID_KEY_CONFIG` (a public key that is not 32 bytes; verified identical in Go, Python, JS and Rust, Swift has no config marshal) |
 | `decrypt_request` | `mutation`, optional mutation parameters | decrypted request plaintext | `INVALID_ENCAPSULATED_KEY`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `KEY_CONFIG_MISMATCH` |
 | `middleware_request` | `mutation` | no body; the handler reads the request body to EOF and success means that read completed | `AEAD_DECRYPT_FAILED` (a later frame failed inside the handler's read; the authenticated prefix was delivered and is reported in `bytes_emitted_before_error`), `KEY_CONFIG_MISMATCH`, `INVALID_ENCAPSULATED_KEY` |
-| `request` | top-level `request` {`method`, `path`, `headers`, `body_hex`} against the oracle `server_scenario` | decrypted response body; `status`, `response_headers`, `passthrough` also reported | any client-side code: `MISSING_RESPONSE_NONCE`, `INVALID_RESPONSE_NONCE`, `DUPLICATE_RESPONSE_NONCE`, `KEY_CONFIG_MISMATCH`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `AEAD_DECRYPT_FAILED` |
+| `request` | top-level `request` {`method`, `path`, `headers`, `body_hex`} against the oracle `server_scenario` | decrypted response body; `status`, `response_headers`, `passthrough` also reported | any client-side code: `MISSING_RESPONSE_NONCE`, `UNEXPECTED_REDIRECT`, `INVALID_RESPONSE_NONCE`, `DUPLICATE_RESPONSE_NONCE`, `KEY_CONFIG_MISMATCH`, `FRAMING_TRUNCATED`, `CHUNK_TOO_LARGE`, `AEAD_DECRYPT_FAILED` |
 | `discover` | `target` (`ORACLE_URL`, `bad_ct`, `non200`) | none; success means the client accepted the key config | `INVALID_KEY_CONFIG` |
 | `reject_reserved_header` | none (adapter sets `Ehbp-Response-Nonce` itself) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `reject_cross_origin` | none (adapter targets an absolute URL on another origin) | none; the request MUST NOT be sent | `INVALID_INPUT` |
@@ -39,7 +39,9 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 - A complete ciphertext frame shorter than the AEAD tag is an authentication
   failure, not truncated framing: the declared frame was completely received.
 - Partial 1-, 2-, and 3-byte length prefixes at entity-body EOF are
-  `FRAMING_TRUNCATED`. An empty entity body is the only clean zero-frame body.
+  `FRAMING_TRUNCATED`. An encrypted request with zero authenticated frames
+  also yields `FRAMING_TRUNCATED`. A 1xx or 2xx response to an encrypted request
+  also requires at least one authenticated frame, which may seal empty plaintext.
 - Frame replay and reordering MUST fail because each frame is bound to its
   sequence nonce.
 - Server security operations are applicable only to runners named by the

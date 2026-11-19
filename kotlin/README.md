@@ -15,7 +15,7 @@ Go and Swift and needs no separate publish step.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:v0.5.0") }
+dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:v0.6.0") }
 ```
 
 CI compares JitPack's artifact against a clean local build of the same commit
@@ -66,9 +66,9 @@ Other constructors, as in Go:
   public key; no network fetch and no origin pin.
 
 Every constructor takes an optional `OkHttpClient` (TLS pinning, timeouts,
-proxies, cookies). `roundTrip` is a single HTTP transaction like Go's
-`RoundTripper`: the client is used with redirects disabled and a 3xx is returned
-to the caller instead of being replayed against the new location.
+proxies, cookies). Like Go's `RoundTripper`, `roundTrip` performs one HTTP
+transaction with redirects disabled. An encrypted request that receives a 3xx
+fails with `UNEXPECTED_REDIRECT`. A bodyless request returns the redirect to the caller.
 Key discovery also rejects redirects, requests exactly `/.well-known/hpke-keys`
 on the configured origin, and reads only the first key configuration.
 
@@ -76,18 +76,32 @@ on the configured origin, and reads only the first key configuration.
 
 - A request with a body is encrypted in 8 KiB frames while it streams; a
   bodyless request (no body, or a known zero-length body) passes through in
-  plaintext, and so does its response.
-- A 2xx response without `Ehbp-Response-Nonce` fails closed
-  (`MISSING_RESPONSE_NONCE`); a non-2xx response without the header is returned
-  as an unauthenticated pass-through.
+  plaintext, and so does its response. A known-empty body is frozen at preparation time.
+  An unknown-length body that finishes empty sends one authenticated empty frame.
+  Duplex request bodies are rejected with `INVALID_INPUT` before sending.
+- A 1xx or 2xx response to an encrypted request requires `Ehbp-Response-Nonce`
+  and at least one authenticated frame. A missing nonce yields `MISSING_RESPONSE_NONCE`.
+  A body that ends before any frame authenticates yields `FRAMING_TRUNCATED`.
+  An authenticated frame can carry empty plaintext. Statuses 204 and 205 cannot
+  carry a frame. A 4xx or 5xx response without the header can pass through as an
+  unauthenticated error.
 - A 422 `application/problem+json` key-config problem throws `KeyConfigError`
-  (code `KEY_CONFIG_MISMATCH`): refresh the key config and retry.
+  (code `KEY_CONFIG_MISMATCH`): refresh the key config and retry. Detection
+  (SPEC 5.4.2) applies only to responses without `Ehbp-Response-Nonce`; the
+  body must be a JSON object of at most 64 KiB whose exact, case-sensitive
+  `type` member is the key-config URN. `title` is used when it is a string,
+  otherwise the message is `key configuration mismatch`. Anything else passes
+  through as a plaintext 422.
+- `Ehbp-Encapsulated-Key`, `Ehbp-Response-Nonce` and `Host` are reserved
+  (SPEC 5.1): a caller-set value is `INVALID_INPUT`. Caller-set
+  `Content-Length` / `Transfer-Encoding` are dropped; the library frames the body.
 - Response plaintext is released frame by frame as each frame authenticates;
   after a failure the body stream rethrows the same error forever.
 - `getSessionRecoveryToken()` is readable as soon as the request body is
   encrypted and before it is sent, so it can be persisted ahead of a crash
   (SPEC 6). It is cleared once the exchange is consumed (SPEC 6.3): the
-  response was fully read, a newer request superseded it, or the exchange
+  response was fully read, its body was closed before EOF, a newer request
+  superseded it, or the exchange
   failed (pass-through, key-config problem, transport error, or a body that
   stopped authenticating). Persist the token beforehand if you need it
   afterwards.

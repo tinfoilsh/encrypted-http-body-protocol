@@ -6,12 +6,13 @@ package sh.tinfoil.ehbp.identity
 import okhttp3.MediaType
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
+import okio.Buffer
 import okio.BufferedSink
 import okio.BufferedSource
 import okio.buffer
-import okio.sink
 import okio.source
 import org.bouncycastle.crypto.hpke.HPKEContext
 import org.bouncycastle.crypto.hpke.HPKEContextWithEncapsulation
@@ -48,6 +49,8 @@ private const val encryptChunkBytes = 8192
  * plaintext is sealed and framed as it is written, in chunks of at most 8 KiB.
  */
 class StreamingEncryptWriter(private val out: OutputStream, private val sender: HPKEContext) : OutputStream() {
+    private var sealed = false // at least one frame has been produced
+
     override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
 
     override fun write(p: ByteArray, off: Int, len: Int) {
@@ -55,15 +58,30 @@ class StreamingEncryptWriter(private val out: OutputStream, private val sender: 
         val end = off + len
         while (pos < end) {
             val n = minOf(encryptChunkBytes, end - pos)
-            val encrypted = try {
-                sender.seal(ByteArray(0), p.copyOfRange(pos, pos + n)) // AAD is empty (SPEC 4.3); BC rejects null
-            } catch (e: Exception) {
-                throw ProtocolError(Code.HPKESetupFailed, "failed to encrypt chunk", e)
-            }
-            // Chunk with length prefix
-            out.write(ByteBuffer.allocate(4 + encrypted.size).putInt(encrypted.size).put(encrypted).array())
+            seal(p.copyOfRange(pos, pos + n))
             pos += n
         }
+    }
+
+    /**
+     * An encrypted request must carry at least one authenticated frame: the
+     * server's open of a frame is what authenticates the encapsulated key
+     * (SPEC 5.1, 7.4). Call at end of stream: an empty stream seals one
+     * empty-plaintext frame, as Go's StreamingEncryptReader.
+     */
+    fun finish() {
+        if (!sealed) seal(ByteArray(0))
+    }
+
+    private fun seal(plaintext: ByteArray) {
+        val encrypted = try {
+            sender.seal(ByteArray(0), plaintext) // AAD is empty (SPEC 4.3); BC rejects null
+        } catch (e: Exception) {
+            throw ProtocolError(Code.HPKESetupFailed, "failed to encrypt chunk", e)
+        }
+        // Chunk with length prefix
+        out.write(ByteBuffer.allocate(4 + encrypted.size).putInt(encrypted.size).put(encrypted).array())
+        sealed = true
     }
 
     override fun flush() = out.flush()
@@ -82,13 +100,16 @@ class RequestContext(val sender: HPKEContextWithEncapsulation, val requestEnc: B
  * decryption. Request is immutable, so the encrypted copy is returned rather
  * than mutated in place.
  *
- * For bodyless requests (no body, or a body of known zero length, as Go's
- * http.NoBody) the original request and a null context are returned: the
- * request passes through unencrypted and so does the response (SPEC 7.4).
+ * A bodyless exchange carries no key. A known-empty body is snapshotted as
+ * empty so a mutable source can never add plaintext after this decision.
  */
 fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestContext?> {
-    val body = req.body
-    if (body == null || body.contentLength() == 0L) return req to null
+    val body = req.body ?: return req to null
+    if (body.isDuplex()) throw ProtocolError(Code.InvalidInput, "duplex request bodies are unsupported")
+    if (body.contentLength() == 0L) {
+        val empty = ByteArray(0).toRequestBody(body.contentType())
+        return req.newBuilder().method(req.method, empty).build() to null
+    }
 
     val sender = try {
         newHpke().setupBaseS(publicKey(), HPKERequestInfo.toByteArray())
@@ -104,9 +125,11 @@ fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestConte
         override fun contentLength() = -1L
         override fun isOneShot() = true // the HPKE sequence cannot be replayed
         override fun writeTo(sink: BufferedSink) {
-            val plain = StreamingEncryptWriter(sink.outputStream(), sender).sink().buffer()
+            val w = StreamingEncryptWriter(sink.outputStream(), sender)
+            val plain = ChunkedRequestSink(w, encryptChunkBytes)
             body.writeTo(plain)
-            plain.flush()
+            plain.close()
+            w.finish()
         }
     }
     val newReq = req.newBuilder()
@@ -122,7 +145,12 @@ fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestConte
  * authenticated and rejects truncated framing at end-of-stream. A protocol
  * failure is terminal: every later read rethrows it.
  */
-class DerivedStreamingDecryptReader(private val reader: InputStream, private val aead: ResponseAEAD) : InputStream() {
+class DerivedStreamingDecryptReader @JvmOverloads constructor(
+    private val reader: InputStream,
+    private val aead: ResponseAEAD,
+    private val requireFrame: Boolean = false,
+) : InputStream() {
+    private var authenticated = false
     private var buffer = ByteArray(0)
     private var bufPos = 0
     private var eof = false
@@ -142,6 +170,9 @@ class DerivedStreamingDecryptReader(private val reader: InputStream, private val
         while (true) {
             val chunkLenBytes = readFull(4, "failed to read chunk length")
             if (chunkLenBytes.isEmpty()) {
+                if (requireFrame && !authenticated) {
+                    throw fail(ProtocolError(Code.FramingTruncated, "response ended before any frame authenticated"))
+                }
                 eof = true
                 return -1
             }
@@ -162,6 +193,7 @@ class DerivedStreamingDecryptReader(private val reader: InputStream, private val
             } catch (e: ProtocolError) {
                 throw fail(e)
             }
+            authenticated = true
             if (decryptedChunk.isEmpty()) continue // an InputStream read must not return 0
             buffer = decryptedChunk
             bufPos = 0
@@ -172,7 +204,12 @@ class DerivedStreamingDecryptReader(private val reader: InputStream, private val
     /** Reads up to n bytes, fewer only at EOF; a transport error is FRAMING_TRUNCATED as in the Go reader. */
     private fun readFull(n: Int, what: String): ByteArray =
         try {
-            reader.readFully(n)
+            if (n <= 64 * 1024) {
+                reader.readFully(n)
+            } else {
+                // Buffer large frames in segments as ciphertext arrives.
+                Buffer().readFrom(reader, n.toLong()).readByteArray()
+            }
         } catch (e: IOException) {
             throw fail(ProtocolError(Code.FramingTruncated, "$what: ${e.message}", e))
         }
