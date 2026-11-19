@@ -2,6 +2,7 @@ package identity
 
 import (
 	"bytes"
+	"context"
 	"crypto/hpke"
 	"crypto/rand"
 	"encoding/binary"
@@ -1178,7 +1179,7 @@ func TestUnknownLengthEmptyStreamIsBodyless(t *testing.T) {
 func TestCancelWhileWaitingForRequestPayload(t *testing.T) {
 	id, err := NewIdentity()
 	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	reader, writer := io.Pipe()
 	defer writer.Close()
