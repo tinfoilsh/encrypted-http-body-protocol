@@ -15,7 +15,7 @@ Go and Swift and needs no separate publish step.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.tinfoilsh:encrypted-http-body-protocol:0a04554ec4") }
+dependencies { implementation("com.github.tinfoilsh:encrypted-http-body-protocol:bff23d799e") }
 ```
 
 The example pins a revision containing the Kotlin client. Release tags through
