@@ -96,7 +96,8 @@ class EhbpTestServer(
 
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val aead = deriveResponseKeys(recipient.export(ExportLabel.toByteArray(), ExportLength), enc, nonce).newResponseAEAD()
-        val framed = tweak(ex, sealFrames(aead, *body.toList().chunked(8192).map { it.toByteArray() }.toTypedArray()))
+        val chunks = body.toList().chunked(8192).map { it.toByteArray() }.ifEmpty { listOf(ByteArray(0)) }
+        val framed = tweak(ex, sealFrames(aead, *chunks.toTypedArray()))
         if (!suppressNonce && !ex.responseHeaders.containsKey(ResponseNonceHeader)) ex.responseHeaders.set(ResponseNonceHeader, nonce.toHex())
         // HttpServer: 0 = chunked, -1 = no body, otherwise a Content-Length.
         ex.sendResponseHeaders(status, if (!contentLength) 0 else if (framed.isEmpty()) -1 else framed.size.toLong())

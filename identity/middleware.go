@@ -1,9 +1,7 @@
 package identity
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 
 	log "github.com/sirupsen/logrus"
@@ -41,35 +39,15 @@ func statusForProtocolError(err error) int {
 	return http.StatusInternalServerError
 }
 
-type prependReadCloser struct {
-	io.Reader
-	closer io.Closer
-}
-
-func (p *prependReadCloser) Close() error {
-	if p.closer != nil {
-		return p.closer.Close()
-	}
-	return nil
-}
-
 // Middleware wraps an HTTP handler to encrypt/decrypt requests and responses.
 // Requests with Ehbp-Encapsulated-Key header are decrypted and responses are encrypted.
 // Requests without the header are passed through as plaintext.
 func (i *Identity) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Check for request body - bodyless requests pass through unencrypted
-			// See SPEC.md Section 6.4 for security rationale
-			if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
-				log.Debugf("bodyless request, passing through unencrypted")
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Check for request encryption header
-			requestEncHex := r.Header.Get(protocol.EncapsulatedKeyHeader)
-			if requestEncHex == "" {
+			// A present key requires an authenticated request frame, even when
+			// HTTP reports an empty body. Only an absent key selects plaintext.
+			if len(r.Header.Values(protocol.EncapsulatedKeyHeader)) == 0 {
 				log.Debugf("no %s header, passing through as plaintext", protocol.EncapsulatedKeyHeader)
 				next.ServeHTTP(w, r)
 				return
@@ -83,33 +61,12 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Probe one byte to force early decrypt failure detection (e.g. stale key mismatch)
-			// while preserving streaming request semantics for the remaining body.
-			probe := make([]byte, 1)
-			n, readErr := r.Body.Read(probe)
-			if readErr != nil && readErr != io.EOF {
-				status := statusForProtocolError(readErr)
-				sendError(w, readErr, "failed to read decrypted request body", status)
+			// Authenticate the key before invoking the handler. The reader retains the
+			// first frame's plaintext, including a valid empty first frame.
+			if err := respCtx.decryptor.authenticateFirstFrame(); err != nil {
+				sendError(w, err, "failed to read decrypted request body", statusForProtocolError(err))
 				_ = r.Body.Close()
 				return
-			}
-
-			originalBody := r.Body
-			if n > 0 {
-				r.Body = &prependReadCloser{
-					Reader: io.MultiReader(bytes.NewReader(probe[:n]), originalBody),
-					closer: originalBody,
-				}
-				// The body remains a stream, so content length is no longer known.
-				r.ContentLength = -1
-				r.Header.Del("Content-Length")
-			} else if readErr == io.EOF {
-				_ = originalBody.Close()
-				r.Body = http.NoBody
-				r.ContentLength = 0
-				r.Header.Del("Content-Length")
-			} else {
-				r.Body = originalBody
 			}
 
 			// Setup response encryption using derived keys

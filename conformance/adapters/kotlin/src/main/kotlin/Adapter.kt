@@ -254,8 +254,8 @@ fun doRequest(fx: JsonObject, r: Result) {
     r.headers = subsetHeaders(resp.headers)
     val plain = readTracked(resp.body!!.byteStream(), r)
     resp.close()
-    // No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
-    if (resp.headers(ResponseNonceHeader).firstOrNull().isNullOrEmpty() && resp.code !in 200..299) r.passthrough = true
+    // SPEC 5.3 permits a plaintext error response from an intermediary.
+    if (resp.headers(ResponseNonceHeader).isEmpty() && resp.code in 400..599) r.passthrough = true
     r.setBody(plain)
 }
 

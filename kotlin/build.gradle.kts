@@ -22,7 +22,7 @@ plugins {
 // (com.github.tinfoilsh.encrypted-http-body-protocol), so this group only
 // matters for a future Maven Central publication and must not be the JitPack one.
 group = "sh.tinfoil"
-version = "0.5.0"
+version = "0.6.0"
 
 repositories { mavenCentral() }
 

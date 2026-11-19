@@ -144,7 +144,7 @@ This derivation ensures:
 - Outbound request:
 
   - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3, sealing and emitting chunks as the body is read rather than buffering it. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
-  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale.
+  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale. If a client sends the encapsulated key for an unknown-length stream that finishes empty, it MUST seal one frame of empty plaintext.
   - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
 
@@ -164,7 +164,8 @@ This derivation ensures:
   - If a chunk fails to authenticate or the framing is invalid after application processing has begun, the server MUST stop delivering plaintext to the application at that chunk, and the exchange MUST NOT complete successfully: if the response has not started, the server responds with the status in Section 5.4.2; if it has, the server MUST abort the response so the client observes a transport-level failure rather than a complete message (on HTTP/1.1, close the connection without the terminating chunk; on HTTP/2 and HTTP/3, reset the stream).
   - Error status mapping: as defined in Section 5.4.2.
   - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
-  - If the request has no payload body, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
+  - Before invoking the handler or deriving response keys for a request carrying `Ehbp-Encapsulated-Key`, the server MUST authenticate at least one frame. If the body ends first, reject it as a framing violation (400). A sealed frame containing empty plaintext satisfies this requirement.
+  - If the request has no payload body and carries no encapsulated key, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
 - Response handling:
 
   - If an HPKE receiver context was established from the request, generate a random 32-byte response nonce (matching OHTTP's `max(Nn, Nk)`), derive response keys using the procedure in Section 4.4, and stream-encrypt the response body with AES-256-GCM. Set `Ehbp-Response-Nonce` and carry the framed body as described in Section 4.2.
@@ -267,7 +268,7 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |
 | `KEY_CONFIG_MISMATCH` | client | Server returned the Section 5.4.2 key-configuration problem response |
-| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or inside a frame's ciphertext; or a 1xx or 2xx response to an encrypted request ended before any chunk authenticated |
+| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or ciphertext, or before any frame authenticated in an encrypted request or its 1xx or 2xx response |
 | `CHUNK_TOO_LARGE` | both | Frame length prefix exceeds the receiver's maximum; rejected before allocation |
 | `AEAD_DECRYPT_FAILED` | both | AEAD authentication failed for a frame |
 | `SEQUENCE_OVERFLOW` | both | Frame sequence number exhausted |

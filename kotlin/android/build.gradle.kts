@@ -18,6 +18,7 @@ android {
     compileSdk = 35
     defaultConfig { minSdk = 21 }
     sourceSets["main"].kotlin.srcDir("../src/main/kotlin")
+    sourceSets["main"].java.srcDir("../src/main/java")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

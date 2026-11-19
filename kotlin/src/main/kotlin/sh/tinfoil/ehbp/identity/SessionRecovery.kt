@@ -95,10 +95,13 @@ fun decryptResponseWithToken(resp: Response, token: SessionRecoveryToken): Respo
     }
 
     val aead = deriveResponseKeys(token.exportedSecret, token.requestEnc, responseNonce).newResponseAEAD()
+    if (resp.code == 204 || resp.code == 205) {
+        throw ProtocolError(Code.FramingTruncated, "status ${resp.code} cannot carry an authenticated frame")
+    }
     val body = resp.body ?: throw ProtocolError(Code.InvalidInput, "response has no body")
     // Any Content-Length header describes the encrypted body, not the decrypted stream.
     return resp.newBuilder()
         .removeHeader("Content-Length")
-        .body(body.withStream(DerivedStreamingDecryptReader(body.byteStream(), aead)))
+        .body(body.withStream(DerivedStreamingDecryptReader(body.byteStream(), aead, requireFrame = resp.code < 400)))
         .build()
 }

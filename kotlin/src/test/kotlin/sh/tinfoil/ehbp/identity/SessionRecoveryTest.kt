@@ -80,7 +80,7 @@ class SessionRecoveryTest {
 
     @Test
     fun decryptResponseWithTokenClearsStaleContentLength() {
-        val resp = decryptResponseWithToken(response(ByteArrayInputStream(ByteArray(0)), ResponseNonceHeader to nonceHex, "Content-Length" to "42"), token)
+        val resp = decryptResponseWithToken(response(ByteArrayInputStream(sealFrames(aead(), ByteArray(0))), ResponseNonceHeader to nonceHex, "Content-Length" to "42"), token)
         assertNull(resp.header("Content-Length"))
         assertEquals(-1L, resp.body!!.contentLength())
         assertEquals(-1, resp.body!!.byteStream().read())
@@ -100,6 +100,23 @@ class SessionRecoveryTest {
 
     private fun aead() = deriveResponseKeys(token.exportedSecret, token.requestEnc, hex(nonceHex)).newResponseAEAD()
     private fun decrypt(framed: ByteArray) = decryptResponseWithToken(response(ByteArrayInputStream(framed), ResponseNonceHeader to nonceHex), token).body!!.byteStream()
+
+    @Test
+    fun successRequiresAnAuthenticatedFrame() {
+        for (status in listOf(101, 200)) {
+            val resp = response(ByteArrayInputStream(ByteArray(8)), ResponseNonceHeader to nonceHex, status = status)
+            val body = decryptResponseWithToken(resp, token).body!!.byteStream()
+            repeat(2) {
+                assertEquals(Code.FramingTruncated, assertFailsWith<ProtocolError> { body.read() }.code)
+            }
+        }
+        for (status in listOf(204, 205)) {
+            val resp = response(ByteArrayInputStream(sealFrames(aead(), ByteArray(0))), ResponseNonceHeader to nonceHex, status = status)
+            assertEquals(Code.FramingTruncated, assertFailsWith<ProtocolError> { decryptResponseWithToken(resp, token) }.code)
+        }
+        val error = response(ByteArrayInputStream(ByteArray(0)), ResponseNonceHeader to nonceHex, status = 503)
+        decryptResponseWithToken(error, token).use { assertEquals(-1, it.body!!.byteStream().read()) }
+    }
 
     @Test
     fun multiChunkWithEmptyFramesAndSmallReads() {

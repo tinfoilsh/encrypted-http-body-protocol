@@ -2,21 +2,27 @@ package sh.tinfoil.ehbp.identity
 
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.Buffer
 import okio.BufferedSink
+import okio.ByteString.Companion.toByteString
 import okio.Sink
 import okio.Timeout
 import okio.buffer
 import sh.tinfoil.ehbp.openFrames
+import sh.tinfoil.ehbp.protocol.Code
 import sh.tinfoil.ehbp.protocol.EncapsulatedKeyHeader
+import sh.tinfoil.ehbp.protocol.ProtocolError
 import sh.tinfoil.ehbp.toHex
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -116,13 +122,104 @@ class CryptTest {
     }
 
     @Test
+    fun emptyUnknownLengthBodySealsOneEmptyFrame() {
+        // SPEC 5.1: the server's open of a frame authenticates the encapsulated key,
+        // so an unknown-length stream that yields nothing still carries one frame.
+        val producer = object : RequestBody() {
+            override fun contentType() = null
+            override fun contentLength() = -1L
+            override fun writeTo(sink: BufferedSink) {}
+        }
+        val req = Request.Builder().url("http://example.test/x").post(producer).build()
+        val (encrypted, ctx) = server.encryptRequestWithContext(req)
+        assertNotNull(ctx)
+        val framed = drain(encrypted.body!!)
+        assertEquals(4 + 16, framed.size)
+        assertEquals(16, ByteBuffer.wrap(framed).int)
+        assertContentEquals(ByteArray(0), openFrames(recipient(ctx.requestEnc), ByteArrayInputStream(framed)))
+    }
+
+    @Test
     fun bodylessRequestsPassThrough() {
         val get = Request.Builder().url("http://example.test/x").build()
         assertNull(server.encryptRequestWithContext(get).second)
         val noBody = Request.Builder().url("http://example.test/x").post(ByteArray(0).toRequestBody()).build()
-        val (same, ctx) = server.encryptRequestWithContext(noBody)
+        val (empty, ctx) = server.encryptRequestWithContext(noBody)
         assertNull(ctx)
-        assertTrue(same === noBody)
+        assertEquals(0L, empty.body!!.contentLength())
+    }
+
+    @Test
+    fun preparedEmptyFileCannotChangeTheWireBody() {
+        val file = Files.createTempFile("ehbp-upload", ".txt").toFile()
+        try {
+            val req = Request.Builder().url("http://example.test/").post(file.asRequestBody()).build()
+            val (prepared, ctx) = server.encryptRequestWithContext(req)
+            file.writeText("new data")
+            assertNull(ctx)
+            assertNull(prepared.header(EncapsulatedKeyHeader))
+            assertEquals(0L, prepared.body!!.contentLength())
+            assertContentEquals(ByteArray(0), drain(prepared.body!!))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun duplexBodiesAreRejectedBeforeWriting() {
+        val body = object : RequestBody() {
+            override fun contentType() = null
+            override fun isDuplex() = true
+            override fun writeTo(sink: BufferedSink) = error("unexpected write")
+        }
+        val req = Request.Builder().url("http://example.test/").post(body).build()
+        assertEquals(Code.InvalidInput, assertFailsWith<ProtocolError> { server.encryptRequestWithContext(req) }.code)
+    }
+
+    @Test
+    fun arrayUploadBoundsPlaintextAtFirstWireWrite() {
+        val bytes = ByteArray(4 shl 20) { it.toByte() }
+        lateinit var plaintext: BufferedSink
+        var firstBuffered: Long? = null
+        val wire = object : Sink {
+            override fun write(source: Buffer, byteCount: Long) {
+                if (firstBuffered == null) firstBuffered = plaintext.buffer.size
+                source.skip(byteCount)
+            }
+            override fun flush() {}
+            override fun timeout() = Timeout.NONE
+            override fun close() {}
+        }
+        val body = object : RequestBody() {
+            override fun contentType() = null
+            override fun writeTo(sink: BufferedSink) {
+                plaintext = sink
+                bytes.toRequestBody().writeTo(sink)
+            }
+        }
+        val req = Request.Builder().url("http://example.test/").post(body).build()
+        val (encrypted, _) = server.encryptRequestWithContext(req)
+        wire.buffer().use { encrypted.body!!.writeTo(it) }
+        assertTrue(assertNotNull(firstBuffered) <= 8192)
+    }
+
+    @Test
+    fun chunkedSinkPreservesFluentWritesAndCharsetState() {
+        val bytes = ByteArray(24577) { it.toByte() }
+        val string = "a".repeat(8191) + "🍋" + "日本語".repeat(3000)
+        fun writeTo(sink: BufferedSink) {
+            sink.writeByte(7).write(bytes, 1, bytes.size - 3).write(bytes.toByteString(), 2, bytes.size - 4)
+            val direct = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); flip() }
+            assertEquals(bytes.size, sink.write(direct))
+            sink.write(Buffer().write(bytes) as okio.Source, bytes.size.toLong())
+            sink.writeUtf8(string).writeString(string, Charsets.UTF_16)
+            sink.outputStream().write(bytes)
+            sink.flush()
+        }
+        val expected = Buffer().also { writeTo(it) }.readByteArray()
+        val out = ByteArrayOutputStream()
+        ChunkedRequestSink(out, 8192).use { writeTo(it) }
+        assertContentEquals(expected, out.toByteArray())
     }
 
     @Test

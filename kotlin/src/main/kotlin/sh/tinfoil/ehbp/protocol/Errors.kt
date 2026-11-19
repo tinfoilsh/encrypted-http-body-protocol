@@ -13,6 +13,7 @@ enum class Code(val value: String) {
     InvalidEncapsulatedKey("INVALID_ENCAPSULATED_KEY"),
     HPKESetupFailed("HPKE_SETUP_FAILED"),
     MissingResponseNonce("MISSING_RESPONSE_NONCE"),
+    UnexpectedRedirect("UNEXPECTED_REDIRECT"),
     InvalidResponseNonce("INVALID_RESPONSE_NONCE"),
     DuplicateResponseNonce("DUPLICATE_RESPONSE_NONCE"),
     KeyConfigMismatch("KEY_CONFIG_MISMATCH"),

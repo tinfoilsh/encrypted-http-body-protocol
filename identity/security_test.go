@@ -38,32 +38,20 @@ func TestMitMCannotReadResponse(t *testing.T) {
 		t.Fatalf("Failed to create server identity: %v", err)
 	}
 
-	clientIdentity, err := NewIdentity()
-	if err != nil {
-		t.Fatalf("Failed to create client identity: %v", err)
-	}
-
 	eveIdentity, err := NewIdentity()
 	if err != nil {
 		t.Fatalf("Failed to create Eve identity: %v", err)
 	}
 
-	// Client (Alice) encrypts a request to server
-	requestEnc, clientSender, err := hpke.NewSender(serverIdentity.PublicKey(), clientIdentity.KDF(), clientIdentity.AEAD(), []byte(HPKERequestInfo))
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("hello"))
+	clientCtx, err := serverIdentity.EncryptRequestWithContext(req)
 	if err != nil {
-		t.Fatalf("Failed to create sender: %v", err)
+		t.Fatal(err)
 	}
-
-	// Server receives and decrypts (simulated by setting up recipient)
-	serverRecipient, err := hpke.NewRecipient(requestEnc, serverIdentity.PrivateKey(), serverIdentity.KDF(), serverIdentity.AEAD(), []byte(HPKERequestInfo))
+	requestEnc, clientSender := clientCtx.RequestEnc, clientCtx.Sender
+	respCtx, err := serverIdentity.DecryptRequestWithContext(req)
 	if err != nil {
-		t.Fatalf("Failed to setup recipient: %v", err)
-	}
-
-	// Server creates response encryption context
-	respCtx := &ResponseContext{
-		recipient:  serverRecipient,
-		RequestEnc: requestEnc,
+		t.Fatal(err)
 	}
 
 	recorder := httptest.NewRecorder()
