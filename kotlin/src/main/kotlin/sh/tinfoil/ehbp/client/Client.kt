@@ -19,6 +19,7 @@ import sh.tinfoil.ehbp.identity.encryptRequestWithContext
 import sh.tinfoil.ehbp.identity.extractSessionRecoveryToken
 import sh.tinfoil.ehbp.identity.readFully
 import sh.tinfoil.ehbp.identity.unmarshalPublicConfig
+import sh.tinfoil.ehbp.identity.withRequestPayload
 import sh.tinfoil.ehbp.identity.withStream
 import sh.tinfoil.ehbp.protocol.Code
 import sh.tinfoil.ehbp.protocol.EncapsulatedKeyHeader
@@ -31,6 +32,7 @@ import sh.tinfoil.ehbp.protocol.ResponseNonceHeader
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.TimeUnit
 
 private const val maxProblemDetailsBytes = 64 shl 10
 
@@ -110,8 +112,15 @@ class Transport internal constructor(
         // OkHttp would send caller-set Content-Length / Transfer-Encoding verbatim.
         val cleaned = req.newBuilder().removeHeader("Content-Length").removeHeader("Transfer-Encoding").build()
 
+        val deadline = httpClient.callTimeoutMillis.takeIf { it > 0 }?.let {
+            System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(it.toLong())
+        }
+        return withRequestPayload(cleaned, deadline) { prepared, length -> send(prepared, length, generation, deadline) }
+    }
+
+    private fun send(req: Request, length: Long, generation: Long, deadline: Long?): Response {
         // For bodyless requests reqCtx is null: the response passes through unencrypted.
-        val (newReq, reqCtx) = serverIdentity.encryptRequestWithContext(cleaned)
+        val (newReq, reqCtx) = serverIdentity.encryptRequestWithContext(req, length)
 
         var token: SessionRecoveryToken? = null
         if (reqCtx != null) {
@@ -122,7 +131,9 @@ class Transport internal constructor(
         }
 
         var resp = try {
-            httpClient.newCall(newReq).execute()
+            val call = httpClient.newCall(newReq)
+            if (deadline != null) call.timeout().deadlineNanoTime(deadline)
+            call.execute()
         } catch (e: Exception) {
             setToken(generation, null)
             throw e

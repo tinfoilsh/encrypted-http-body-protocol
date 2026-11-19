@@ -7,11 +7,15 @@ import okhttp3.Headers
 import okhttp3.MediaType
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.BufferedSink
 import okio.BufferedSource
+import okio.ForwardingSink
+import okio.blackholeSink
 import okio.buffer
 import okio.source
 import sh.tinfoil.ehbp.EhbpTestServer
@@ -123,6 +127,54 @@ class ClientTest {
             tr.roundTrip(post("${srv.url}/x", "b")).body!!.bytes()
             val expected = srv.url.removePrefix("http://")
             assertEquals(listOf(expected, expected), seen)
+        }
+    }
+
+    @Test
+    fun unknownLengthProducerRunsOnceAndItsFirstFlushReachesTheWire() {
+        val flushed = CountDownLatch(1)
+        val writes = AtomicInteger()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val wire = object : ForwardingSink(blackholeSink()) {
+                override fun flush() { flushed.countDown() }
+            }
+            wire.buffer().use { chain.request().body!!.writeTo(it) }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(503).message("busy").body("busy".toResponseBody()).build()
+        }.build()
+        val tr = newTransportWithIdentity(newIdentity(), http)
+        val producer = object : RequestBody() {
+            override fun contentType() = null
+            override fun writeTo(sink: BufferedSink) {
+                writes.incrementAndGet()
+                sink.writeByte(1).flush()
+                check(flushed.await(5, TimeUnit.SECONDS)) { "first flush was buffered until EOF" }
+                sink.writeByte(2)
+            }
+        }
+        val req = Request.Builder().url("https://example.test/").post(producer).build()
+        tr.roundTrip(req).use { assertEquals(503, it.code) }
+        assertEquals(1, writes.get())
+    }
+
+    @Test
+    fun failingUnknownLengthProducerNeverCompletesAsAnEmptyOrPartialUpload() {
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            blackholeSink().buffer().use { chain.request().body!!.writeTo(it) }
+            error("a failed upload completed")
+        }.build()
+        val tr = newTransportWithIdentity(newIdentity(), http)
+        for (hasPrefix in listOf(false, true)) {
+            val producer = object : RequestBody() {
+                override fun contentType() = null
+                override fun writeTo(sink: BufferedSink) {
+                    if (hasPrefix) sink.writeByte(1).flush()
+                    throw IOException("producer failed")
+                }
+            }
+            val req = Request.Builder().url("https://example.test/").post(producer).build()
+            assertEquals("producer failed", assertFailsWith<IOException> { tr.roundTrip(req) }.message)
+            assertNull(tr.getSessionRecoveryToken())
         }
     }
 

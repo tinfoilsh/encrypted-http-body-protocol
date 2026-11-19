@@ -11,6 +11,7 @@ import okhttp3.Response
 import okhttp3.ResponseBody
 import okio.Buffer
 import okio.BufferedSink
+import okio.Pipe
 import okio.BufferedSource
 import okio.buffer
 import okio.source
@@ -23,6 +24,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 
 /**
  * KeyConfigError represents a client/server key configuration mismatch: stale
@@ -63,14 +66,9 @@ class StreamingEncryptWriter(private val out: OutputStream, private val sender: 
         }
     }
 
-    /**
-     * An encrypted request must carry at least one authenticated frame: the
-     * server's open of a frame is what authenticates the encapsulated key
-     * (SPEC 5.1, 7.4). Call at end of stream: an empty stream seals one
-     * empty-plaintext frame, as Go's StreamingEncryptReader.
-     */
+    /** Once headers commit to encryption, an empty producer must abort the exchange. */
     fun finish() {
-        if (!sealed) seal(ByteArray(0))
+        if (!sealed) throw ProtocolError(Code.FramingTruncated, "encrypted upload yielded no plaintext")
     }
 
     private fun seal(plaintext: ByteArray) {
@@ -88,6 +86,65 @@ class StreamingEncryptWriter(private val out: OutputStream, private val sender: 
     override fun close() = out.close()
 }
 
+/**
+ * Inspect an unknown-length, push-based OkHttp body once before choosing the HTTP headers.
+ * A bounded pipe lets the same producer continue streaming after the first bytes arrive.
+ * Its lifetime is scoped to dispatch, including failures before OkHttp starts the upload.
+ */
+internal fun <T> withRequestPayload(req: Request, deadline: Long?, send: (Request, Long) -> T): T {
+    val length = req.payloadLength()
+    val body = req.body
+    if (length >= 0 || body == null) return send(req, length)
+
+    val window = 64L * 1024
+    val pipe = Pipe(window)
+    val failure = AtomicReference<Throwable?>()
+    val worker = thread(name = "EHBP request body", isDaemon = true) {
+        try {
+            val sink = ChunkedRequestSink(pipe.sink.buffer().outputStream(), encryptChunkBytes)
+            body.writeTo(sink)
+            sink.close()
+        } catch (e: Throwable) {
+            failure.set(e)
+        } finally {
+            // A request that failed before upload may already have closed the read end.
+            try { pipe.sink.close() } catch (e: IOException) { failure.compareAndSet(null, e) }
+        }
+    }
+    try {
+        return pipe.source.use { source ->
+            if (deadline != null) source.timeout().deadlineNanoTime(deadline)
+            val pending = Buffer()
+            if (source.read(pending, window) == -1L) {
+                failure.get()?.let { throw it }
+                return@use send(req, 0L)
+            }
+            val prepared = object : RequestBody() {
+                override fun contentType() = body.contentType()
+                override fun isOneShot() = true
+                override fun writeTo(sink: BufferedSink) {
+                    do {
+                        sink.write(pending, pending.size)
+                        // Forward flushed short writes before waiting for the producer again.
+                        sink.flush()
+                    } while (source.read(pending, window) != -1L)
+                    failure.get()?.let { throw it }
+                }
+            }
+            send(req.newBuilder().method(req.method, prepared).build(), length)
+        }
+    } finally {
+        pipe.cancel()
+        worker.interrupt()
+    }
+}
+
+private fun Request.payloadLength(): Long {
+    val body = body ?: return 0L
+    if (body.isDuplex()) throw ProtocolError(Code.InvalidInput, "duplex request bodies are unsupported")
+    return body.contentLength()
+}
+
 /** RequestContext holds the HPKE context needed for response decryption. */
 class RequestContext(val sender: HPKEContextWithEncapsulation, val requestEnc: ByteArray) {
     /** DecryptResponse decrypts a response using keys derived from this request's HPKE context. */
@@ -103,10 +160,12 @@ class RequestContext(val sender: HPKEContextWithEncapsulation, val requestEnc: B
  * A bodyless exchange carries no key. A known-empty body is snapshotted as
  * empty so a mutable source can never add plaintext after this decision.
  */
-fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestContext?> {
+fun Identity.encryptRequestWithContext(req: Request): Pair<Request, RequestContext?> =
+    encryptRequestWithContext(req, req.payloadLength())
+
+internal fun Identity.encryptRequestWithContext(req: Request, length: Long): Pair<Request, RequestContext?> {
     val body = req.body ?: return req to null
-    if (body.isDuplex()) throw ProtocolError(Code.InvalidInput, "duplex request bodies are unsupported")
-    if (body.contentLength() == 0L) {
+    if (length == 0L) {
         val empty = ByteArray(0).toRequestBody(body.contentType())
         return req.newBuilder().method(req.method, empty).build() to null
     }

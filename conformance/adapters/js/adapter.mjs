@@ -71,6 +71,7 @@ async function run(fx, res) {
       return largeBody(fx, res);
     case 'token_before_response':
       return tokenBeforeResponse(fx, res);
+    case 'request_stream':
     case 'request':
       return doRequest(fx, res);
     case 'discover':
@@ -149,7 +150,13 @@ async function doRequest(fx, res) {
   const transport = await createTransport(base);
   const req = fx.request;
   const init = { method: req.method, headers: req.headers || {} };
-  if (req.body_hex) init.body = hb(req.body_hex);
+  if (fx.operation === 'request_stream') {
+    init.body = new ReadableStream({ start(controller) {
+      controller.enqueue(hb(req.body_hex));
+      controller.close();
+    } });
+    init.duplex = 'half';
+  } else if (req.body_hex) init.body = hb(req.body_hex);
   const response = await transport.request(base + req.path, init);
 
   res.status = response.status;

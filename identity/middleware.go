@@ -45,7 +45,7 @@ func statusForProtocolError(err error) int {
 func (i *Identity) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// A present key requires an authenticated request frame, even when
+			// A present key requires authenticated request payload, even when
 			// HTTP reports an empty body. Only an absent key selects plaintext.
 			if len(r.Header.Values(protocol.EncapsulatedKeyHeader)) == 0 {
 				log.Debugf("no %s header, passing through as plaintext", protocol.EncapsulatedKeyHeader)
@@ -61,9 +61,8 @@ func (i *Identity) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Authenticate the key before invoking the handler. The reader retains the
-			// first frame's plaintext, including a valid empty first frame.
-			if err := respCtx.decryptor.authenticateFirstFrame(); err != nil {
+			// Require authenticated payload before invoking the handler.
+			if err := respCtx.decryptor.requireRequestPayload(); err != nil {
 				sendError(w, err, "failed to read decrypted request body", statusForProtocolError(err))
 				_ = r.Body.Close()
 				return

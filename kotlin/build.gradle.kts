@@ -19,7 +19,7 @@ plugins {
 }
 
 // JitPack republishes whatever lands in ~/.m2 under its own group
-// (com.github.tinfoilsh.encrypted-http-body-protocol), so this group only
+// (com.github.tinfoilsh), so this group only
 // matters for a future Maven Central publication and must not be the JitPack one.
 group = "sh.tinfoil"
 version = "0.6.0"
@@ -45,7 +45,7 @@ java {
 }
 
 // Consumed through JitPack (see ../jitpack.yml), which rebuilds the tagged
-// commit and serves it as com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:<tag>.
+// commit and serves it as com.github.tinfoilsh:encrypted-http-body-protocol:<tag>.
 publishing {
     publications {
         create<MavenPublication>("maven") {

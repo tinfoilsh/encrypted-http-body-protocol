@@ -15,7 +15,7 @@ Go and Swift and needs no separate publish step.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:0a04554ec4") }
+dependencies { implementation("com.github.tinfoilsh:encrypted-http-body-protocol:0a04554ec4") }
 ```
 
 The example pins a revision containing the Kotlin client. Release tags through
@@ -80,7 +80,7 @@ on the configured origin, and reads only the first key configuration.
 - A request with a body is encrypted in 8 KiB frames while it streams; a
   bodyless request (no body, or a known zero-length body) passes through in
   plaintext, and so does its response. A known-empty body is frozen at preparation time.
-  An unknown-length body that finishes empty sends one authenticated empty frame.
+  The transport checks unknown-length bodies as they stream. An empty source uses the bodyless path. The lower-level `encryptRequestWithContext` writer aborts if a source committed to encryption produces no bytes.
   Duplex request bodies are rejected with `INVALID_INPUT` before sending.
 - A 1xx or 2xx response to an encrypted request requires `Ehbp-Response-Nonce`
   and at least one authenticated frame. A missing nonce yields `MISSING_RESPONSE_NONCE`.

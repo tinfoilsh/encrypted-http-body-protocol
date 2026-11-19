@@ -57,6 +57,11 @@ func (r *tokenOwningReadCloser) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func (r *tokenOwningReadCloser) Close() error {
+	r.once.Do(r.onComplete)
+	return r.ReadCloser.Close()
+}
+
 var _ http.RoundTripper = (*Transport)(nil)
 
 // Option configures a Transport.

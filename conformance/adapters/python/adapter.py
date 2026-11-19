@@ -64,7 +64,7 @@ def run(fx: dict, res: dict) -> None:
         res["body_hex"] = ServerIdentity.unmarshal_public_config(b(ins, "config")).public_key_bytes().hex()
     elif op == "marshal_config":
         res["body_hex"] = ServerIdentity(b(ins, "publicKey"), int(ins.get("keyId", 0))).marshal_public_config().hex()
-    elif op == "request":
+    elif op in ("request", "request_stream"):
         request(fx, res)
     elif op == "large_body":
         large_body(fx, res)
@@ -131,6 +131,8 @@ def request(fx: dict, res: dict) -> None:
     req = fx["request"]
     content = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
 
+    if fx["operation"] == "request_stream":
+        content = iter([bytes.fromhex(req["body_hex"])])
     client = httpx.Client(transport=EHBPTransport(identity), base_url=base)
     out = bytearray()
     try:

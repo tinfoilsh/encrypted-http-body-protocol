@@ -19,7 +19,7 @@ does produce; the mismatch is a fix target, not grounds to relax the fixture.
 | `INVALID_RESPONSE_NONCE` | client | 4.2 | `Ehbp-Response-Nonce` not hex or not 32 bytes. |
 | `DUPLICATE_RESPONSE_NONCE` | client | 4.2 | More than one `Ehbp-Response-Nonce` header. |
 | `KEY_CONFIG_MISMATCH` | client | 5.4.2 | 422 `application/problem+json`, type `urn:ietf:params:ehbp:error:key-config`. |
-| `FRAMING_TRUNCATED` | both | 4.3, 5.3 | Stream ended mid-frame: partial length prefix or partial ciphertext. Also a 1xx or 2xx response to an encrypted request that ended before any chunk authenticated. |
+| `FRAMING_TRUNCATED` | both | 4.3, 5.3 | Stream ended mid-frame: partial length prefix or partial ciphertext. Also an encrypted request that ended before yielding any plaintext, or its 1xx or 2xx response that ended before any chunk authenticated. |
 | `CHUNK_TOO_LARGE` | both | 4.3 + suite security limit | Frame length prefix exceeds 64 MiB; reject before allocation. |
 | `AEAD_DECRYPT_FAILED` | both | 4.3, 5.4.1 | AEAD authentication failed: tampered ciphertext, wrong key, wrong sequence. |
 | `SEQUENCE_OVERFLOW` | both | 4.4.2 | Response chunk sequence exhausted (2^64). |

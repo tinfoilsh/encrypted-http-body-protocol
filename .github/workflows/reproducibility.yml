@@ -100,8 +100,8 @@ jobs:
           # JitPack accepts a tag or a 10-char commit prefix as the version.
           ref="${GITHUB_REF_TYPE}"
           if [ "$ref" = "tag" ]; then version="${GITHUB_REF_NAME}"; else version=$(git rev-parse --short=10 HEAD); fi
-          base="https://jitpack.io/com/github/tinfoilsh/encrypted-http-body-protocol/ehbp/${version}"
-          url="$base/ehbp-${version}.jar"
+          base="https://jitpack.io/com/github/tinfoilsh/encrypted-http-body-protocol/${version}"
+          url="$base/encrypted-http-body-protocol-${version}.jar"
           log="$base/build.log"
           echo "URL: $url"
           # The first GET triggers the build. JitPack long-polls while building, so

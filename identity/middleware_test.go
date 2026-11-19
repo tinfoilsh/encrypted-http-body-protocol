@@ -250,23 +250,45 @@ func TestMiddleware(t *testing.T) {
 		}
 	})
 
-	t.Run("authenticated empty upload reaches handler", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/test", unknownLengthReader{strings.NewReader("")})
-		ctx, err := serverIdentity.EncryptRequestWithContext(req)
-		require.NoError(t, err)
-		require.NotNil(t, ctx)
-		req.Header.Set("Content-Length", "20")
-		w := httptest.NewRecorder()
-		middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.Empty(t, r.Header.Get("Content-Length"))
-			got, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
-			assert.Empty(t, got)
-			w.WriteHeader(http.StatusCreated)
-		})).ServeHTTP(w, req)
-		assert.Equal(t, http.StatusCreated, w.Code)
-		assert.NotEmpty(t, w.Header().Get(protocol.ResponseNonceHeader))
-	})
+	for _, payload := range []string{"", "data"} {
+		t.Run("sealed empty frame followed by "+payload, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/test", nil)
+			client := newTestClient(t)
+			client.encryptRequest(t, req, serverIdentity.MarshalPublicKey())
+			var framed []byte
+			for _, part := range []string{"", payload} {
+				ct, err := client.sender.Seal(nil, []byte(part))
+				require.NoError(t, err)
+				framed = append(binary.BigEndian.AppendUint32(framed, uint32(len(ct))), ct...)
+			}
+			req.Body = io.NopCloser(bytes.NewReader(framed))
+			req.ContentLength = int64(len(framed))
+			w := httptest.NewRecorder()
+			called := false
+			middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				body, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				assert.Equal(t, payload, string(body))
+				w.WriteHeader(http.StatusCreated)
+			})).ServeHTTP(w, req)
+			assert.Equal(t, payload != "", called)
+			if payload == "" {
+				assert.Equal(t, http.StatusBadRequest, w.Code)
+				assert.Empty(t, w.Header().Get(protocol.ResponseNonceHeader))
+			} else {
+				assert.Equal(t, http.StatusCreated, w.Code)
+				response := w.Result()
+				ctx := RequestContext{Sender: client.sender, RequestEnc: client.requestEnc}
+				require.NoError(t, ctx.DecryptResponse(response))
+				defer response.Body.Close()
+				plain, err := io.ReadAll(response.Body)
+				require.NoError(t, err)
+				assert.Empty(t, plain)
+			}
+		})
+	}
+
 }
 
 func TestPlaintextPassthrough(t *testing.T) {

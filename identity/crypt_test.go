@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1121,9 +1122,7 @@ func TestStreamingEncryptReaderGivesUpOnAReaderThatMakesNoProgress(t *testing.T)
 	require.NoError(t, err)
 	req := httptest.NewRequest("POST", "/test", stalledReader{})
 	_, err = serverIdentity.EncryptRequestWithContext(req)
-	require.NoError(t, err)
 
-	_, err = req.Body.Read(make([]byte, 64))
 	assert.ErrorIs(t, err, io.ErrNoProgress)
 }
 
@@ -1165,29 +1164,36 @@ func TestReadChunkReturnsTheWholeChunk(t *testing.T) {
 // recognise an empty body and substitute http.NoBody.
 type unknownLengthReader struct{ io.Reader }
 
-func TestEncryptRequestEmptyStreamSealsOneFrame(t *testing.T) {
-	serverID, err := NewIdentity()
+func TestUnknownLengthEmptyStreamIsBodyless(t *testing.T) {
+	id, err := NewIdentity()
 	require.NoError(t, err)
-	pub, err := FromPublicKeyBytes(serverID.MarshalPublicKey())
-	require.NoError(t, err)
-
 	req := httptest.NewRequest(http.MethodPost, "/x", unknownLengthReader{strings.NewReader("")})
-	ctx, err := pub.EncryptRequestWithContext(req)
-	assert.NoError(t, err)
-	assert.NotNil(t, ctx, "an unknown-length body is encrypted")
+	ctx, err := id.EncryptRequestWithContext(req)
+	require.NoError(t, err)
+	assert.Nil(t, ctx)
+	assert.Equal(t, http.NoBody, req.Body)
+	assert.Empty(t, req.Header.Values(protocol.EncapsulatedKeyHeader))
+}
 
-	framed, err := io.ReadAll(req.Body)
-	assert.NoError(t, err)
-	// SPEC 5.1: one frame of empty plaintext (4-byte prefix + 16-byte tag), never zero frames.
-	assert.Len(t, framed, 4+16)
-
-	// The server authenticates the frame (and so the encapsulated key) and sees an empty body.
-	srvReq := httptest.NewRequest(http.MethodPost, "/x", bytes.NewReader(framed))
-	srvReq.Header.Set(protocol.EncapsulatedKeyHeader, req.Header.Get(protocol.EncapsulatedKeyHeader))
-	respCtx, err := serverID.DecryptRequestWithContext(srvReq)
-	assert.NoError(t, err)
-	assert.NotNil(t, respCtx)
-	plain, err := io.ReadAll(srvReq.Body)
-	assert.NoError(t, err)
-	assert.Empty(t, plain)
+func TestCancelWhileWaitingForRequestPayload(t *testing.T) {
+	id, err := NewIdentity()
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://example.test/", reader)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := id.EncryptRequestWithContext(req)
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not unblock the request body")
+	}
 }
