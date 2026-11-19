@@ -15,8 +15,11 @@ Go and Swift and needs no separate publish step.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:v0.6.0") }
+dependencies { implementation("com.github.tinfoilsh.encrypted-http-body-protocol:ehbp:0a04554ec4") }
 ```
+
+The example pins a revision containing the Kotlin client. Release tags through
+`v0.6.0` predate it.
 
 CI compares JitPack's artifact against a clean local build of the same commit
 on every push to `main` and every release tag.
