@@ -43,6 +43,8 @@
         "parse_config",
         "marshal_config",
         "request",
+        "request_stream",
+        "close_response_early",
         "discover",
         "reject_reserved_header",
         "reject_cross_origin",
@@ -179,6 +181,12 @@
           "type": "boolean"
         },
         "plaintext_emitted_before_error": {
+          "type": "boolean"
+        },
+        "token_before_close": {
+          "type": "boolean"
+        },
+        "token_after_close": {
           "type": "boolean"
         },
         "token_before_response": {

@@ -553,12 +553,12 @@ def main() -> None:
         }
     })
 
-    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None, runners=None):
+    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None, runners=None, operation="request"):
         fx = {
-            "id": fid, "description": desc, "category": "e2e", "operation": "request",
+            "id": fid, "description": desc, "category": "e2e", "operation": operation,
             "server_scenario": scenario,
             "request": {"method": method, "path": f"/s/{scenario}",
-                        "body_hex": body.encode().hex() if body else None, "headers": {}},
+                        "body_hex": body.encode().hex() if body is not None else None, "headers": {}},
             "expect": expect,
         }
         if browser is not None:
@@ -673,6 +673,24 @@ def main() -> None:
             "Bodyless request is unencrypted; its plaintext response is returned as-is (SPEC 7.4).",
             body=None, method="GET"),
     ]
+
+    for body, scenario, response in [
+        ("", "bodyless_plaintext", "plaintext for bodyless request"),
+        ("streamed", "echo", "streamed"),
+    ]:
+        fixture = e2e("e2e-unknown-length-" + ("payload" if body else "empty"), scenario,
+                      {"outcome": "ok", "status": 200, "body_hex": response.encode().hex(),
+                       ("response_headers_present" if body else "response_headers_absent"): ["ehbp-response-nonce"]},
+                      "Select the exchange mode from the plaintext produced by an unknown-length stream.",
+                      body=body, runners=["go", "kotlin", "python", "rust", "js"], operation="request_stream")
+        e2e_list.append(fixture)
+
+    early_close = e2e("e2e-token-consumed-on-early-close", "echo",
+                      {"outcome": "ok", "status": 200, "body_hex": b"h".hex(),
+                       "token_before_close": True, "token_after_close": False},
+                      "Read one response byte and close the body. Closing consumes the live recovery token.",
+                      runners=["go", "kotlin"], operation="close_response_early")
+    e2e_list.append(early_close)
 
     # Hand-specified e2e fixtures: timing and heavy streaming cases.
     e2e_list.append({

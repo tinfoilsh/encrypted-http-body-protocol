@@ -98,7 +98,7 @@ async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
             let id = ServerIdentity::from_public_key_bytes(&h(ins, "publicKey")?)?;
             out.body_hex = Some(hex::encode(id.marshal_public_config()));
         }
-        "request" => request(fx, out).await?,
+        "request" | "request_stream" => request(fx, out).await?,
         "large_body" => large_body(fx, out).await?,
         "token_before_response" => token_before_response(fx, out).await?,
         "discover" => {
@@ -207,7 +207,12 @@ async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
             builder = builder.header(k.as_str(), v.as_str().unwrap_or(""))?;
         }
     }
-    if req["body_hex"].is_string() {
+    if fx["operation"] == "request_stream" {
+        let chunk = bytes::Bytes::from(h(req, "body_hex")?);
+        builder = builder.body_stream(futures_util::stream::once(async move {
+            Ok::<_, std::io::Error>(chunk)
+        }));
+    } else if req["body_hex"].is_string() {
         builder = builder.body(h(req, "body_hex")?);
     }
 

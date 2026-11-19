@@ -190,6 +190,11 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 		case "bodyless_plaintext":
 			// A bodyless request carries no encapsulated key; the response is
 			// plaintext and the client returns it as normal (SPEC 7.4).
+			b, err := io.ReadAll(io.LimitReader(r.Body, 1))
+			if err != nil || len(b) != 0 || len(r.Header.Values(protocol.EncapsulatedKeyHeader)) != 0 {
+				http.Error(w, "expected a bodyless request without a key", http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, "plaintext for bodyless request")

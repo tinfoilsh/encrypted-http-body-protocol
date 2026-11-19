@@ -41,20 +41,22 @@ type fixture struct {
 }
 
 type result struct {
-	FixtureID   string            `json:"fixture_id"`
-	Outcome     string            `json:"outcome"`
-	ErrorCode   *string           `json:"error_code"`
-	Status      *int              `json:"status"`
-	Headers     map[string]string `json:"response_headers,omitempty"`
-	BodyHex     *string           `json:"body_hex"`
-	Passthrough bool              `json:"passthrough"`
-	Emitted     bool              `json:"plaintext_emitted_before_error"`
-	EmittedN    int               `json:"bytes_emitted_before_error"`
-	Native      *string           `json:"native_error"`
-	SkipReason  *string           `json:"skip_reason,omitempty"`
-	Runner      string            `json:"runner"`
-	PeakRSS     *int64            `json:"peak_rss_bytes,omitempty"`
-	TokenEarly  *bool             `json:"token_before_response,omitempty"`
+	FixtureID        string            `json:"fixture_id"`
+	Outcome          string            `json:"outcome"`
+	ErrorCode        *string           `json:"error_code"`
+	Status           *int              `json:"status"`
+	Headers          map[string]string `json:"response_headers,omitempty"`
+	BodyHex          *string           `json:"body_hex"`
+	Passthrough      bool              `json:"passthrough"`
+	Emitted          bool              `json:"plaintext_emitted_before_error"`
+	EmittedN         int               `json:"bytes_emitted_before_error"`
+	Native           *string           `json:"native_error"`
+	SkipReason       *string           `json:"skip_reason,omitempty"`
+	Runner           string            `json:"runner"`
+	PeakRSS          *int64            `json:"peak_rss_bytes,omitempty"`
+	TokenBeforeClose *bool             `json:"token_before_close,omitempty"`
+	TokenAfterClose  *bool             `json:"token_after_close,omitempty"`
+	TokenEarly       *bool             `json:"token_before_response,omitempty"`
 }
 
 func main() {
@@ -122,7 +124,7 @@ func run(fx *fixture, r *result) error {
 		}
 		setBody(r, cfg)
 		return nil
-	case "request":
+	case "request", "request_stream", "close_response_early":
 		return doRequest(fx, r)
 	case "discover":
 		// Go's client constructor performs discovery with content-type/status checks.
@@ -463,6 +465,10 @@ func doRequest(fx *fixture, r *result) error {
 	if fx.Request.BodyHex != nil {
 		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex"))
 	}
+	if fx.Operation == "request_stream" {
+		// Hide the byte reader's length as a streaming caller would.
+		reqBody = struct{ io.Reader }{reqBody}
+	}
 	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, reqBody)
 	if err != nil {
 		return err
@@ -477,6 +483,19 @@ func doRequest(fx *fixture, r *result) error {
 	status := resp.StatusCode
 	r.Status = &status
 	r.Headers = subsetHeaders(resp.Header)
+	if fx.Operation == "close_response_early" {
+		var prefix [1]byte
+		_, readErr := io.ReadFull(resp.Body, prefix[:])
+		before := tr.GetSessionRecoveryToken() != nil
+		closeErr := resp.Body.Close()
+		after := tr.GetSessionRecoveryToken() != nil
+		r.TokenBeforeClose, r.TokenAfterClose = &before, &after
+		setBody(r, prefix[:])
+		if readErr != nil {
+			return readErr
+		}
+		return closeErr
+	}
 
 	plain, n, rerr := readTracked(resp.Body)
 	_ = resp.Body.Close()

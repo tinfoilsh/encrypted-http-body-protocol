@@ -60,6 +60,8 @@ class Result(val fixtureId: String) {
     var emittedN = 0
     var native: String? = null
     var tokenEarly: Boolean? = null
+    var tokenBeforeClose: Boolean? = null
+    var tokenAfterClose: Boolean? = null
     var peakRss: Long? = null
 
     fun toJson() = buildJsonObject {
@@ -74,6 +76,8 @@ class Result(val fixtureId: String) {
         put("bytes_emitted_before_error", emittedN)
         put("native_error", native)
         put("runner", "kotlin")
+        tokenBeforeClose?.let { put("token_before_close", it) }
+        tokenAfterClose?.let { put("token_after_close", it) }
         tokenEarly?.let { put("token_before_response", it) }
         peakRss?.let { put("peak_rss_bytes", it) }
     }.toString()
@@ -112,7 +116,7 @@ fun run(fx: JsonObject, r: Result) {
         }
         "parse_config" -> r.setBody(unmarshalPublicConfig(fx.hexIn("config")).marshalPublicKey())
         "marshal_config" -> r.setBody(fromPublicKeyBytes(fx.hexIn("publicKey")).marshalConfig())
-        "request" -> doRequest(fx, r)
+        "request", "request_stream", "close_response_early" -> doRequest(fx, r)
         // The constructor performs discovery with content-type/status checks.
         "discover" -> newTransport(discoverTarget(fx))
         "reject_reserved_header", "reject_cross_origin", "reject_url_credentials" -> hardening(op)
@@ -243,6 +247,10 @@ fun doRequest(fx: JsonObject, r: Result) {
     val bodyHex = request["body_hex"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
     // OkHttp insists on a body object for POST/PUT; a zero-length one is bodyless to the library.
     val body = when {
+        fx.str("operation") == "request_stream" -> object : RequestBody() {
+            override fun contentType() = null
+            override fun writeTo(sink: BufferedSink) { sink.write(hex(requireNotNull(bodyHex))) }
+        }
         bodyHex != null -> hex(bodyHex).toRequestBody()
         method in setOf("POST", "PUT", "PATCH", "PROPPATCH", "REPORT") -> ByteArray(0).toRequestBody()
         else -> null
@@ -252,6 +260,16 @@ fun doRequest(fx: JsonObject, r: Result) {
     val resp = tr.roundTrip(builder.build())
     r.status = resp.code
     r.headers = subsetHeaders(resp.headers)
+    if (fx.str("operation") == "close_response_early") {
+        resp.use {
+            val byte = it.body!!.byteStream().read()
+            check(byte >= 0) { "expected a response prefix" }
+            r.setBody(byteArrayOf(byte.toByte()))
+            r.tokenBeforeClose = tr.getSessionRecoveryToken() != null
+        }
+        r.tokenAfterClose = tr.getSessionRecoveryToken() != null
+        return
+    }
     val plain = readTracked(resp.body!!.byteStream(), r)
     resp.close()
     // SPEC 5.3 permits a plaintext error response from an intermediary.

@@ -1,6 +1,8 @@
 package identity
 
 import (
+	"bufio"
+	"context"
 	"crypto/hpke"
 	"crypto/rand"
 	"encoding/binary"
@@ -116,8 +118,10 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	// An empty encrypted request still needs one frame to authenticate its key.
-	if bytesRead == 0 && r.sealed {
+	if bytesRead == 0 {
+		if !r.sealed {
+			return 0, protocol.Errorf(protocol.FramingTruncated, "encrypted upload yielded no plaintext")
+		}
 		return 0, io.EOF
 	}
 
@@ -154,12 +158,13 @@ func (r *StreamingEncryptReader) Close() error {
 
 // StreamingDecryptReader wraps an io.Reader for streaming decryption
 type StreamingDecryptReader struct {
-	reader    io.Reader
-	recipient *hpke.Recipient
-	buffer    []byte
-	eof       bool
-	failure   error // first framing or authentication failure, sticky
-	opened    bool  // at least one chunk authenticated under this key
+	reader     io.Reader
+	recipient  *hpke.Recipient
+	buffer     []byte
+	eof        bool
+	failure    error // first framing or authentication failure, sticky
+	opened     bool  // at least one chunk authenticated under this key
+	hasPayload bool  // at least one authenticated plaintext byte
 }
 
 // Err reports the first framing or authentication failure seen while
@@ -196,12 +201,14 @@ func (r *StreamingDecryptReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// authenticateFirstFrame leaves any plaintext buffered for the application.
-func (r *StreamingDecryptReader) authenticateFirstFrame() error {
-	if r.failure != nil || r.opened {
-		return r.failure
+// requireRequestPayload leaves the first nonempty plaintext buffered for the handler.
+func (r *StreamingDecryptReader) requireRequestPayload() error {
+	for !r.hasPayload && r.failure == nil {
+		if err := r.nextFrame(); err != nil {
+			return err
+		}
 	}
-	return r.nextFrame()
+	return r.failure
 }
 
 func (r *StreamingDecryptReader) nextFrame() error {
@@ -212,6 +219,7 @@ func (r *StreamingDecryptReader) nextFrame() error {
 	switch err {
 	case nil:
 		r.opened = true
+		r.hasPayload = r.hasPayload || len(plain) > 0
 		r.buffer = plain
 	case io.EOF:
 		r.eof = true
@@ -229,8 +237,8 @@ func (r *StreamingDecryptReader) openFrame() ([]byte, error) {
 	for chunkLen == 0 {
 		if _, err := io.ReadFull(r.reader, chunkLenBytes); err != nil {
 			if err == io.EOF {
-				if !r.opened {
-					return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "encrypted request ended before its first authenticated frame"))
+				if !r.hasPayload {
+					return nil, NewClientError(protocol.Errorf(protocol.FramingTruncated, "encrypted request ended before any plaintext"))
 				}
 				return nil, io.EOF
 			}
@@ -450,7 +458,7 @@ func (i *Identity) SetupDerivedResponseEncryption(
 		return nil, protocol.Errorf(protocol.InvalidInput, "response context requires an encrypted request")
 	}
 
-	if err := respCtx.decryptor.authenticateFirstFrame(); err != nil {
+	if err := respCtx.decryptor.requireRequestPayload(); err != nil {
 		return nil, err
 	}
 
@@ -501,6 +509,44 @@ type RequestContext struct {
 	RequestEnc []byte       // The encapsulated key we sent
 }
 
+// peekRequestBody keeps bytes read ahead and preserves ownership of the original body.
+// A transport may need Close to unblock a reader while waiting for the first byte.
+func peekRequestBody(req *http.Request) error {
+	body := req.Body
+	closed := make(chan struct{})
+	stop := context.AfterFunc(req.Context(), func() {
+		_ = body.Close()
+		close(closed)
+	})
+	reader := bufio.NewReaderSize(body, 8192)
+	_, err := reader.Peek(1)
+	if !stop() {
+		<-closed
+		return req.Context().Err()
+	}
+	switch err {
+	case nil:
+		req.Body = struct {
+			io.Reader
+			io.Closer
+		}{reader, body}
+	case io.EOF:
+		if err := body.Close(); err != nil {
+			return err
+		}
+		req.Body = http.NoBody
+		req.ContentLength = 0
+		req.GetBody = nil
+		req.TransferEncoding = nil
+		req.Header.Del("Content-Length")
+		req.Header.Del("Transfer-Encoding")
+	default:
+		_ = body.Close()
+		return err
+	}
+	return nil
+}
+
 // EncryptRequestWithContext encrypts the request body TO this identity's public key
 // and returns the HPKE context needed for response decryption.
 //
@@ -508,7 +554,12 @@ type RequestContext struct {
 // passes through unencrypted and the response will also be unencrypted.
 // See SPEC.md Section 6.4 for the security rationale.
 func (i *Identity) EncryptRequestWithContext(req *http.Request) (*RequestContext, error) {
-	// Bodyless requests pass through unencrypted - no HPKE context needed
+	// A non-nil body with ContentLength zero or -1 can be a stream of unknown length.
+	if req.Body != nil && req.Body != http.NoBody && req.ContentLength <= 0 {
+		if err := peekRequestBody(req); err != nil {
+			return nil, err
+		}
+	}
 	if req.Body == nil || req.Body == http.NoBody {
 		return nil, nil
 	}

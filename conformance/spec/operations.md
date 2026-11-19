@@ -24,6 +24,8 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 | `reject_cross_origin` | none (adapter targets an absolute URL on another origin) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `reject_url_credentials` | none (adapter configures a base URL with userinfo) | none; the request MUST NOT be sent | `INVALID_INPUT` |
 | `large_body` (`heavy`) | `size_bytes`, `block_seed`; body is a 1 MiB block with `block[i] = (i + seed) & 0xff` repeated, generated lazily | the oracle's raw SHA-256 of the plaintext; `peak_rss_bytes` reported when measurable and failed above 512 MiB | as `request` |
+| `request_stream` | top-level `request` with `body_hex` supplied by an unknown-length producer | as `request`, including a plaintext exchange on empty input | as `request` |
+| `close_response_early` | top-level `request` against the echo oracle | first response byte, `token_before_close` and `token_after_close` after a partial read | as `request` |
 | `token_before_response` | top-level `request`; the oracle holds its reply 5 s, the adapter reads the session recovery token 500 ms after sending | echoed body; `token_before_response` (ASSERTED, cross-compared) is whether the token was readable while the response was pending | as `request` |
 
 ## Rules
@@ -39,7 +41,7 @@ A fixture file is a JSON array of fixture objects (see `../schema/fixture.schema
 - A complete ciphertext frame shorter than the AEAD tag is an authentication
   failure, not truncated framing: the declared frame was completely received.
 - Partial 1-, 2-, and 3-byte length prefixes at entity-body EOF are
-  `FRAMING_TRUNCATED`. An encrypted request with zero authenticated frames
+  `FRAMING_TRUNCATED`. An encrypted request with no authenticated plaintext bytes
   also yields `FRAMING_TRUNCATED`. A 1xx or 2xx response to an encrypted request
   also requires at least one authenticated frame, which may seal empty plaintext.
 - Frame replay and reordering MUST fail because each frame is bound to its

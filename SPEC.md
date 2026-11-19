@@ -144,7 +144,7 @@ This derivation ensures:
 - Outbound request:
 
   - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3, sealing and emitting chunks as the body is read rather than buffering it. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
-  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale. If a client sends the encapsulated key for an unknown-length stream that finishes empty, it MUST seal one frame of empty plaintext.
+  - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale. For an unknown-length source, decide from the first plaintext bytes or EOF before dispatch. A lower-level sender already committed to encryption MUST abort if the source produces no plaintext.
   - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
 
@@ -164,7 +164,7 @@ This derivation ensures:
   - If a chunk fails to authenticate or the framing is invalid after application processing has begun, the server MUST stop delivering plaintext to the application at that chunk, and the exchange MUST NOT complete successfully: if the response has not started, the server responds with the status in Section 5.4.2; if it has, the server MUST abort the response so the client observes a transport-level failure rather than a complete message (on HTTP/1.1, close the connection without the terminating chunk; on HTTP/2 and HTTP/3, reset the stream).
   - Error status mapping: as defined in Section 5.4.2.
   - If `Ehbp-Encapsulated-Key` is absent, the request is passed through unchanged to the next handler. The response MUST also be plaintext and MUST not have `Ehbp-Response-Nonce` header.
-  - Before invoking the handler or deriving response keys for a request carrying `Ehbp-Encapsulated-Key`, the server MUST authenticate at least one frame. If the body ends first, reject it as a framing violation (400). A sealed frame containing empty plaintext satisfies this requirement.
+  - Before invoking the handler or deriving response keys for a request carrying `Ehbp-Encapsulated-Key`, the server MUST open frames until it obtains at least one byte of plaintext. If the body ends first, reject it as a framing violation (400). Successfully opened empty frames advance the HPKE sequence normally.
   - If the request has no payload body and carries no encapsulated key, pass through unencrypted without setting any EHBP headers. The client knows it sent a bodyless request and will not attempt to decrypt the response. See Section 7.4 for the security rationale.
 - Response handling:
 
@@ -268,7 +268,7 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 | `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |
 | `KEY_CONFIG_MISMATCH` | client | Server returned the Section 5.4.2 key-configuration problem response |
-| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or ciphertext, or before any frame authenticated in an encrypted request or its 1xx or 2xx response |
+| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or ciphertext, or before an encrypted request yielded any plaintext or its 1xx or 2xx response authenticated any frame |
 | `CHUNK_TOO_LARGE` | both | Frame length prefix exceeds the receiver's maximum; rejected before allocation |
 | `AEAD_DECRYPT_FAILED` | both | AEAD authentication failed for a frame |
 | `SEQUENCE_OVERFLOW` | both | Frame sequence number exhausted |
@@ -338,13 +338,13 @@ sequence number zero.
 
 - A session recovery token is equivalent in power to the ability to decrypt a single response. It MUST be treated as sensitive key material.
 - Tokens are scoped to a single request-response exchange. Each encrypted request produces a unique token; tokens cannot be reused across requests.
-- A token is considered consumed once the corresponding exchange has ended, whatever the outcome: the response has been fully decrypted; a new request supersedes it; the response was passed through unauthenticated (Section 5.1); the server returned a key-configuration problem (Section 5.4.2); or the exchange failed with a transport error or a protocol failure (Section 5.4.1), including a body that stopped authenticating mid-stream. Implementations MUST delete all representations of a consumed token immediately, so no live key material outlives the exchange it belongs to. A client that wants to recover a response after an interruption therefore persists the token before sending the request (Section 6), not after a failure. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
+- A token is considered consumed once the corresponding exchange has ended, whatever the outcome: the response has been fully decrypted; the caller closed its body before EOF; a new request supersedes it; the response was passed through unauthenticated (Section 5.1); the server returned a key-configuration problem (Section 5.4.2); or the exchange failed with a transport error or a protocol failure (Section 5.4.1), including a body that stopped authenticating mid-stream. Implementations MUST immediately discard all copies of a consumed token that they hold, so no live key material outlives the exchange it belongs to. A client that wants to recover a response after an interruption therefore persists the token before sending the request (Section 6), not after a failure. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
 
 ## 7. Security Considerations
 
 ### 7.1 Request-Response Binding
 
-EHBP cryptographically binds responses to their corresponding requests. This prevents:
+EHBP derives each response key from its request’s HPKE context. Within that exchange it provides the protections below. Authorization of the caller requires the application binding described in Section 7.4.
 
 - **Response interception:** A MitM cannot decrypt responses without the request's HPKE shared secret
 - **Response forgery:** A MitM cannot create valid encrypted responses
@@ -369,18 +369,11 @@ EHBP cryptographically binds responses to their corresponding requests. This pre
 
 EHBP does not support encrypted responses for requests without a payload body (e.g., GET, HEAD, DELETE, OPTIONS without a body). Such requests pass through unencrypted.
 
-**Security rationale:** The encrypted request body provides implicit authentication of the `Ehbp-Encapsulated-Key` header. When the client encrypts a body using the HPKE sealer derived from the encapsulated key, the server's successful decryption proves that:
+The client sends a bodyless request without an encapsulated key and expects a plaintext response. A server receiving a key must enforce the nonempty plaintext requirement in Section 5.2. Empty responses to encrypted requests follow the separate rule in Section 5.3.
 
-1. The encapsulated key was generated by an entity that knows the corresponding ephemeral private key
-2. The request has not been tampered with
+EHBP uses HPKE Base mode. Opening a request frame establishes that it belongs to the supplied encapsulation. Sender identity and HTTP credentials are outside that guarantee. An intermediary with access to a bearer header can initiate its own exchange using that credential if the application authorizes from the header alone. A predictable placeholder body provides no additional authorization.
 
-Without an encrypted body, an active man-in-the-middle can substitute the encapsulated key with their own, causing the server to derive response keys that the MitM can compute. While the MitM cannot forward a valid encrypted response to the original client (the client would fail decryption), the MitM can read the server's response content.
-
-This vulnerability does not exist for requests with bodies because substituting the encapsulated key would cause request body decryption to fail, alerting the server to the attack.
-
-Applications requiring confidential responses to bodyless requests should either:
-- Include a minimal body (even if semantically empty) to enable EHBP protection
-- Use an alternative mechanism such as TLS with mutual authentication
+Applications that return confidential data must bind authorization to the request, for example by verifying a request-specific proof inside the sealed body, or authenticate the caller through an end-to-end channel. See Section 7.5 and RFC 9180 Section 9.8.
 
 ### 7.5 Limitations
 

@@ -515,6 +515,86 @@
     }
   },
   {
+    "id": "e2e-unknown-length-empty",
+    "description": "Select the exchange mode from the plaintext produced by an unknown-length stream.",
+    "category": "e2e",
+    "operation": "request_stream",
+    "server_scenario": "bodyless_plaintext",
+    "request": {
+      "method": "POST",
+      "path": "/s/bodyless_plaintext",
+      "body_hex": "",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "706c61696e7465787420666f7220626f64796c6573732072657175657374",
+      "response_headers_absent": [
+        "ehbp-response-nonce"
+      ]
+    },
+    "runners": [
+      "go",
+      "kotlin",
+      "python",
+      "rust",
+      "js"
+    ]
+  },
+  {
+    "id": "e2e-unknown-length-payload",
+    "description": "Select the exchange mode from the plaintext produced by an unknown-length stream.",
+    "category": "e2e",
+    "operation": "request_stream",
+    "server_scenario": "echo",
+    "request": {
+      "method": "POST",
+      "path": "/s/echo",
+      "body_hex": "73747265616d6564",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "73747265616d6564",
+      "response_headers_present": [
+        "ehbp-response-nonce"
+      ]
+    },
+    "runners": [
+      "go",
+      "kotlin",
+      "python",
+      "rust",
+      "js"
+    ]
+  },
+  {
+    "id": "e2e-token-consumed-on-early-close",
+    "description": "Read one response byte and close the body. Closing consumes the live recovery token.",
+    "category": "e2e",
+    "operation": "close_response_early",
+    "server_scenario": "echo",
+    "request": {
+      "method": "POST",
+      "path": "/s/echo",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "68",
+      "token_before_close": true,
+      "token_after_close": false
+    },
+    "runners": [
+      "go",
+      "kotlin"
+    ]
+  },
+  {
     "id": "e2e-token-before-response",
     "description": "SPEC 6: the session recovery token is obtainable once the body is sealed and before the request is sent. Timing-based with a 10x margin: the oracle holds its reply for 5 s; the adapter reads the token 500 ms after sending, while the response is pending, then completes the exchange.",
     "category": "e2e",

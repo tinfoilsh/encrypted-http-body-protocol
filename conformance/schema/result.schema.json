@@ -115,6 +115,12 @@
         }
       ]
     },
+    "token_before_close": {
+      "type": "boolean"
+    },
+    "token_after_close": {
+      "type": "boolean"
+    },
     "token_before_response": {
       "type": "boolean",
       "description": "ASSERTED. token_before_response operations: whether the session recovery token was readable while the response was still pending (SPEC 6)."

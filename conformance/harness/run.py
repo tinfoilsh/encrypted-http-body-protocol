@@ -80,7 +80,7 @@ RESULT_FIELDS = {
     "fixture_id", "outcome", "error_code", "status", "response_headers",
     "body_hex", "passthrough", "plaintext_emitted_before_error",
     "bytes_emitted_before_error", "skip_reason", "native_error", "runner",
-    "peak_rss_bytes", "token_before_response",
+    "peak_rss_bytes", "token_before_response", "token_before_close", "token_after_close",
 }
 
 FIXTURE_CATEGORIES = {"crypto", "config", "e2e", "shape", "client-api", "server"}
@@ -89,7 +89,7 @@ FIXTURE_OPERATIONS = {
     "compute_nonce", "token_roundtrip", "parse_config",
     "marshal_config", "request", "discover", "reject_reserved_header",
     "reject_cross_origin", "reject_url_credentials", "decrypt_request",
-    "middleware_request", "large_body", "token_before_response",
+    "middleware_request", "large_body", "token_before_response", "request_stream", "close_response_early",
 }
 
 FIXTURE_FIELDS = {
@@ -100,7 +100,7 @@ FIXTURE_FIELDS = {
 EXPECT_FIELDS = {
     "outcome", "error_code", "status", "body_hex", "passthrough",
     "plaintext_emitted_before_error", "bytes_emitted_before_error",
-    "response_headers_absent", "response_headers_present", "token_before_response",
+    "response_headers_absent", "response_headers_present", "token_before_response", "token_before_close", "token_after_close",
 }
 
 
@@ -113,7 +113,7 @@ def adapter_env():
 ASSERTED = [
     "outcome", "error_code", "status", "body_hex", "passthrough",
     "plaintext_emitted_before_error", "bytes_emitted_before_error",
-    "token_before_response",
+    "token_before_response", "token_before_close", "token_after_close",
 ]
 # Of the normalised response headers only the nonce's presence is compared
 # across languages (names, never values: the nonce is random per exchange).
@@ -226,7 +226,7 @@ def validate_result(result, fixture_id):
     status = result.get("status")
     if status is not None and (type(status) is not int or not 100 <= status <= 599):
         return f"invalid HTTP status {status!r}"
-    for field in ("passthrough", "plaintext_emitted_before_error", "token_before_response"):
+    for field in ("passthrough", "plaintext_emitted_before_error", "token_before_response", "token_before_close", "token_after_close"):
         if field in result and type(result[field]) is not bool:
             return f"{field} is not boolean"
     emitted = result.get("bytes_emitted_before_error")
@@ -436,7 +436,7 @@ def check_expect(result, expect):
         native = str(result.get("native_error") or "")
         if f"{code}:" not in native:
             fails.append(f"UNCODED: native_error does not carry {code}:")
-    for key in ("status", "body_hex", "passthrough", "token_before_response"):
+    for key in ("status", "body_hex", "passthrough", "token_before_response", "token_before_close", "token_after_close"):
         if key in expect and result.get(key) != expect[key]:
             fails.append(f"{key} {result.get(key)!r} != {expect[key]!r}")
     for name in expect.get("response_headers_absent", []):
