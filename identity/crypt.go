@@ -124,6 +124,7 @@ func (r *StreamingEncryptReader) Read(p []byte) (n int, err error) {
 		}
 		return 0, io.EOF
 	}
+	r.sealed = true
 
 	// Encrypt chunk
 	encrypted, err := r.sender.Seal(nil, plaintext[:bytesRead])

@@ -161,6 +161,54 @@
     }
   },
   {
+    "id": "parse-config-key-id-nonzero",
+    "description": "key_id is opaque to the client; a non-zero value is accepted (SPEC 3.2 pins nothing about it).",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "0700200707070707070707070707070707070707070707070707070707070707070707000400010002"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": "0707070707070707070707070707070707070707070707070707070707070707"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-short-unsupported-kem",
+    "description": "Only the key id and a foreign KEM id are present: the KEM is checked as soon as it is readable, so this is UNSUPPORTED_SUITE rather than a truncation.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "000010"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "UNSUPPORTED_SUITE"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
+    "id": "parse-config-suites-len-5-complete",
+    "description": "Cipher suites length is 5 and five bytes follow: a structural error (not a multiple of 4), INVALID_KEY_CONFIG rather than a suite count problem.",
+    "category": "config",
+    "operation": "parse_config",
+    "inputs": {
+      "config": "000020070707070707070707070707070707070707070707070707070707070707070700050001000200"
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_KEY_CONFIG"
+    },
+    "allowed_skips": {
+      "swift": "swift-client-has-no-public-key-accessor-or-config-marshal"
+    }
+  },
+  {
     "id": "parse-config-unsupported-kem",
     "description": "KEM id is P-256, not X25519.",
     "category": "config",

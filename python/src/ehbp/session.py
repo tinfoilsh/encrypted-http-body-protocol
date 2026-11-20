@@ -18,6 +18,7 @@ from .protocol import (
     MAX_RESPONSE_CHUNK_LENGTH,
     REQUEST_ENC_LENGTH,
     RESPONSE_NONCE_LENGTH,
+    decode_hex,
 )
 
 _EXPORTED_SECRET_KEY = "exportedSecret"
@@ -73,8 +74,8 @@ class SessionRecoveryToken:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> SessionRecoveryToken:
         try:
-            exported_secret = bytes.fromhex(data[_EXPORTED_SECRET_KEY])
-            request_enc = bytes.fromhex(data[_REQUEST_ENC_KEY])
+            exported_secret = decode_hex(data[_EXPORTED_SECRET_KEY])
+            request_enc = decode_hex(data[_REQUEST_ENC_KEY])
         except (KeyError, TypeError, ValueError) as err:
             raise InvalidTokenError(f"invalid session recovery token: {err}") from err
         return cls(exported_secret, request_enc)

@@ -62,6 +62,7 @@ class Result(val fixtureId: String) {
     var tokenEarly: Boolean? = null
     var tokenBeforeClose: Boolean? = null
     var tokenAfterClose: Boolean? = null
+    var tokenAfter: Boolean? = null
     var peakRss: Long? = null
 
     fun toJson() = buildJsonObject {
@@ -79,6 +80,7 @@ class Result(val fixtureId: String) {
         tokenBeforeClose?.let { put("token_before_close", it) }
         tokenAfterClose?.let { put("token_after_close", it) }
         tokenEarly?.let { put("token_before_response", it) }
+        tokenAfter?.let { put("token_after_exchange", it) }
         peakRss?.let { put("peak_rss_bytes", it) }
     }.toString()
 }
@@ -119,9 +121,10 @@ fun run(fx: JsonObject, r: Result) {
         "request", "request_stream", "close_response_early" -> doRequest(fx, r)
         // The constructor performs discovery with content-type/status checks.
         "discover" -> newTransport(discoverTarget(fx))
-        "reject_reserved_header", "reject_cross_origin", "reject_url_credentials" -> hardening(op)
+        "reject_reserved_header", "reject_cross_origin", "reject_url_credentials" -> hardening(fx)
         "large_body" -> largeBody(fx, r)
         "token_before_response" -> tokenBeforeResponse(fx, r)
+        "token_after_exchange" -> tokenAfterExchange(fx, r)
         else -> throw IllegalArgumentException("unknown operation \"$op\"")
     }
 }
@@ -131,7 +134,8 @@ fun run(fx: JsonObject, r: Result) {
  * under test. A local recorder answers a plaintext 502 if the request escapes
  * validation; that successful pass-through is the divergent result.
  */
-fun hardening(op: String) {
+fun hardening(fx: JsonObject) {
+    val op = fx.str("operation")
     val server = com.sun.net.httpserver.HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.createContext("/") { ex ->
         ex.requestBody.readBytes()
@@ -150,7 +154,10 @@ fun hardening(op: String) {
             else -> "$base/probe"
         }
         val req = Request.Builder().url(target).post("x".toByteArray().toRequestBody())
-        if (op == "reject_reserved_header") req.header(ResponseNonceHeader, "0".repeat(64))
+        if (op == "reject_reserved_header") {
+            val name = (fx["inputs"] as? JsonObject)?.get("header")?.jsonPrimitive?.contentOrNull ?: ResponseNonceHeader
+            req.header(name, if (name.equals("Host", true)) "attacker.invalid" else "0".repeat(64))
+        }
         tr.roundTrip(req.build()).close()
     } finally {
         server.stop(0)
@@ -221,10 +228,32 @@ fun peakRssBytes(): Long? = runCatching {
     out.toLongOrNull()?.times(1024)
 }.getOrNull()
 
-fun discoverTarget(fx: JsonObject): String = when (fx.strIn("target")) {
-    "bad_ct" -> System.getenv("ORACLE_BAD_CT_URL")
-    "non200" -> System.getenv("ORACLE_NON200_URL")
-    else -> System.getenv("ORACLE_URL")
+/** discoverTarget maps a fixture target to the oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else). */
+fun discoverTarget(fx: JsonObject): String =
+    fx.strIn("target").takeIf { it != "ORACLE_URL" }?.let { System.getenv("ORACLE_${it.uppercase()}_URL") } ?: System.getenv("ORACLE_URL")
+
+/**
+ * tokenAfterExchange runs the fixture request, lets the exchange end (fully read
+ * or failed), then
+ * reports whether the public token accessor still returns one (SPEC 6.3).
+ */
+fun tokenAfterExchange(fx: JsonObject, r: Result) {
+    val serverURL = System.getenv("ORACLE_URL")
+    val tr = newTransport(serverURL)
+    val request = fx.getValue("request").jsonObject
+    val bodyHex = request["body_hex"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
+    val req = Request.Builder().url(serverURL + request.str("path")).method(request.str("method"), bodyHex?.let { hex(it).toRequestBody() }).build()
+    try {
+        val resp = tr.roundTrip(req)
+        r.status = resp.code
+        r.headers = subsetHeaders(resp.headers)
+        val plain = readTracked(resp.body!!.byteStream(), r)
+        resp.close()
+        if (resp.headers(ResponseNonceHeader).isEmpty() && resp.code !in 200..299) r.passthrough = true
+        r.setBody(plain)
+    } finally {
+        r.tokenAfter = tr.getSessionRecoveryToken() != null
+    }
 }
 
 fun decryptResponse(fx: JsonObject, r: Result) {
@@ -350,9 +379,8 @@ fun JsonObject.strIn(key: String): String = (this["inputs"] as? JsonObject)?.str
 fun JsonObject.hexIn(key: String): ByteArray = hex(strIn(key))
 fun hex(s: String): ByteArray {
     if (s.length % 2 != 0) fatal("bad hex: odd length")
-    return ByteArray(s.length / 2) { i ->
-        val v = s.substring(2 * i, 2 * i + 2).toIntOrNull(16) ?: fatal("bad hex: ${s.substring(2 * i, 2 * i + 2)}")
-        v.toByte()
-    }
+    // toInt(16) alone would accept signed pairs like "-1" or "+f".
+    if (!s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) fatal("bad hex: non-hex digit in \"$s\"")
+    return ByteArray(s.length / 2) { i -> s.substring(2 * i, 2 * i + 2).toInt(16).toByte() }
 }
 fun fatal(msg: String): Nothing { System.err.println(msg); exitProcess(2) }

@@ -5,6 +5,7 @@ import {
   Transport,
   createTransport,
   InvalidInputError,
+  InvalidKeyConfigError,
   KeyConfigMismatchError,
   FramingTruncatedError,
   MissingResponseNonceError,
@@ -363,6 +364,12 @@ describe('Transport', () => {
         }),
         InvalidInputError,
       );
+      for (const name of [PROTOCOL.RESPONSE_NONCE_HEADER, 'Host']) {
+        await assert.rejects(
+          transport.request('https://server.test/secure', { method: 'POST', body: 'hello', headers: { [name]: 'x' } }),
+          InvalidInputError,
+        );
+      }
       // Rejection happens before the body is read.
       let bodyRead = false;
       const body = new ReadableStream<Uint8Array>({ pull() { bodyRead = true; } }, { highWaterMark: 0 });
@@ -709,7 +716,7 @@ describe('Transport', () => {
     }
   });
 
-  it('should retain the recovery token when the consumer cancels before EOF', async () => {
+  it('should clear the recovery token when the consumer cancels before EOF', async () => {
     const serverIdentity = await Identity.generate();
     const transport = new Transport(serverIdentity, 'server.test');
 
@@ -730,11 +737,12 @@ describe('Transport', () => {
 
     try {
       const response = await transport.post('https://server.test/secure', 'hello');
-      const token = transport.getSessionRecoveryToken();
+      assert(transport.getSessionRecoveryToken());
 
       await response.body!.cancel('consumer stopped');
 
-      assert.deepStrictEqual(transport.getSessionRecoveryToken(), token);
+      // SPEC 6.3: abandoning the body ends the exchange and consumes the token.
+      assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -789,6 +797,20 @@ describe('Transport', () => {
       await second.body!.cancel('test complete');
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should treat an empty response nonce as invalid on any status', async () => {
+    const transport = new Transport(serverIdentity, 'server.test');
+    const originalFetch = globalThis.fetch;
+    for (const status of [200, 502]) {
+      globalThis.fetch = (async (): Promise<Response> =>
+        new Response('x', { status, headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: '' } })) as typeof fetch;
+      try {
+        await assert.rejects(transport.post('https://server.test/secure', 'hello'), /INVALID_RESPONSE_NONCE/);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     }
   });
 
@@ -1468,6 +1490,30 @@ describe('Transport', () => {
     try {
       await createTransport('https://server.test', { credentials: 'include' });
       assert.strictEqual(capturedInit?.credentials, 'include');
+      // SPEC 3.1: discovery never follows redirects.
+      assert.strictEqual(capturedInit?.redirect, 'manual');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('should accept a key config only with status 200 and the media type, parameters ignored', async () => {
+    const serverIdentity = await Identity.generate();
+    const config = await serverIdentity.marshalConfig();
+    const originalFetch = globalThis.fetch;
+    const serve = (status: number, contentType: string) => {
+      globalThis.fetch = (async (): Promise<Response> =>
+        new Response(toArrayBuffer(config), { status, headers: { 'content-type': contentType } })) as typeof fetch;
+    };
+    try {
+      serve(200, 'Application/OHTTP-Keys; v=1');
+      await createTransport('https://server.test');
+      serve(203, PROTOCOL.KEYS_MEDIA_TYPE);
+      await assert.rejects(createTransport('https://server.test'), InvalidKeyConfigError);
+      serve(302, PROTOCOL.KEYS_MEDIA_TYPE);
+      await assert.rejects(createTransport('https://server.test'), InvalidKeyConfigError);
+      serve(200, 'text/plain');
+      await assert.rejects(createTransport('https://server.test'), InvalidKeyConfigError);
     } finally {
       globalThis.fetch = originalFetch;
     }
