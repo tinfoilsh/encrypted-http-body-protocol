@@ -88,14 +88,16 @@ export class Transport {
     // Fetch server public key
     const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
     const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    const response = await send(keysURL.toString(), init);
+    // SPEC 3.1: never follow redirects; a 3xx (or an opaqueredirect in
+    // browsers) then fails the status check below.
+    const response = await send(keysURL.toString(), { ...init, redirect: 'manual' });
 
-    if (!response.ok) {
+    if (response.status !== 200) {
       throw new InvalidKeyConfigError(`failed to get server public key: status ${response.status}`);
     }
 
     const contentType = response.headers.get('content-type');
-    if (contentType !== PROTOCOL.KEYS_MEDIA_TYPE) {
+    if (!Transport.isMediaType(contentType, PROTOCOL.KEYS_MEDIA_TYPE)) {
       throw new InvalidKeyConfigError(`invalid key content type: ${contentType}`);
     }
 
@@ -105,12 +107,13 @@ export class Transport {
     return new Transport(serverIdentity, url.origin, options);
   }
 
+  /** Media type compared case-insensitively, parameters ignored. */
+  private static isMediaType(contentType: string | null, want: string): boolean {
+    return (contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? '') === want;
+  }
+
   private static isProblemJSONContentType(contentType: string | null): boolean {
-    if (!contentType) {
-      return false;
-    }
-    const mediaType = contentType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-    return mediaType === PROTOCOL.PROBLEM_JSON_MEDIA_TYPE;
+    return Transport.isMediaType(contentType, PROTOCOL.PROBLEM_JSON_MEDIA_TYPE);
   }
 
   private static async checkKeyConfigMismatch(response: Response): Promise<void> {

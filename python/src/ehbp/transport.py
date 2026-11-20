@@ -21,8 +21,8 @@ import httpx
 
 from ._http import (
     DEFAULT_MAX_RESPONSE_BYTES,
-    raise_for_key_config_mismatch,
     is_success,
+    raise_for_key_config_mismatch,
     response_nonce_for_status,
 )
 from .derive import FrameDecryptor, derive_response_keys
@@ -112,8 +112,12 @@ class _DecryptingByteStream(httpx.SyncByteStream):
 
     def __iter__(self) -> Iterator[bytes]:
         try:
-            for chunk in cast(httpx.SyncByteStream, self._response.stream):
-                yield from self._decryptor.push(chunk)
+            try:
+                for chunk in cast(httpx.SyncByteStream, self._response.stream):
+                    yield from self._decryptor.push(chunk)
+            except httpx.TransportError:
+                self._decryptor.finish()  # SPEC 5.5: failure mid-frame is FRAMING_TRUNCATED
+                raise
             self._decryptor.finish()
         finally:
             self._response.close()
@@ -129,9 +133,13 @@ class _AsyncDecryptingByteStream(httpx.AsyncByteStream):
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         try:
-            async for chunk in cast(httpx.AsyncByteStream, self._response.stream):
-                for plaintext in self._decryptor.push(chunk):
-                    yield plaintext
+            try:
+                async for chunk in cast(httpx.AsyncByteStream, self._response.stream):
+                    for plaintext in self._decryptor.push(chunk):
+                        yield plaintext
+            except httpx.TransportError:
+                self._decryptor.finish()  # SPEC 5.5: failure mid-frame is FRAMING_TRUNCATED
+                raise
             self._decryptor.finish()
         finally:
             await self._response.aclose()
