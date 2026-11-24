@@ -49,13 +49,22 @@ from .session import SessionRecoveryToken
 
 _RESERVED_REQUEST_HEADERS = frozenset(
     {
-        "content-length",
-        "transfer-encoding",
         "host",
         ENCAPSULATED_KEY_HEADER.lower(),
         RESPONSE_NONCE_HEADER.lower(),
     }
 )
+# Body framing is the implementation's; caller values are dropped (SPEC 5.1).
+_FRAMING_HEADERS = ("content-length", "transfer-encoding")
+
+
+def _decrypted_headers(headers: httpx.Headers) -> httpx.Headers:
+    """Response headers without the framing that described the ciphertext."""
+    stripped = httpx.Headers(headers)
+    for name in _FRAMING_HEADERS:
+        if name in stripped:
+            del stripped[name]
+    return stripped
 
 # bytes-like and str are buffered; an iterable of bytes or a binary file is
 # stream-encrypted frame by frame without ever being held in memory.
@@ -253,7 +262,7 @@ class Client:
                 )
         finally:
             self._clear_token_if_current(generation)
-        return Response(status, response_headers, decrypted)
+        return Response(status, _decrypted_headers(response_headers), decrypted)
 
     def get(
         self,
@@ -356,7 +365,7 @@ class Client:
                     return
                 yield StreamingResponse(
                     status,
-                    response_headers,
+                    _decrypted_headers(response_headers),
                     self._decrypt_stream(resp, token, nonce, generation, status),
                 )
         finally:
@@ -411,6 +420,9 @@ class Client:
                 raise InvalidInputError(
                     f"reserved request header cannot be set by callers: {name}"
                 )
+        for name in _FRAMING_HEADERS:
+            if name in prepared:
+                del prepared[name]
         return prepared
 
     def _read_body_capped(self, source: Iterable[bytes]) -> bytes:

@@ -200,6 +200,25 @@ def test_encrypted_body_uses_chunked_transfer_without_content_length(server: Moc
     assert headers.get("transfer-encoding") == "chunked"
 
 
+def test_caller_framing_headers_are_dropped(server: MockServer):
+    client = server.make_client()
+    client.post("/v1/echo", body=b"payload", headers={"Content-Length": "1", "Transfer-Encoding": "identity"})
+    headers = server.last_request.headers
+    assert "content-length" not in headers
+    assert headers.get("transfer-encoding") == "chunked"
+
+
+def test_decrypted_response_drops_ciphertext_framing_headers(server: MockServer):
+    client = server.make_client()
+    response = client.post("/v1/echo", body=b"payload")
+    assert "content-length" not in response.headers
+    assert "transfer-encoding" not in response.headers
+    with client.stream("POST", "/v1/echo", body=b"payload") as streamed:
+        assert "content-length" not in streamed.headers
+        assert "transfer-encoding" not in streamed.headers
+        b"".join(streamed.iter_bytes())
+
+
 def test_request_to_foreign_origin_is_rejected(server: MockServer):
     client = server.make_client()
     with pytest.raises(InvalidInputError):

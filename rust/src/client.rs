@@ -551,6 +551,9 @@ impl Client {
         let plaintext_body = body.unwrap_or_default();
         let generation = self.begin_request();
         let encrypted = self.identity.encrypt_request_body(&plaintext_body)?;
+        // Body framing is the implementation's; caller values are dropped (SPEC 5.1).
+        headers.remove(CONTENT_LENGTH);
+        headers.remove(TRANSFER_ENCODING);
 
         let mut request = self.http_client.request(method, url);
         let token = if let Some(encrypted) = encrypted {
@@ -834,9 +837,7 @@ fn header_name(name: &str) -> Result<HeaderName> {
 }
 
 fn is_reserved_request_header(name: &HeaderName) -> bool {
-    name == CONTENT_LENGTH
-        || name == TRANSFER_ENCODING
-        || name == HOST
+    name == HOST
         || name.as_str().eq_ignore_ascii_case(ENCAPSULATED_KEY_HEADER)
         || name.as_str().eq_ignore_ascii_case(RESPONSE_NONCE_HEADER)
 }
@@ -2428,18 +2429,24 @@ mod tests {
         assert!(client
             .post("/v1/chat")
             .unwrap()
-            .header(CONTENT_LENGTH, "1")
-            .is_err());
-        assert!(client
-            .post("/v1/chat")
-            .unwrap()
-            .header(TRANSFER_ENCODING, "chunked")
-            .is_err());
-        assert!(client
-            .post("/v1/chat")
-            .unwrap()
             .header(HOST, "evil")
             .is_err());
+    }
+
+    #[test]
+    fn caller_framing_headers_are_dropped() {
+        let client = dummy_client();
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("1"));
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        for body in [Some(Bytes::from_static(b"hi")), None] {
+            let prepared = client
+                .prepare_request_builder(Method::POST, client.base_url.join("/v1/chat").unwrap(), headers.clone(), body)
+                .unwrap();
+            let request = prepared.request.build().unwrap();
+            assert!(request.headers().get(CONTENT_LENGTH).is_none());
+            assert!(request.headers().get(TRANSFER_ENCODING).is_none());
+        }
     }
 
     #[test]

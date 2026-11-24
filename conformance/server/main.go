@@ -228,6 +228,12 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			// A 2xx with no nonce and no body: still MISSING_RESPONSE_NONCE (SPEC 5.1).
 			w.WriteHeader(http.StatusNoContent)
 			return
+		case "invalid_nonce_204":
+			// A 204 with a 16-byte nonce: header validation precedes the
+			// bodyless-status rule (SPEC 5.1), so INVALID_RESPONSE_NONCE.
+			w.Header().Set(protocol.ResponseNonceHeader, hex.EncodeToString(make([]byte, 16)))
+			w.WriteHeader(http.StatusNoContent)
+			return
 		case "problem_422_other_type":
 			// An application-level problem document: not a key-config problem.
 			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)

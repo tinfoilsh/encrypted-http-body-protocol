@@ -552,6 +552,84 @@
     }
   },
   {
+    "id": "e2e-invalid-nonce-204",
+    "description": "A 204 with a 16-byte nonce: the header is validated before the bodyless-status rule (SPEC 5.1).",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "invalid_nonce_204",
+    "request": {
+      "method": "POST",
+      "path": "/s/invalid_nonce_204",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    }
+  },
+  {
+    "id": "e2e-bodyless-keyconfig-422",
+    "description": "A key-config problem answering a bodyless request is plaintext like any other response to it (SPEC 5.4.2, 7.4): returned unchanged, never KEY_CONFIG_MISMATCH.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "key_config_mismatch_422",
+    "request": {
+      "method": "GET",
+      "path": "/s/key_config_mismatch_422",
+      "body_hex": null,
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 422,
+      "passthrough": true,
+      "body_hex": "7b227469746c65223a227374616c6520636c69656e74206b657920636f6e66696775726174696f6e222c2274797065223a2275726e3a696574663a706172616d733a656862703a6572726f723a6b65792d636f6e666967227d0a"
+    }
+  },
+  {
+    "id": "e2e-caller-framing-headers",
+    "description": "Caller-supplied Content-Length and Transfer-Encoding are dropped on an encrypted request; the implementation frames the body itself (SPEC 5.1).",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "echo",
+    "request": {
+      "method": "POST",
+      "path": "/s/echo",
+      "body_hex": "68656c6c6f",
+      "headers": {
+        "Content-Length": "1",
+        "Transfer-Encoding": "chunked"
+      }
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "68656c6c6f"
+    }
+  },
+  {
+    "id": "e2e-caller-framing-headers-bodyless",
+    "description": "Caller-supplied framing headers are dropped on a bodyless request too (SPEC 5.1).",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "bodyless_plaintext",
+    "request": {
+      "method": "GET",
+      "path": "/s/bodyless_plaintext",
+      "body_hex": null,
+      "headers": {
+        "Content-Length": "5",
+        "Transfer-Encoding": "chunked"
+      }
+    },
+    "expect": {
+      "outcome": "ok",
+      "status": 200,
+      "body_hex": "706c61696e7465787420666f7220626f64796c6573732072657175657374"
+    }
+  },
+  {
     "id": "e2e-empty-nonce-200",
     "description": "A nonce header present with an empty value is malformed, not absent (SPEC 4.2).",
     "category": "e2e",

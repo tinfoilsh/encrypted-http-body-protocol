@@ -16,14 +16,14 @@ const MAX_PROBLEM_DETAILS_BYTES = 64 * 1024;
 /**
  * HTTP transport for EHBP
  */
-/** Headers the library owns; callers cannot set them (mirrors the Python client). */
+/** Headers the protocol or the validated origin owns; callers cannot set them. */
 const RESERVED_REQUEST_HEADERS = [
-  'content-length',
-  'transfer-encoding',
   'host',
   PROTOCOL.ENCAPSULATED_KEY_HEADER,
   PROTOCOL.RESPONSE_NONCE_HEADER,
 ];
+/** Body framing is the implementation's; caller values are dropped (SPEC 5.1). */
+const FRAMING_HEADERS = ['content-length', 'transfer-encoding'];
 
 /** Network transport used after request encryption and before response decryption. */
 export interface TransportOptions {
@@ -275,6 +275,9 @@ export class Transport {
         throw new InvalidInputError(`reserved request header cannot be set by callers: ${name}`);
       }
     }
+    // Browsers drop these before we see them; do the same everywhere else.
+    const outgoingHeaders = new Headers(normalizedRequest.headers);
+    for (const name of FRAMING_HEADERS) outgoingHeaders.delete(name);
 
     // Hand the body over as a stream where the runtime exposes one so large
     // uploads are sealed frame by frame; Firefox does not expose Request.body
@@ -292,7 +295,7 @@ export class Transport {
     const request = new Request(url.toString(), {
       ...forwardedRequestInit(normalizedRequest),
       method: normalizedRequest.method,
-      headers: normalizedRequest.headers,
+      headers: outgoingHeaders,
       body: requestBody,
       duplex: 'half',
     } as RequestInit);

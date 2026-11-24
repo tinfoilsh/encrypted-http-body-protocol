@@ -113,7 +113,8 @@ public final class EHBPClient: @unchecked Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
         }
-        if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
+        // A response to a bodyless request is plaintext whatever it says (SPEC 7.4).
+        if requestContext != nil, let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
             throw mismatch
         }
 
@@ -124,7 +125,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (data, httpResponse)
         }
 
-        let responseNonce = try parseResponseNonce(responseNonceHex)
+        let responseNonce = try EHBPClient.validatedResponseNonce(responseNonceHex, httpResponse)
 
         let decryptedData = try EHBP.decryptResponseBody(
             token: token!,
@@ -208,7 +209,7 @@ public final class EHBPClient: @unchecked Sendable {
         // unauthenticated: cancel the transfer and consume the token.
         let responseNonceHex: String?
         do {
-            if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
+            if requestContext != nil, EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
                 // Read the (small) problem body so it can be classified; anything
                 // over the limit is not a problem document and passes through.
                 while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
@@ -252,7 +253,7 @@ public final class EHBPClient: @unchecked Sendable {
         var responseDecryptor: ResponseDecryptor
         do {
             responseDecryptor = try token!.makeResponseDecryptor(
-                responseNonce: try parseResponseNonce(responseNonceHex)
+                responseNonce: try EHBPClient.validatedResponseNonce(responseNonceHex, httpResponse)
             )
         } catch {
             asyncBytes.task.cancel()
@@ -307,19 +308,20 @@ public final class EHBPClient: @unchecked Sendable {
         return url
     }
 
-    /// Headers the library or the transport owns; callers may not set them.
-    /// Same list as the Python client.
+    /// Headers the protocol or the validated origin owns; callers may not set them.
     static let reservedRequestHeaders: Set<String> = [
-        "content-length", "transfer-encoding", "host",
+        "host",
         EHBPProtocol.encapsulatedKeyHeader.lowercased(),
         EHBPProtocol.responseNonceHeader.lowercased(),
     ]
+    /// Body framing is the implementation's; caller values are dropped (SPEC 5.1).
+    static let framingHeaders: Set<String> = ["content-length", "transfer-encoding"]
 
     static func callerHeaders(_ headers: [String: String]) throws -> [String: String] {
         for name in headers.keys where reservedRequestHeaders.contains(name.lowercased()) {
             throw EHBPError(.invalidInput, "reserved request header cannot be set by callers: \(name)")
         }
-        return headers
+        return headers.filter { !framingHeaders.contains($0.key.lowercased()) }
     }
 
     /// Everything that happens before the request leaves the client, shared by
@@ -491,6 +493,17 @@ public final class EHBPClient: @unchecked Sendable {
         response.statusCode < 400
     }
 
+    /// The decoded nonce. Header validation precedes the bodyless-status rule
+    /// (SPEC 5.1): 204 and 205 cannot carry a chunk, so nothing could
+    /// authenticate them.
+    private static func validatedResponseNonce(_ hex: String, _ response: HTTPURLResponse) throws -> Data {
+        let nonce = try parseResponseNonce(hex)
+        guard !bodylessSuccessStatuses.contains(response.statusCode) else {
+            throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
+        }
+        return nonce
+    }
+
     private static func responseNonceHex(
         from response: HTTPURLResponse,
         requestWasEncrypted: Bool
@@ -503,10 +516,6 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError(.unexpectedRedirect, "status \(response.statusCode) in response to an encrypted request")
         }
         if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
-            // 204 and 205 cannot carry a body, so nothing could authenticate them.
-            guard !bodylessSuccessStatuses.contains(response.statusCode) else {
-                throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
-            }
             return nonce
         }
         // Only an error status may pass through without a nonce (SPEC 5.3).

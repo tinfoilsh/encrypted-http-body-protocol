@@ -624,12 +624,12 @@ def main() -> None:
         }
     })
 
-    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None, runners=None, operation="request"):
+    def e2e(fid, scenario, expect, desc, body="hello", method="POST", browser=None, runners=None, operation="request", headers=None):
         fx = {
             "id": fid, "description": desc, "category": "e2e", "operation": operation,
             "server_scenario": scenario,
             "request": {"method": method, "path": f"/s/{scenario}",
-                        "body_hex": body.encode().hex() if body is not None else None, "headers": {}},
+                        "body_hex": body.encode().hex() if body is not None else None, "headers": headers or {}},
             "expect": expect,
         }
         if browser is not None:
@@ -752,6 +752,24 @@ def main() -> None:
             {"outcome": "error", "error_code": "MISSING_RESPONSE_NONCE",
              "plaintext_emitted_before_error": False, "bytes_emitted_before_error": 0},
             "A 204 with no nonce is still a 2xx to an encrypted request: fail closed, even with nothing to decrypt."),
+        e2e("e2e-invalid-nonce-204", "invalid_nonce_204",
+            {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
+            "A 204 with a 16-byte nonce: the header is validated before the bodyless-status rule (SPEC 5.1)."),
+        e2e("e2e-bodyless-keyconfig-422", "key_config_mismatch_422",
+            {"outcome": "ok", "status": 422, "passthrough": True,
+             # The oracle encodes a Go map, so keys are sorted.
+             "body_hex": b'{"title":"stale client key configuration","type":"urn:ietf:params:ehbp:error:key-config"}\n'.hex()},
+            "A key-config problem answering a bodyless request is plaintext like any other response to it (SPEC 5.4.2, 7.4): returned unchanged, never KEY_CONFIG_MISMATCH.",
+            body=None, method="GET"),
+        e2e("e2e-caller-framing-headers", "echo",
+            {"outcome": "ok", "status": 200, "body_hex": b"hello".hex()},
+            "Caller-supplied Content-Length and Transfer-Encoding are dropped on an encrypted request; the implementation frames the body itself (SPEC 5.1).",
+            headers={"Content-Length": "1", "Transfer-Encoding": "chunked"}),
+        e2e("e2e-caller-framing-headers-bodyless", "bodyless_plaintext",
+            {"outcome": "ok", "status": 200,
+             "body_hex": b"plaintext for bodyless request".hex()},
+            "Caller-supplied framing headers are dropped on a bodyless request too (SPEC 5.1).",
+            body=None, method="GET", headers={"Content-Length": "5", "Transfer-Encoding": "chunked"}),
         e2e("e2e-empty-nonce-200", "empty_nonce_200",
             {"outcome": "error", "error_code": "INVALID_RESPONSE_NONCE"},
             "A nonce header present with an empty value is malformed, not absent (SPEC 4.2)."),
