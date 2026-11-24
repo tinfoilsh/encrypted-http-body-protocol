@@ -85,12 +85,17 @@ func DecryptResponseWithToken(resp *http.Response, token *SessionRecoveryToken) 
 		return protocol.Errorf(protocol.InvalidInput, "session recovery token is nil")
 	}
 
-	if len(resp.Header.Values(protocol.ResponseNonceHeader)) > 1 {
+	nonces := resp.Header.Values(protocol.ResponseNonceHeader)
+	if len(nonces) > 1 {
 		return protocol.Errorf(protocol.DuplicateResponseNonce, "duplicate %s header", protocol.ResponseNonceHeader)
 	}
-	responseNonceHex := resp.Header.Get(protocol.ResponseNonceHeader)
-	if responseNonceHex == "" {
+	if len(nonces) == 0 {
 		return protocol.Errorf(protocol.MissingResponseNonce, "missing %s header", protocol.ResponseNonceHeader)
+	}
+	responseNonceHex := nonces[0]
+	if responseNonceHex == "" {
+		// Present but empty is malformed, not absent (SPEC 4.2).
+		return protocol.Errorf(protocol.InvalidResponseNonce, "empty %s header", protocol.ResponseNonceHeader)
 	}
 
 	responseNonce, err := hex.DecodeString(responseNonceHex)

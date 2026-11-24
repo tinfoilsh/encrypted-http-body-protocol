@@ -26,10 +26,15 @@ from ._http import (
     DEFAULT_TIMEOUT,
 )
 from ._http import (
+    is_success as _is_success,
+)
+from ._http import (
+    media_type as _media_type,
+)
+from ._http import (
     raise_for_key_config_mismatch as _raise_for_key_config_mismatch,
 )
 from ._http import (
-    is_success as _is_success,
     response_nonce_for_status as _response_nonce_for_status,
 )
 from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
@@ -44,13 +49,22 @@ from .session import SessionRecoveryToken
 
 _RESERVED_REQUEST_HEADERS = frozenset(
     {
-        "content-length",
-        "transfer-encoding",
         "host",
         ENCAPSULATED_KEY_HEADER.lower(),
         RESPONSE_NONCE_HEADER.lower(),
     }
 )
+# Body framing is the implementation's; caller values are dropped (SPEC 5.1).
+_FRAMING_HEADERS = ("content-length", "transfer-encoding")
+
+
+def _decrypted_headers(headers: httpx.Headers) -> httpx.Headers:
+    """Response headers without the framing that described the ciphertext."""
+    stripped = httpx.Headers(headers)
+    for name in _FRAMING_HEADERS:
+        if name in stripped:
+            del stripped[name]
+    return stripped
 
 # bytes-like and str are buffered; an iterable of bytes or a binary file is
 # stream-encrypted frame by frame without ever being held in memory.
@@ -115,14 +129,17 @@ class Client:
         """Fetch the server key configuration and build a client."""
         base = _normalize_base_url(base_url)
         http = http_client or _default_http_client()
+        # SPEC 3.1: status 200 only (a redirect is not followed and is an error),
+        # media type compared case-insensitively ignoring parameters.
         response = http.get(base.join(KEYS_PATH), follow_redirects=False)
-        if response.status_code // 100 != 2:
+        if response.status_code != 200:
             raise InvalidKeyConfigError(
                 f"server returned status {response.status_code} while fetching key configuration"
             )
-        content_type = response.headers.get("content-type", "")
-        if content_type != KEYS_MEDIA_TYPE:
-            raise InvalidKeyConfigError(f"server returned invalid key content type: {content_type}")
+        if _media_type(response.headers) != KEYS_MEDIA_TYPE:
+            raise InvalidKeyConfigError(
+                f"server returned invalid key content type: {response.headers.get('content-type')}"
+            )
         identity = ServerIdentity.unmarshal_public_config(response.content)
         return cls(
             base,
@@ -218,7 +235,7 @@ class Client:
                 follow_redirects=False,
                 timeout=timeout,
             ) as resp:
-                raw = self._read_body_capped(resp)
+                raw = self._read_body_capped(resp.iter_bytes())
                 return Response(resp.status_code, resp.headers, raw)
 
         request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
@@ -235,20 +252,17 @@ class Client:
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers
-                raw = self._read_body_capped(resp)
-            _raise_for_key_config_mismatch(status, response_headers, raw)
-            response_nonce = _response_nonce_for_status(status, response_headers)
-            if response_nonce is None:
-                self._clear_token_if_current(generation)
-                return Response(status, response_headers, raw)
-            decrypted = token.decrypt_response_body(
-                response_nonce, raw, require_frame=_is_success(status)
-            )
-        except BaseException:
+                nonce = _response_nonce_for_status(status, response_headers)
+                if nonce is None:
+                    raw = self._read_body_capped(resp.iter_bytes())
+                    _raise_for_key_config_mismatch(status, response_headers, raw)
+                    return Response(status, response_headers, raw)
+                decrypted = self._read_body_capped(
+                    self._decrypt_stream(resp, token, nonce, generation, status)
+                )
+        finally:
             self._clear_token_if_current(generation)
-            raise
-        self._clear_token_if_current(generation)
-        return Response(status, response_headers, decrypted)
+        return Response(status, _decrypted_headers(response_headers), decrypted)
 
     def get(
         self,
@@ -342,27 +356,22 @@ class Client:
             ) as resp:
                 status = resp.status_code
                 response_headers = resp.headers
-                if RESPONSE_NONCE_HEADER not in response_headers:
-                    raw = self._read_body_capped(resp)
+                nonce = _response_nonce_for_status(status, response_headers)
+                if nonce is None:
+                    raw = self._read_body_capped(resp.iter_bytes())
                     self._clear_token_if_current(generation)
                     _raise_for_key_config_mismatch(status, response_headers, raw)
-                    response_nonce = _response_nonce_for_status(status, response_headers)
-                    if response_nonce is None:
-                        yield StreamingResponse(status, response_headers, iter((raw,)))
-                        return
-                else:
-                    response_nonce = _response_nonce_for_status(status, response_headers)
-                assert response_nonce is not None
+                    yield StreamingResponse(status, response_headers, iter((raw,)))
+                    return
                 yield StreamingResponse(
                     status,
-                    response_headers,
-                    self._decrypt_stream(resp, token, response_nonce, generation, status),
+                    _decrypted_headers(response_headers),
+                    self._decrypt_stream(resp, token, nonce, generation, status),
                 )
-        except GeneratorExit:
-            raise
-        except BaseException:
+        finally:
+            # SPEC 6.3: the exchange ends when the caller leaves the block,
+            # including a body closed or abandoned before EOF.
             self._clear_token_if_current(generation)
-            raise
 
     def _decrypt_stream(
         self,
@@ -378,15 +387,15 @@ class Client:
             require_frame=_is_success(status),
         )
         try:
-            for chunk in resp.iter_bytes():
-                yield from decryptor.push(chunk)
+            try:
+                for chunk in resp.iter_bytes():
+                    yield from decryptor.push(chunk)
+            except httpx.TransportError:
+                decryptor.finish()  # SPEC 5.5: a transport failure mid-frame is FRAMING_TRUNCATED
+                raise
             decryptor.finish()
+        finally:
             self._clear_token_if_current(generation)
-        except GeneratorExit:
-            raise
-        except BaseException:
-            self._clear_token_if_current(generation)
-            raise
 
     def _prepare_body(
         self, headers: HeadersInput, body: Body, json_body: Any
@@ -411,12 +420,15 @@ class Client:
                 raise InvalidInputError(
                     f"reserved request header cannot be set by callers: {name}"
                 )
+        for name in _FRAMING_HEADERS:
+            if name in prepared:
+                del prepared[name]
         return prepared
 
-    def _read_body_capped(self, resp: httpx.Response) -> bytes:
+    def _read_body_capped(self, source: Iterable[bytes]) -> bytes:
         chunks = []
         total = 0
-        for chunk in resp.iter_bytes():
+        for chunk in source:
             total += len(chunk)
             if total > self._max_response_bytes:
                 raise ChunkTooLargeError("response body exceeds maximum allowed size")

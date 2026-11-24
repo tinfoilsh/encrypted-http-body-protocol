@@ -9,7 +9,7 @@ final class ReservedHeaderTests: XCTestCase {
             baseURL: "https://server.test",
             publicKey: Data(Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation)
         )
-        for name in [EHBPProtocol.encapsulatedKeyHeader, "ehbp-response-nonce", "Content-Length", "Transfer-Encoding", "Host"] {
+        for name in [EHBPProtocol.encapsulatedKeyHeader, "ehbp-response-nonce", "Host"] {
             do {
                 _ = try await client.request(method: "POST", path: "/secure", headers: [name: "x"], body: Data("hi".utf8))
                 XCTFail("\(name) must be rejected")
@@ -24,5 +24,9 @@ final class ReservedHeaderTests: XCTestCase {
             }
         }
         XCTAssertEqual(try EHBPClient.callerHeaders(["X-Custom": "ok"]), ["X-Custom": "ok"])
+        // Body framing belongs to the implementation: caller values are dropped (SPEC 5.1).
+        XCTAssertEqual(
+            try EHBPClient.callerHeaders(["Content-Length": "1", "transfer-encoding": "chunked", "X-Custom": "ok"]),
+            ["X-Custom": "ok"])
     }
 }

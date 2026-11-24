@@ -113,7 +113,8 @@ public final class EHBPClient: @unchecked Sendable {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw EHBPError.network("expected HTTP response")
         }
-        if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
+        // A response to a bodyless request is plaintext whatever it says (SPEC 7.4).
+        if requestContext != nil, let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
             throw mismatch
         }
 
@@ -124,7 +125,7 @@ public final class EHBPClient: @unchecked Sendable {
             return (data, httpResponse)
         }
 
-        let responseNonce = try parseResponseNonce(responseNonceHex)
+        let responseNonce = try EHBPClient.validatedResponseNonce(responseNonceHex, httpResponse)
 
         let decryptedData = try EHBP.decryptResponseBody(
             token: token!,
@@ -208,7 +209,7 @@ public final class EHBPClient: @unchecked Sendable {
         // unauthenticated: cancel the transfer and consume the token.
         let responseNonceHex: String?
         do {
-            if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
+            if requestContext != nil, EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
                 // Read the (small) problem body so it can be classified; anything
                 // over the limit is not a problem document and passes through.
                 while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
@@ -252,7 +253,7 @@ public final class EHBPClient: @unchecked Sendable {
         var responseDecryptor: ResponseDecryptor
         do {
             responseDecryptor = try token!.makeResponseDecryptor(
-                responseNonce: try parseResponseNonce(responseNonceHex)
+                responseNonce: try EHBPClient.validatedResponseNonce(responseNonceHex, httpResponse)
             )
         } catch {
             asyncBytes.task.cancel()
@@ -268,8 +269,10 @@ public final class EHBPClient: @unchecked Sendable {
             onFailure: { self.clearToken(for: generation) },
             onCancel: { asyncBytes.task.cancel() }
         )
+        // Dropping the stream before EOF ends the exchange (SPEC 6.3).
         let lifetime = StreamCancellation {
             asyncBytes.task.cancel()
+            self.clearToken(for: generation)
         }
         let stream = AsyncThrowingStream<Data, Error>(unfolding: {
             _ = lifetime
@@ -296,27 +299,29 @@ public final class EHBPClient: @unchecked Sendable {
         guard resolved.user == nil, resolved.password == nil else {
             throw EHBPError(.invalidInput, "request URL must not include credentials")
         }
+        let defaultPort = ["https": 443, "http": 80][scheme.lowercased()]
         guard resolved.scheme?.lowercased() == scheme.lowercased(),
               resolved.host?.lowercased() == host.lowercased(),
-              resolved.port == base.port else {
+              (resolved.port ?? defaultPort) == (base.port ?? defaultPort) else {
             throw EHBPError(.invalidInput, "request URL must use the configured origin: \(scheme)://\(host)")
         }
         return url
     }
 
-    /// Headers the library or the transport owns; callers may not set them.
-    /// Same list as the Python client.
+    /// Headers the protocol or the validated origin owns; callers may not set them.
     static let reservedRequestHeaders: Set<String> = [
-        "content-length", "transfer-encoding", "host",
+        "host",
         EHBPProtocol.encapsulatedKeyHeader.lowercased(),
         EHBPProtocol.responseNonceHeader.lowercased(),
     ]
+    /// Body framing is the implementation's; caller values are dropped (SPEC 5.1).
+    static let framingHeaders: Set<String> = ["content-length", "transfer-encoding"]
 
     static func callerHeaders(_ headers: [String: String]) throws -> [String: String] {
         for name in headers.keys where reservedRequestHeaders.contains(name.lowercased()) {
             throw EHBPError(.invalidInput, "reserved request header cannot be set by callers: \(name)")
         }
-        return headers
+        return headers.filter { !framingHeaders.contains($0.key.lowercased()) }
     }
 
     /// Everything that happens before the request leaves the client, shared by
@@ -488,6 +493,17 @@ public final class EHBPClient: @unchecked Sendable {
         response.statusCode < 400
     }
 
+    /// The decoded nonce. Header validation precedes the bodyless-status rule
+    /// (SPEC 5.1): 204 and 205 cannot carry a chunk, so nothing could
+    /// authenticate them.
+    private static func validatedResponseNonce(_ hex: String, _ response: HTTPURLResponse) throws -> Data {
+        let nonce = try parseResponseNonce(hex)
+        guard !bodylessSuccessStatuses.contains(response.statusCode) else {
+            throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
+        }
+        return nonce
+    }
+
     private static func responseNonceHex(
         from response: HTTPURLResponse,
         requestWasEncrypted: Bool
@@ -500,10 +516,6 @@ public final class EHBPClient: @unchecked Sendable {
             throw EHBPError(.unexpectedRedirect, "status \(response.statusCode) in response to an encrypted request")
         }
         if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
-            // 204 and 205 cannot carry a body, so nothing could authenticate them.
-            guard !bodylessSuccessStatuses.contains(response.statusCode) else {
-                throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
-            }
             return nonce
         }
         // Only an error status may pass through without a nonce (SPEC 5.3).
@@ -637,7 +649,18 @@ where Iterator.Element == UInt8 {
             return try await withTaskCancellationHandler {
                 var iterator = self.iterator
                 var decryptor = self.decryptor
-                while let byte = try await iterator.next() {
+                while true {
+                    let byte: UInt8?
+                    do {
+                        byte = try await iterator.next()
+                    } catch {
+                        // SPEC 5.5: the transport failed inside a frame.
+                        if !Task.isCancelled, (try? decryptor.finish()) == nil {
+                            throw EHBPError(.framingTruncated, "transport failed inside an encrypted response chunk: \(error)")
+                        }
+                        throw error
+                    }
+                    guard let byte else { break }
                     if let plaintext = try decryptor.push(byte) {
                         self.iterator = iterator
                         self.decryptor = decryptor
@@ -654,14 +677,14 @@ where Iterator.Element == UInt8 {
                 cancel()
             }
         } catch {
-            if !Task.isCancelled {
-                onFailure()
-            }
+            onFailure()
             throw error
         }
     }
 }
 
+/// SPEC 5.1: a 3xx to an encrypted request is never followed; the redirect
+/// itself is delivered (no nonce, non-2xx: pass-through).
 private final class StreamCancellation: @unchecked Sendable {
     private let cancel: @Sendable () -> Void
 
@@ -677,18 +700,16 @@ private final class StreamCancellation: @unchecked Sendable {
 // MARK: - Data Extensions
 
 public extension Data {
-    /// Creates Data from a hex string
+    /// Creates Data from a hex string: hex digits only, even count, either
+    /// case; no prefix, sign, or whitespace (SPEC 4.1).
     init?(hexString: String) {
-        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
-        guard hex.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
-            data.append(byte)
-            index = nextIndex
+        guard hexString.count % 2 == 0 else { return nil }
+        var data = Data(capacity: hexString.count / 2)
+        var high: Int?
+        for char in hexString {
+            guard char.isASCII, let digit = char.hexDigitValue else { return nil }
+            if let high { data.append(UInt8(high << 4 | digit)) }
+            high = high == nil ? digit : nil
         }
         self = data
     }

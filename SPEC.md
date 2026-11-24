@@ -31,6 +31,12 @@ Servers MUST expose their HPKE configuration at `/.well-known/hpke-keys` with:
 
 This implementation produces exactly one `key_config` and clients select the first/only config present.
 
+Clients MUST accept a key configuration response only when its status is `200` and the
+media type of its `Content-Type` is `application/ohttp-keys`; the media type is compared
+case-insensitively and any parameters are ignored. Any other status, including a redirect
+(clients MUST NOT follow redirects during discovery), is `INVALID_KEY_CONFIG`. Bytes after
+the first `key_config` are ignored.
+
 ### 3.2 Key Config
 
 The implementation emits a `key_config` with fields:
@@ -51,6 +57,8 @@ Clients MUST set:
 - `Ehbp-Encapsulated-Key`: hex (lowercase, no prefix) of the HPKE encapsulated key used to derive the request encryption context. Required if and only if the request body is encrypted (i.e., a non‑empty body is present).
 - Body framing on the wire: on HTTP/1.1, an encrypted body is sent with `Transfer-Encoding: chunked` unless the total framed length is known in advance, in which case `Content-Length` MAY be sent instead; a message MUST NOT carry both. On HTTP/2 and HTTP/3, clients MUST NOT send `Transfer-Encoding`; the framed body is carried as the message body with or without `Content-Length`. Note: In browser environments, `Transfer-Encoding` cannot be set explicitly; the browser chooses the framing.
 
+Hex fields in this protocol (`Ehbp-Encapsulated-Key`, `Ehbp-Response-Nonce`, and the token fields of Section 6.1.1) are decoded strictly: hex digits only, an even number of them, no prefix, no whitespace. Either letter case is accepted on input; implementations emit lowercase.
+
 ### 4.2 Response Headers
 
 Servers MUST set for encrypted responses:
@@ -60,7 +68,7 @@ Servers MUST set for encrypted responses:
 
 For plaintext responses corresponding to requests where `Ehbp-Encapsulated-Key` is absent, the server does NOT set any EHBP headers. The absence of `Ehbp-Response-Nonce` indicates the response is plaintext.
 
-`Ehbp-Encapsulated-Key` and `Ehbp-Response-Nonce` are single-valued. A receiver MUST reject a message carrying more than one instance of either header (`INVALID_ENCAPSULATED_KEY` on the server, `DUPLICATE_RESPONSE_NONCE` on the client). Client stacks that coalesce repeated headers into one value (for example `fetch` and `URLSession`) observe a single value that is not valid hex of the required length and MUST treat it as invalid (`INVALID_RESPONSE_NONCE`).
+`Ehbp-Encapsulated-Key` and `Ehbp-Response-Nonce` are single-valued. A header that is present with an empty value is malformed, not absent: an empty `Ehbp-Response-Nonce` is `INVALID_RESPONSE_NONCE` whatever the status code. A receiver MUST reject a message carrying more than one instance of either header (`INVALID_ENCAPSULATED_KEY` on the server, `DUPLICATE_RESPONSE_NONCE` on the client). Client stacks that coalesce repeated headers into one value (for example `fetch` and `URLSession`) observe a single value that is not valid hex of the required length and MUST treat it as invalid (`INVALID_RESPONSE_NONCE`).
 
 ### 4.3 Body Framing (Both Directions)
 
@@ -145,6 +153,7 @@ This derivation ensures:
 
   - Encrypt the request body when a non-empty payload body is present. Establish an HPKE sealer to the server public key (Section 4.4.1) and stream‑encrypt using the chunk framing in Section 4.3, sealing and emitting chunks as the body is read rather than buffering it. Set `Ehbp-Encapsulated-Key` and carry the framed body as described in Section 4.1. Retain the HPKE sender context for response decryption.
   - When the request has no payload body, the request MUST be sent without `Ehbp-Encapsulated-Key` and the response will be unencrypted. See Section 7.4 for the security rationale. For an unknown-length source, decide from the first plaintext bytes or EOF before dispatch. A lower-level sender already committed to encryption MUST abort if the source produces no plaintext.
+  - Reserved headers: `Ehbp-Encapsulated-Key`, `Ehbp-Response-Nonce`, and `Host` belong to the protocol and the validated origin. A caller-supplied value for any of them is `INVALID_INPUT`. `Content-Length` and `Transfer-Encoding` describe the framed body and are owned by the implementation: caller-supplied values are dropped and the implementation sets its own, on encrypted and bodyless requests alike (browsers drop them before the implementation sees them).
   - Clients that reconstruct the outbound request while encrypting (rather than mutating it in place) MUST preserve caller-supplied transport parameters — headers, cancellation, timeout, and credential/cookie and redirect policy — apart from the body-framing metadata EHBP manages (for example Content-Length) and the EHBP headers themselves. EHBP only seals the payload body; it does not alter how the request is otherwise transported.
 - Inbound response:
 
@@ -186,7 +195,7 @@ Clients that send encrypted requests MUST verify `Ehbp-Response-Nonce` is presen
 
 - If the response has a 3xx status code, the client MUST fail the request, whether or not the header is present, and MUST NOT follow the redirect. The `Location` of a redirect is not authenticated, and a followed redirect can replace the encrypted exchange with a bodyless request, which EHBP does not protect (Section 7.4): the answer to that request would be returned as the answer to the encrypted one.
 
-- If the response has a 1xx or 2xx status code and the header is present, the client MUST fail the request unless at least one chunk of the body authenticates (`FRAMING_TRUNCATED`). The header alone proves nothing: any 32-byte value is accepted as a nonce, and a body with no chunks leaves nothing to check it against. A 204 or 205 response cannot carry a chunk and MUST be failed. A chunk that seals an empty plaintext counts, and yields no data.
+- If the response has a 1xx or 2xx status code and the header is present, the client MUST fail the request unless at least one chunk of the body authenticates (`FRAMING_TRUNCATED`). The header alone proves nothing: any 32-byte value is accepted as a nonce, and a body with no chunks leaves nothing to check it against. A 204 or 205 response cannot carry a chunk and MUST be failed. Header validation comes first: a malformed or repeated nonce on a 204 or 205 is `INVALID_RESPONSE_NONCE` or `DUPLICATE_RESPONSE_NONCE`, not `FRAMING_TRUNCATED`. A chunk that seals an empty plaintext counts, and yields no data.
 
 The pass-through allowance applies only to 4xx and 5xx responses. A 1xx is not an error: the only one a client receives as a final response is 101, which hands the connection to another protocol; exchanges that claim success always fail closed without a valid nonce and an authenticated chunk.
 
@@ -227,6 +236,8 @@ For `422` key configuration mismatch responses, servers SHOULD use:
 
 This mirrors OHTTP key-management guidance while keeping EHBP-specific error typing.
 
+Clients detect this response as follows. Detection applies only to responses to encrypted requests that carry no `Ehbp-Response-Nonce`; a response to a request sent without a body (Section 7.4) is returned unchanged whatever its status or content type, and a 422 carrying a nonce is authenticated ciphertext and is decrypted like any other response (Section 5.1). The status MUST be 422 and the `Content-Type` media type `application/problem+json` (case-insensitive, parameters ignored). The body is a JSON object whose `type` member (exact, case-sensitive key) equals the URN above; that alone makes it a key-configuration problem, and `title` is reported when it is a string, otherwise a generic title is used. A body that is not a JSON object, has a different `type`, or exceeds 64 KiB is not a key-configuration problem and is passed through unchanged as a non-2xx plaintext response (Section 5.3).
+
 #### 5.4.3 Key-Configuration Mismatch Recovery
 
 On receiving a key-configuration mismatch (Section 5.4.2), the client knows the server rejected the request before any plaintext reached the application (Section 5.4.2 only signals 422 for setup or first-chunk failures). It is safe to:
@@ -259,21 +270,21 @@ language's own casing (`protocol.UnsupportedSuite`, `Code::UnsupportedSuite`,
 
 | Code | Side | Condition |
 | --- | --- | --- |
-| `INVALID_KEY_CONFIG` | client | Key config unparseable (truncated, bad public key, no suites) or discovery returned a non-2xx status or wrong media type |
+| `INVALID_KEY_CONFIG` | client | Key config unparseable (truncated, bad public key, no suites) or discovery returned a status other than 200 or a wrong media type (Section 3.1) |
 | `UNSUPPORTED_SUITE` | client | Key config advertises a KEM, KDF, or AEAD other than the suite in Section 3.2, or more than one cipher suite |
 | `INVALID_ENCAPSULATED_KEY` | server | `Ehbp-Encapsulated-Key` not hex, wrong length, or repeated; or absent where the server requires encryption (Section 5.2 pass-through is not a failure) |
 | `HPKE_SETUP_FAILED` | both | HPKE setup, seal, export, or response key derivation failed |
 | `MISSING_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` absent on a 1xx or 2xx response to an encrypted request |
 | `UNEXPECTED_REDIRECT` | client | 3xx response to an encrypted request |
-| `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` not hex or not 32 bytes |
+| `INVALID_RESPONSE_NONCE` | client | `Ehbp-Response-Nonce` empty, not strict hex (Section 4.1), or not 32 bytes |
 | `DUPLICATE_RESPONSE_NONCE` | client | More than one `Ehbp-Response-Nonce` header |
 | `KEY_CONFIG_MISMATCH` | client | Server returned the Section 5.4.2 key-configuration problem response |
-| `FRAMING_TRUNCATED` | both | Body ended inside a length prefix or ciphertext, or before an encrypted request yielded any plaintext or its 1xx or 2xx response authenticated any frame |
+| `FRAMING_TRUNCATED` | both | Body ended, or the transport failed, inside a length prefix or ciphertext, or before an encrypted request yielded any plaintext or its 1xx or 2xx response authenticated any frame |
 | `CHUNK_TOO_LARGE` | both | Frame length prefix exceeds the receiver's maximum; rejected before allocation |
 | `AEAD_DECRYPT_FAILED` | both | AEAD authentication failed for a frame |
 | `SEQUENCE_OVERFLOW` | both | Frame sequence number exhausted |
 | `INVALID_TOKEN` | client | Session recovery token JSON malformed, missing a field, or a field not 32 bytes |
-| `INVALID_INPUT` | client | Caller misuse: reserved header set, cross-origin URL, credentials in URL, malformed primitive input |
+| `INVALID_INPUT` | client | Caller misuse: reserved header set (Section 5.1), cross-origin URL, credentials in URL, malformed primitive input |
 
 ## 6. Session Recovery Tokens (Optional)
 
@@ -338,7 +349,7 @@ sequence number zero.
 
 - A session recovery token is equivalent in power to the ability to decrypt a single response. It MUST be treated as sensitive key material.
 - Tokens are scoped to a single request-response exchange. Each encrypted request produces a unique token; tokens cannot be reused across requests.
-- A token is considered consumed once the corresponding exchange has ended, whatever the outcome: the response has been fully decrypted; the caller closed its body before EOF; a new request supersedes it; the response was passed through unauthenticated (Section 5.1); the server returned a key-configuration problem (Section 5.4.2); or the exchange failed with a transport error or a protocol failure (Section 5.4.1), including a body that stopped authenticating mid-stream. Implementations MUST immediately discard all copies of a consumed token that they hold, so no live key material outlives the exchange it belongs to. A client that wants to recover a response after an interruption therefore persists the token before sending the request (Section 6), not after a failure. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
+- A token is considered consumed once the corresponding exchange has ended, whatever the outcome: the response has been fully decrypted; the caller closed or abandoned the response body before its end; a new request supersedes it; the response was passed through unauthenticated (Section 5.1); the server returned a key-configuration problem (Section 5.4.2); or the exchange failed with a transport error or a protocol failure (Section 5.4.1), including a body that stopped authenticating mid-stream. Implementations MUST delete every copy they hold of a consumed token immediately, so no live key material outlives the exchange it belongs to. A copy the application persisted for recovery (Section 6) is the application's to manage; it SHOULD be deleted once the application learns the exchange has ended. A client that wants to recover a response after an interruption therefore persists the token before sending the request, not after a failure. Tokens that have not yet been consumed SHOULD be stored for the minimum duration necessary for recovery; long-lived storage increases the window of exposure if the storage is compromised.
 
 ## 7. Security Considerations
 
