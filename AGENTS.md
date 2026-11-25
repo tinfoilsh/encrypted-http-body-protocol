@@ -38,3 +38,20 @@ served by JitPack from the same tag (`jitpack.yml` builds `kotlin/`); the
 4. Tag and push: `git tag v<new-version> && git push origin v<new-version>`
 
 Keep all client versions aligned with the git tag.
+
+## Generated code
+
+The rule: what is derived from a machine-readable source is generated;
+everything else is committed code with a check. The error files, the `core`
+accessors and the Swift/Rust FFI coders are rendered by
+`python3 conformance/tools/gen.py [--check] [target ...]` from the Dafny core;
+never edit a region between `:begin` and `:end` markers or a file whose
+header says "do not edit". Per-language spellings live in
+`conformance/tools/gen/profiles/<lang>.py`, the code in
+`conformance/tools/gen/templates/<lang>/` (Jinja; `pip install jinja2`).
+The residues, shims and conformance adapters are written by hand;
+`python3 conformance/tools/check.py` is the gate (layout, bindings, budgets,
+actions, operations, api, generated drift, docs, spec rules) and
+`conformance/.venv/bin/python -m pytest conformance/tools/tests -q` the test
+suite; `conformance/spec/handler.md` sections 4, 5 and 8 to 12 describe the
+layout and how to add a language.

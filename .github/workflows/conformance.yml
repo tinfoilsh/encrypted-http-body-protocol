@@ -62,7 +62,7 @@ jobs:
       - name: Create Python venv with the ehbp package
         run: |
           python3 -m venv conformance/.venv
-          conformance/.venv/bin/pip install -e ./python
+          conformance/.venv/bin/pip install -e ./python jinja2
 
       - name: Install Playwright browsers
         working-directory: conformance/adapters/js-browser
