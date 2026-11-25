@@ -1,112 +1,92 @@
-"""Client behavior tests against the in-process EHBP mock server."""
+"""The httpx surface of the client against the in-process mock server: the
+public API, streaming, the token lifecycle through it and concurrency. The
+protocol itself is covered by the conformance fixtures."""
 
-import struct
+import io
 import threading
 
 import httpx
 import pytest
 
 from conftest import DEFAULT_BASE_URL, MockServer
-from ehbp import Client, ServerIdentity
-from ehbp.errors import (
-    ChunkTooLargeError,
-    FramingTruncatedError,
-    InvalidInputError,
-    InvalidKeyConfigError,
-    InvalidResponseNonceError,
-    KeyConfigMismatchError,
-    MissingResponseNonceError,
-    UnexpectedRedirectError,
-)
-from ehbp.identity import REQUEST_FRAME_SIZE
-from ehbp.protocol import ENCAPSULATED_KEY_HEADER, RESPONSE_NONCE_HEADER
+from ehbp import Client, Config, Discover, core, discover
+from ehbp.errors import FramingTruncatedError, InvalidInputError
+from ehbp.protocol import RESPONSE_NONCE_HEADER
 
 
 def test_encrypted_round_trip(server: MockServer):
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"hello world")
+    response = server.make_client().request("POST", "/v1/echo", body=b"hello world")
     assert response.status_code == 200
-    assert response.content == b"echo:hello world"
+    assert response.read() == b"echo:hello world"
 
 
-def test_round_trip_with_multi_chunk_response(make_server):
-    server = make_server(chunk_size=3)
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"abcdefghij")
-    assert response.content == b"echo:abcdefghij"
-
-
-def test_streaming_round_trip(make_server):
+def test_streaming_round_trip_decrypts_frame_by_frame(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
-    collected = bytearray()
-    with client.stream("POST", "/v1/echo", body=b"streamed payload") as response:
-        assert response.status_code == 200
-        for chunk in response:
-            collected += chunk
-    assert bytes(collected) == b"echo:streamed payload"
+    response = client.request("POST", "/v1/echo", body=b"streamed payload")
+    assert b"".join(response) == b"echo:streamed payload"
+    assert client.session_recovery_token() is None
 
 
-def test_bodyless_request_passes_through_as_plaintext(server: MockServer):
-    client = server.make_client()
-    response = client.get("/health")
-    assert response.content == b"plaintext ok"
-    assert client.get_session_recovery_token() is None
+def test_file_body_is_stream_encrypted(server: MockServer):
+    response = server.make_client().request("POST", "/v1/echo", body=io.BytesIO(b"from a file"))
+    assert response.read() == b"echo:from a file"
 
 
-def test_successful_request_clears_session_recovery_token(server: MockServer):
-    client = server.make_client()
-    client.post("/v1/echo", body=b"payload")
-    assert client.get_session_recovery_token() is None
+def test_encrypted_body_uses_chunked_transfer_without_content_length(server: MockServer):
+    server.make_client().request("POST", "/v1/echo", body=b"payload").read()
+    headers = server.last_request.headers
+    assert "content-length" not in headers
+    assert headers.get("transfer-encoding") == "chunked"
 
 
-def test_streaming_request_clears_session_recovery_token_after_full_consumption(make_server):
+def test_token_is_readable_until_the_response_is_consumed(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
+    response = client.request("POST", "/v1/echo", body=b"payload")
+    token = client.session_recovery_token()
+    assert token is not None
+    assert token.request_enc.hex() == server.last_request.headers["ehbp-encapsulated-key"]
+    assert core.parse_token(token.json) == token
+    with pytest.raises(InvalidInputError):
+        core.nonce_for(b"\0" * 12, -1)
+    assert response.read() == b"echo:payload"
+    assert client.session_recovery_token() is None
 
-    with client.stream("POST", "/v1/echo", body=b"payload") as response:
-        assert client.get_session_recovery_token() is not None
-        assert b"".join(response.iter_bytes()) == b"echo:payload"
 
-    assert client.get_session_recovery_token() is None
-
-
-def test_streaming_request_closed_early_consumes_session_recovery_token(make_server):
+def test_closing_a_partly_read_response_consumes_the_token(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
-
-    with client.stream("POST", "/v1/echo", body=b"payload") as response:
-        next(iter(response))
-        assert client.get_session_recovery_token() is not None
-
-    assert client.get_session_recovery_token() is None
-
-
-def _client_with_handler(server: MockServer, handler) -> Client:
-    return Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    response = client.request("POST", "/v1/echo", body=b"payload")
+    next(iter(response))
+    assert client.session_recovery_token() is not None
+    response.close()
+    assert client.session_recovery_token() is None
 
 
-def test_older_stream_completion_does_not_clear_newer_recovery_token(make_server):
+def test_closing_an_unread_response_consumes_the_token(server: MockServer):
+    client = server.make_client()
+    response = client.request("POST", "/v1/echo", body=b"payload")
+    assert client.session_recovery_token() is not None
+    response.close()
+    assert client.session_recovery_token() is None
+
+
+def test_older_response_completion_does_not_clear_newer_token(make_server):
     server = make_server(chunk_size=4)
     client = server.make_client()
+    older = client.request("POST", "/v1/echo", body=b"older")
+    newer = client.request("POST", "/v1/echo", body=b"newer")
+    newer_token = client.session_recovery_token()
+    assert newer_token is not None
+    assert older.read() == b"echo:older"
+    assert client.session_recovery_token() == newer_token
+    assert newer.read() == b"echo:newer"
+    assert client.session_recovery_token() is None
 
-    with client.stream("POST", "/v1/echo", body=b"older") as older:
-        with client.stream("POST", "/v1/echo", body=b"newer"):
-            newer_token = client.get_session_recovery_token()
-            assert newer_token is not None
-            assert b"".join(older.iter_bytes()) == b"echo:older"
-            assert client.get_session_recovery_token() == newer_token
 
-
-@pytest.mark.parametrize("older_api", ["request", "stream"])
 @pytest.mark.parametrize("older_outcome", ["success", "error"])
-def test_older_request_cannot_publish_or_clear_newer_recovery_token(
-    make_server, monkeypatch, older_api, older_outcome
-):
+def test_older_request_cannot_publish_or_clear_newer_recovery_token(make_server, older_outcome):
     server = make_server(chunk_size=4)
     older_encryption_started = threading.Event()
     release_older_encryption = threading.Event()
@@ -114,68 +94,51 @@ def test_older_request_cannot_publish_or_clear_newer_recovery_token(
     release_older_request = threading.Event()
     newer_request_started = threading.Event()
     release_newer_request = threading.Event()
-    original_encrypt = ServerIdentity.encrypt_request_stream
 
-    def encrypt(identity, chunks):
-        # bytes bodies arrive as a one-element tuple on the streaming path.
-        if isinstance(chunks, tuple) and chunks == (b"older",):
-            older_encryption_started.set()
-            if not release_older_encryption.wait(5):
-                raise RuntimeError("timed out waiting to release older encryption")
-        return original_encrypt(identity, chunks)
-
-    monkeypatch.setattr(ServerIdentity, "encrypt_request_stream", encrypt)
+    def older_body():
+        # Read after the older request's generation began and before its token exists.
+        older_encryption_started.set()
+        assert release_older_encryption.wait(5)
+        yield b"older"
 
     def handler(request):
         if request.url.path == "/older":
             older_request_started.set()
-            if not release_older_request.wait(5):
-                raise RuntimeError("timed out waiting to release older request")
+            assert release_older_request.wait(5)
             if older_outcome == "error":
                 raise RuntimeError("older request failed")
         else:
             newer_request_started.set()
-            if not release_newer_request.wait(5):
-                raise RuntimeError("timed out waiting to release newer request")
+            assert release_newer_request.wait(5)
         return server.handler(request)
 
-    client = _client_with_handler(server, handler)
+    client = server.make_client(server.http_client(handler))
     errors = []
 
-    def run_older():
+    def run(path, body):
         try:
-            if older_api == "request":
-                client.post("/older", body=b"older")
-            else:
-                with client.stream("POST", "/older", body=b"older") as response:
-                    assert b"".join(response.iter_bytes()) == b"echo:older"
+            client.request("POST", path, body=body).read()
         except BaseException as error:
             errors.append(error)
 
-    def run_newer():
-        try:
-            client.post("/newer", body=b"newer")
-        except BaseException as error:
-            errors.append(error)
-
-    older_thread = threading.Thread(target=run_older, daemon=True)
-    newer_thread = threading.Thread(target=run_newer, daemon=True)
+    older_thread = threading.Thread(target=run, args=("/older", older_body()), daemon=True)
+    newer_thread = threading.Thread(target=run, args=("/newer", b"newer"), daemon=True)
     try:
         older_thread.start()
         assert older_encryption_started.wait(5)
         newer_thread.start()
         assert newer_request_started.wait(5)
-        newer_token = client.get_session_recovery_token()
+        newer_token = client.session_recovery_token()
         assert newer_token is not None
 
         release_older_encryption.set()
         assert older_request_started.wait(5)
-        assert client.get_session_recovery_token() is newer_token
+        assert client.session_recovery_token() == newer_token
 
         release_older_request.set()
         older_thread.join(5)
         assert not older_thread.is_alive()
-        assert client.get_session_recovery_token() is newer_token
+        assert client.session_recovery_token() == newer_token
     finally:
         release_older_encryption.set()
         release_older_request.set()
@@ -184,200 +147,9 @@ def test_older_request_cannot_publish_or_clear_newer_recovery_token(
         newer_thread.join(5)
 
     assert not newer_thread.is_alive()
-    if older_outcome == "error":
-        assert len(errors) == 1
-        assert str(errors[0]) == "older request failed"
-    else:
-        assert errors == []
-    assert client.get_session_recovery_token() is None
-
-
-def test_encrypted_body_uses_chunked_transfer_without_content_length(server: MockServer):
-    client = server.make_client()
-    client.post("/v1/echo", body=b"payload")
-    headers = server.last_request.headers
-    assert "content-length" not in headers
-    assert headers.get("transfer-encoding") == "chunked"
-
-
-def test_caller_framing_headers_are_dropped(server: MockServer):
-    client = server.make_client()
-    client.post("/v1/echo", body=b"payload", headers={"Content-Length": "1", "Transfer-Encoding": "identity"})
-    headers = server.last_request.headers
-    assert "content-length" not in headers
-    assert headers.get("transfer-encoding") == "chunked"
-
-
-def test_decrypted_response_drops_ciphertext_framing_headers(server: MockServer):
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"payload")
-    assert "content-length" not in response.headers
-    assert "transfer-encoding" not in response.headers
-    with client.stream("POST", "/v1/echo", body=b"payload") as streamed:
-        assert "content-length" not in streamed.headers
-        assert "transfer-encoding" not in streamed.headers
-        b"".join(streamed.iter_bytes())
-
-
-def test_request_to_foreign_origin_is_rejected(server: MockServer):
-    client = server.make_client()
-    with pytest.raises(InvalidInputError):
-        client.get("https://evil.example/steal")
-
-
-def test_protocol_relative_url_to_foreign_host_is_rejected(server: MockServer):
-    client = server.make_client()
-    with pytest.raises(InvalidInputError):
-        client.get("//evil.example/steal")
-
-
-@pytest.mark.parametrize("name", [RESPONSE_NONCE_HEADER, ENCAPSULATED_KEY_HEADER, "Host"])
-def test_reserved_header_is_rejected(server: MockServer, name):
-    client = server.make_client()
-    with pytest.raises(InvalidInputError):
-        client.post("/v1/echo", body=b"payload", headers={name: "00"})
-    assert server.last_request is None
-
-
-def test_base_url_with_credentials_is_rejected(server: MockServer):
-    with pytest.raises(InvalidInputError):
-        Client(
-            "https://user:pass@server.example/",
-            ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-            http_client=server.http_client(),
-        )
-
-
-def test_missing_response_nonce_fails_closed(make_server):
-    server = make_server(mode="strip_nonce")
-    client = server.make_client()
-    with pytest.raises(MissingResponseNonceError):
-        client.post("/v1/echo", body=b"payload")
-    assert client.get_session_recovery_token() is None
-
-
-@pytest.mark.parametrize("status_code", [400, 503])
-def test_unencrypted_non_success_response_passes_through(make_server, status_code):
-    server = make_server(mode="unencrypted_response", status_code=status_code)
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"payload")
-    assert response.status_code == status_code
-    assert response.headers["content-type"] == "text/plain"
-    assert response.headers["x-upstream"] == "proxy"
-    assert response.content == b"upstream unavailable"
-    assert client.get_session_recovery_token() is None
-
-
-@pytest.mark.parametrize("mode", ["unencrypted_response", "ok"])
-@pytest.mark.parametrize("status_code", [300, 303, 307, 308])
-def test_redirect_to_an_encrypted_request_is_refused(make_server, mode, status_code):
-    server = make_server(mode=mode, status_code=status_code)
-    client = server.make_client()
-    with pytest.raises(UnexpectedRedirectError):
-        client.post("/v1/echo", body=b"payload")
-    with pytest.raises(UnexpectedRedirectError):
-        with client.stream("POST", "/v1/echo", body=b"payload"):
-            pass
-    assert client.get_session_recovery_token() is None
-
-
-def test_success_without_an_authenticated_chunk_is_refused(make_server):
-    server = make_server(mode="no_frames")
-    client = server.make_client()
-    with pytest.raises(FramingTruncatedError):
-        client.post("/v1/echo", body=b"payload")
-    with pytest.raises(FramingTruncatedError):
-        with client.stream("POST", "/v1/echo", body=b"payload") as response:
-            b"".join(response.iter_bytes())
-    assert client.get_session_recovery_token() is None
-
-
-def test_empty_success_is_authenticated_by_an_empty_chunk(make_server):
-    server = make_server(mode="empty_frame")
-    client = server.make_client()
-    assert client.post("/v1/echo", body=b"payload").content == b""
-    with client.stream("POST", "/v1/echo", body=b"payload") as response:
-        assert b"".join(response.iter_bytes()) == b""
-
-
-def test_streaming_unencrypted_non_success_response_passes_through(make_server):
-    server = make_server(mode="unencrypted_response", status_code=429)
-    client = server.make_client()
-    with client.stream("POST", "/v1/echo", body=b"payload") as response:
-        assert response.status_code == 429
-        assert response.headers["content-type"] == "text/plain"
-        assert b"".join(response.iter_bytes()) == b"upstream unavailable"
-    assert client.get_session_recovery_token() is None
-
-
-def test_encrypted_non_success_response_is_decrypted(make_server):
-    server = make_server(status_code=503)
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"payload")
-    assert response.status_code == 503
-    assert response.content == b"echo:payload"
-    assert client.get_session_recovery_token() is None
-
-
-def test_key_config_mismatch_raises_dedicated_error(make_server):
-    server = make_server(mode="key_config_mismatch")
-    client = server.make_client()
-    with pytest.raises(KeyConfigMismatchError):
-        client.post("/v1/echo", body=b"payload")
-    assert client.get_session_recovery_token() is None
-
-
-def _problem_client(server: MockServer, body: bytes, headers=None) -> Client:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            422, headers=headers or {"content-type": "application/problem+json"}, content=body
-        )
-
-    return _client_with_handler(server, handler)
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b'{"Type": "urn:ietf:params:ehbp:error:key-config"}',  # key is case-sensitive
-        b'{"type": "urn:ietf:params:ehbp:error:key-config"}' + b" " * (64 * 1024),  # over 64 KiB
-        b"[" * 30000 + b"]" * 30000,  # under the 64 KiB cap so deep nesting reaches json.loads
-    ],
-)
-def test_non_matching_422_problem_passes_through(server: MockServer, body: bytes):
-    response = _problem_client(server, body).post("/v1/echo", body=b"payload")
-    assert response.status_code == 422
-    assert response.content == body
-
-
-def test_422_problem_with_non_string_title_still_mismatch(server: MockServer):
-    body = b'{"type": "urn:ietf:params:ehbp:error:key-config", "title": 7}'
-    with pytest.raises(KeyConfigMismatchError, match="key configuration mismatch"):
-        _problem_client(server, body).post("/v1/echo", body=b"payload")
-
-
-def test_422_with_response_nonce_is_decrypted_not_problem(make_server):
-    server = make_server(status_code=422)
-    client = server.make_client()
-    response = client.post("/v1/echo", body=b"payload")
-    assert response.status_code == 422
-    assert response.content == b"echo:payload"
-
-
-def _nonce_client(server: MockServer, nonce_value: str, status: int = 200) -> Client:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, headers={RESPONSE_NONCE_HEADER: nonce_value}, content=b"")
-
-    return _client_with_handler(server, handler)
-
-
-@pytest.mark.parametrize("status", [200, 502])
-@pytest.mark.parametrize(
-    "nonce_value", ["", "0x" + "00" * 31, "00" * 16 + " " + "00" * 16, "00" * 32 + " "]
-)
-def test_malformed_response_nonce_is_invalid(server: MockServer, nonce_value, status):
-    with pytest.raises(InvalidResponseNonceError):
-        _nonce_client(server, nonce_value, status).post("/v1/echo", body=b"payload")
+    expected = ["older request failed"] if older_outcome == "error" else []
+    assert [str(e) for e in errors] == expected
+    assert client.session_recovery_token() is None
 
 
 def test_transport_failure_mid_frame_is_framing_truncated(server: MockServer):
@@ -389,63 +161,20 @@ def test_transport_failure_mid_frame_is_framing_truncated(server: MockServer):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={RESPONSE_NONCE_HEADER: "00" * 32}, stream=Broken())
 
-    client = _client_with_handler(server, handler)
+    client = server.make_client(server.http_client(handler))
     with pytest.raises(FramingTruncatedError):
-        client.post("/v1/echo", body=b"payload")
-    with pytest.raises(FramingTruncatedError), client.stream(
-        "POST", "/v1/echo", body=b"payload"
-    ) as response:
-        b"".join(response.iter_bytes())
-    assert client.get_session_recovery_token() is None
+        client.request("POST", "/v1/echo", body=b"payload").read()
+    assert client.session_recovery_token() is None
 
 
-def test_response_size_cap_is_enforced(server: MockServer):
-    client = server.make_client(max_response_bytes=4)
-    with pytest.raises(ChunkTooLargeError):
-        client.post("/v1/echo", body=b"this response will exceed the tiny cap")
-
-
-def test_discover_fetches_config_over_mock_transport(server: MockServer):
-    client = Client.discover(DEFAULT_BASE_URL, http_client=server.http_client())
-    assert client.server_identity.public_key_bytes() == server.public_key_bytes
-    response = client.post("/v1/echo", body=b"discovered")
-    assert response.content == b"echo:discovered"
-
-
-def test_discover_accepts_http_transport_by_default(server: MockServer):
-    client = Client.discover("http://server.example", http_client=server.http_client())
-    assert client.server_identity.public_key_bytes() == server.public_key_bytes
-
-
-def _discovery_client(server: MockServer, status: int, content_type: str) -> httpx.Client:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/.well-known/hpke-keys"
-        headers = {"content-type": content_type, "location": "https://server.example/keys"}
-        return httpx.Response(status, headers=headers, content=server.config_bytes() + b"tail")
-
-    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
-
-
-@pytest.mark.parametrize("content_type", ["Application/OHTTP-Keys; v=1", "application/ohttp-keys"])
-def test_discover_accepts_media_type_params_and_trailing_bytes(server: MockServer, content_type):
-    client = Client.discover(
-        "http://server.example/base?x=1", http_client=_discovery_client(server, 200, content_type)
-    )
-    assert client.server_identity.public_key_bytes() == server.public_key_bytes
-
-
-@pytest.mark.parametrize("status", [203, 302])
-def test_discover_rejects_non_200_without_following(server: MockServer, status):
-    with pytest.raises(InvalidKeyConfigError):
-        Client.discover(
-            DEFAULT_BASE_URL,
-            http_client=_discovery_client(server, status, "application/ohttp-keys"),
-        )
-
-
-def test_server_identity_rejects_out_of_range_key_id(server: MockServer):
-    with pytest.raises(InvalidKeyConfigError):
-        ServerIdentity(server.public_key_bytes, key_id=256)
+def test_discover_and_config_keys(server: MockServer):
+    key = discover(DEFAULT_BASE_URL, http_client=server.http_client())
+    assert key == server.public_key_bytes
+    client = Client(DEFAULT_BASE_URL, Discover, http_client=server.http_client())
+    assert client.request("POST", "/v1/echo", body=b"discovered").read() == b"echo:discovered"
+    config = Config(server.config_bytes())
+    client = Client(DEFAULT_BASE_URL, config, http_client=server.http_client())
+    assert client.request("POST", "/v1/echo", body=b"configured").read() == b"echo:configured"
 
 
 def test_custom_client_cannot_reenable_redirects(server: MockServer):
@@ -455,58 +184,20 @@ def test_custom_client_cannot_reenable_redirects(server: MockServer):
         return httpx.Response(200, content=b"followed")
 
     permissive = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
-    client = Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=permissive,
-    )
-    response = client.get("/redirect")
-    assert response.status_code == 302
-
-
-def _install_seal_counter(monkeypatch):
-    """Record the plaintext length of every frame sealed; returns the list."""
-    import ehbp.identity as identity_module
-
-    seals = []
-    original = identity_module._seal
-
-    def counting_seal(sender, plaintext):
-        seals.append(len(plaintext))
-        return original(sender, plaintext)
-
-    monkeypatch.setattr(identity_module, "_seal", counting_seal)
-    return seals
-
-
-def test_session_recovery_token_is_readable_while_request_is_in_flight(server: MockServer):
-    seen: dict = {}
-
-    class Inner(httpx.BaseTransport):
-        def handle_request(self, request):
-            # In flight: the request has been sealed and sent, no response yet.
-            seen["token"] = holder["client"].get_session_recovery_token()
-            seen["enc"] = request.headers[ENCAPSULATED_KEY_HEADER]
-            headers = httpx.Headers(request.headers)
-            del headers["transfer-encoding"]
-            return server.handler(
-                httpx.Request(request.method, request.url, headers=headers, content=request.read())
-            )
-
-    holder: dict = {}
-    holder["client"] = Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=Inner()),
-    )
-    assert holder["client"].post("/v1/echo", body=b"hi").content == b"echo:hi"
-    assert seen["token"] is not None
-    assert seen["token"].request_enc.hex() == seen["enc"]
+    client = server.make_client(permissive)
+    assert client.request("GET", "/redirect").status_code == 302
 
 
 def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
-    seals = _install_seal_counter(monkeypatch)
-    seen_at_wire = []
+    from ehbp import _residue
+
+    seals, seen_at_wire = [], []
+    original = _residue.aead_seal
+    def counting_seal(key, nonce, plaintext):
+        seals.append(len(plaintext))
+        return original(key, nonce, plaintext)
+
+    monkeypatch.setattr(_residue, "aead_seal", counting_seal)
 
     class Inner(httpx.BaseTransport):
         def handle_request(self, request):
@@ -520,73 +211,9 @@ def test_bytes_body_is_sealed_lazily(server: MockServer, monkeypatch):
                 httpx.Request(request.method, request.url, headers=headers, content=bytes(body))
             )
 
-    client = Client(
-        DEFAULT_BASE_URL,
-        ServerIdentity.from_public_key_bytes(server.public_key_bytes),
-        http_client=httpx.Client(transport=Inner()),
-    )
+    client = server.make_client(httpx.Client(transport=Inner()))
     payload = bytes(range(256)) * 800  # 200 KiB -> 4 frames
-    assert client.post("/v1/echo", body=payload).content == b"echo:" + payload
+    assert client.request("POST", "/v1/echo", body=payload).read() == b"echo:" + payload
     assert len(seals) == 4
     # Only one frame had been sealed when the first one went out: no up-front copy.
     assert seen_at_wire[0] == 1
-
-
-def test_oversized_chunk_is_sliced_into_frames(server: MockServer, monkeypatch):
-    seals = _install_seal_counter(monkeypatch)
-    one_mib = b"\x5a" * (1024 * 1024)
-    client = server.make_client()
-    assert client.post("/v1/echo", body=iter([one_mib])).content == b"echo:" + one_mib
-    assert seals == [REQUEST_FRAME_SIZE] * 16
-
-
-def test_oversized_chunk_is_sliced_into_frames_async(server: MockServer):
-    import asyncio
-
-    one_mib = b"\x5a" * (1024 * 1024)
-
-    async def source():
-        yield b"ab"  # a partial frame already buffered when the big chunk arrives
-        yield one_mib
-
-    async def run():
-        identity = ServerIdentity.from_public_key_bytes(server.public_key_bytes)
-        stream = await identity.encrypt_request_stream_async(source())
-        sizes = []
-        async for frame in stream.frames:
-            sizes.append(struct.unpack_from(">I", frame)[0] - 16)
-        return sizes
-
-    sizes = asyncio.run(run())
-    assert sum(sizes) == 1024 * 1024 + 2
-    assert max(sizes) == REQUEST_FRAME_SIZE
-    assert len(sizes) == 17
-
-
-def test_empty_iterable_body_is_bodyless(server: MockServer):
-    client = server.make_client()
-    response = client.post("/v1/echo", body=iter([b"", b""]))
-    assert response.content == b"plaintext ok"
-    assert "ehbp-encapsulated-key" not in server.last_request.headers
-
-
-def test_generator_body_is_stream_encrypted(server: MockServer):
-    pulled = []
-
-    def source():
-        for i in range(3):
-            pulled.append(i)
-            yield b"chunk-%d;" % i
-
-    client = server.make_client()
-    response = client.post("/v1/echo", body=source())
-    assert response.content == b"echo:chunk-0;chunk-1;chunk-2;"
-    assert pulled == [0, 1, 2]
-
-
-def test_file_body_is_stream_encrypted(server: MockServer):
-    import io
-
-    client = server.make_client()
-    response = client.post("/v1/echo", body=io.BytesIO(b"from a file"))
-    assert response.content == b"echo:from a file"

@@ -1,16 +1,9 @@
 """Python client for the encrypted HTTP body protocol (EHBP)."""
 
-from . import protocol
-from .client import Client, Response, StreamingResponse
-from .derive import (
-    FrameDecryptor,
-    ResponseKeyMaterial,
-    compute_nonce,
-    decrypt_chunk,
-    derive_response_keys,
-    encrypt_chunk,
-    frame_chunk,
-)
+from . import errors, protocol
+from . import identity as core
+from .client import Client, Config, Discover, PublicKey, Response, discover, self_check
+from .identity import SessionRecoveryToken
 from .errors import (
     AEADDecryptFailedError,
     ChunkTooLargeError,
@@ -31,47 +24,16 @@ from .errors import (
     UnsupportedSuiteError,
     code_of,
 )
-from .identity import EncryptedRequest, EncryptedRequestStream, ServerIdentity
-from .session import SessionRecoveryToken
-from .transport import AsyncEHBPTransport, EHBPTransport
 
 __version__ = "0.7.0"
 
 __all__ = [
-    "Client",
-    "Response",
-    "StreamingResponse",
-    "EHBPTransport",
-    "AsyncEHBPTransport",
-    "ServerIdentity",
-    "EncryptedRequest",
-    "EncryptedRequestStream",
-    "SessionRecoveryToken",
-    "FrameDecryptor",
-    "ResponseKeyMaterial",
-    "derive_response_keys",
-    "compute_nonce",
-    "encrypt_chunk",
-    "decrypt_chunk",
-    "frame_chunk",
-    "Code",
-    "EHBPError",
-    "InvalidKeyConfigError",
-    "UnsupportedSuiteError",
-    "InvalidEncapsulatedKeyError",
-    "HPKESetupFailedError",
-    "MissingResponseNonceError",
-    "UnexpectedRedirectError",
-    "InvalidResponseNonceError",
-    "DuplicateResponseNonceError",
-    "KeyConfigMismatchError",
-    "FramingTruncatedError",
-    "ChunkTooLargeError",
-    "AEADDecryptFailedError",
-    "SequenceOverflowError",
-    "InvalidTokenError",
-    "InvalidInputError",
-    "code_of",
-    "protocol",
-    "__version__",
+    "Client", "Config", "Discover", "PublicKey", "Response", "SessionRecoveryToken", "discover", "self_check",
+    "core", "errors", "protocol", "__version__",
+    "Code", "EHBPError", "code_of",
+    "AEADDecryptFailedError", "ChunkTooLargeError", "DuplicateResponseNonceError",
+    "FramingTruncatedError", "HPKESetupFailedError", "InvalidEncapsulatedKeyError",
+    "InvalidInputError", "InvalidKeyConfigError", "InvalidResponseNonceError",
+    "InvalidTokenError", "KeyConfigMismatchError", "MissingResponseNonceError",
+    "SequenceOverflowError", "UnexpectedRedirectError", "UnsupportedSuiteError",
 ]
