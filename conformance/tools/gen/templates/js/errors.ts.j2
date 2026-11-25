@@ -1,0 +1,31 @@
+/** EHBP errors: one subclass per canonical, cross-SDK error class (SPEC 5.5). {{ header }}. */
+
+export type Code = {% for c in codes %}'{{ c.value }}'{{ " | " if not loop.last }}{% endfor %};
+export const Code = {
+{% for c in codes %}
+  {{ c.value }}: '{{ c.value }}',
+{% endfor %}
+} as const;
+
+type Opts = { cause?: unknown };
+
+/** Base class; catch this for any EHBP failure. Only subclasses are thrown. */
+export abstract class EhbpError extends Error {
+  public readonly code: Code;
+  protected constructor(code: Code, detail: string, options?: Opts) {
+    super(`${code}: ${detail}`);
+    this.code = code;
+    if (options?.cause) this.cause = options.cause;
+  }
+}
+
+{% for c in codes %}
+export class {{ c.name }}Error extends EhbpError {
+  constructor(detail: string, options?: Opts) { super(Code.{{ c.value }}, detail, options); this.name = '{{ c.name }}Error'; }
+}
+{% endfor %}
+
+/** The canonical code of any thrown value, or undefined for a non-EHBP error. */
+export function codeOf(err: unknown): Code | undefined {
+  return err instanceof EhbpError ? err.code : undefined;
+}

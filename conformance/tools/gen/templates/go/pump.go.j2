@@ -1,0 +1,72 @@
+{% macro perform(cases) %}
+// Perform maps one action to one binding call and returns the result event.
+func (x *Exchange) Perform(a ev.Action) (ev.Event, int) {
+	E := ev.Companion_Event_
+	switch {
+{% for c in cases %}
+{% if c.kind == "event" %}
+	case {{ c.test }}:
+		return {{ c.event_inline }}, ctlEvent
+{% elif c.kind == "none" %}
+	case {{ c.test }}:
+		{{ c.call }}
+{% elif c.kind == "open" %}
+	case {{ c.test }}:
+		{{ c.locals }} := {{ c.call }}
+		return {{ c.event }}, ctlEvent
+{% elif c.kind == "chunk" %}
+	case {{ c.test }}:
+		{{ c.locals }} := {{ c.call }}
+		if !ok {
+			return {{ c.failed }}, ctlEvent
+		}
+		return {{ c.event }}, ctlEvent
+{% elif c.kind == "write" %}
+	case {{ c.test }}:
+		if !{{ c.call }} {
+			return ev.Event{}, ctlStop
+		}
+{% endif %}
+{% endfor %}
+	}
+	return ev.Event{}, ctlNone
+}
+{%- endmacro %}
+
+{% macro run(terminals) %}
+// run feeds events to Step until a terminal action. A Send with a body hands
+// the rest of its action list, the upload, to a second lane (a goroutine) so
+// the transaction can block for the response head; this lane stops there.
+func (x *Exchange) run(acts []ev.Action) {
+	var events []ev.Event
+	for {
+		for i, a := range acts {
+			switch {
+{% for t in terminals %}
+			case {{ t.test }}:
+{% for s in t.body %}
+				{{ s }}
+{% endfor %}
+				{{ t.exit }}
+{% endfor %}
+			case a.Is_Send() && a.Dtor_hasBody():
+				x.handed = true
+				go x.run(acts[i+1:])
+			}
+			switch e, ctl := x.Perform(a); ctl {
+			case ctlStop:
+				return
+			case ctlEvent:
+				events = append(events, e)
+			}
+			if a.Is_Send() && a.Dtor_hasBody() {
+				break
+			}
+		}
+		if len(events) == 0 {
+			return
+		}
+		acts, events = x.step(events[len(events)-1]), events[:len(events)-1]
+	}
+}
+{%- endmacro %}

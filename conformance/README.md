@@ -17,10 +17,11 @@ Built in steps:
 
 ## Running
 
-Regenerate fixtures (needs the ehbp Python package for multi-frame bodies):
+Regenerate fixtures (`dafny/fixtures.dfy` for every family but crypto, which
+`conformance/tools/gen_fixtures.py` seals with the ehbp Python package):
 
 ```
-conformance/.venv/bin/python conformance/tools/gen_fixtures.py
+dafny/gen-fixtures.sh
 ```
 
 Run the matrix (each `--adapter` is optional; omit to reduce toolchains):

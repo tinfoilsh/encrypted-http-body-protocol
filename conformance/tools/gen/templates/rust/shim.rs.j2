@@ -1,0 +1,265 @@
+{# The API shim (handler.md sections 7 and 8), one macro per piece in the order the profile's shim.pieces lists; a piece belongs to the entry point its name starts with. #}
+
+{% macro constructor() %}
+// constructor: a Client over one server origin and the key a KeySource yields.
+
+/// Where the server's HPKE public key comes from (SPEC 3).
+pub enum KeySource {
+    /// Fetch `/.well-known/hpke-keys` from the server.
+    Discover,
+    /// A key configuration (RFC 9458 bytes).
+    Config(Vec<u8>),
+    /// The X25519 public key itself.
+    PublicKey([u8; 32]),
+}
+
+#[derive(Clone)]
+pub struct Client {
+    base_url: {{ url_type }},
+    origin: Arc<core::Origin>,
+    public_key: Vec<u8>,
+    http_client: {{ client_type }},
+    session: Arc<Session>,
+}
+
+impl Client {
+    /// `server` is an http(s) origin; `http_client` carries the native
+    /// transport options (timeouts, pinning) and defaults to one that never
+    /// follows redirects.
+    pub async fn new(
+        server: impl AsRef<str>,
+        keys: KeySource,
+        http_client: Option<{{ client_type }}>,
+    ) -> Result<Self> {
+        let http_client = match http_client {
+            Some(client) => client,
+            None => {{ default_client|indent(12) }},
+        };
+        let base_url = parse_base_url(server.as_ref())?;
+        let origin = residue::result(&origin_of(&base_url))?;
+        let public_key = match keys {
+            KeySource::Discover => discover_from(&origin, &http_client).await?,
+            KeySource::Config(config) => crate::core::parse_config(&config)?,
+            KeySource::PublicKey(key) => crate::core::check_public_key(&key)?,
+        };
+        Ok(Self {
+            base_url,
+            origin,
+            public_key,
+            http_client,
+            session: Arc::default(),
+        })
+    }
+{%- endmacro %}
+
+{% macro discover() %}
+    // discover: the same discovery the constructor runs; the 32-byte public key.
+
+    /// The discovery the constructor runs (SPEC 3.1), for callers that cache
+    /// keys: the server's public key, for `KeySource::PublicKey`.
+    pub async fn discover(
+        server: impl AsRef<str>,
+        http_client: Option<{{ client_type }}>,
+    ) -> Result<[u8; 32]> {
+        let client = Self::new(server, KeySource::Discover, http_client).await?;
+        Ok(client.public_key.try_into().expect("core key length"))
+    }
+{%- endmacro %}
+
+{% macro token() %}
+    // token: the exchange in flight.
+
+    /// The token of the exchange in flight, or none (SPEC 6): none before any
+    /// request, after a bodyless one, and once an exchange has ended.
+    pub fn session_recovery_token(&self) -> Option<SessionRecoveryToken> {
+        self.session
+            .token()
+            .map(|t| SessionRecoveryToken::from_core(&t))
+    }
+{%- endmacro %}
+
+{% macro request() %}
+    // request: the one entry point; the core validates, seals, classifies and decrypts.
+
+    /// One exchange: `path` resolves against the server; the core validates
+    /// the request and its headers, seals the body when present, classifies
+    /// the response and decrypts its body as the caller reads.
+    pub async fn request(
+        &self,
+        method: impl AsRef<str>,
+        path: impl AsRef<str>,
+        headers: &[(&str, &str)],
+        body: Option<Body>,
+    ) -> Result<Response> {
+        let u = self.base_url.join(path.as_ref())?;
+        let mut map = HeaderMap::new();
+        for (name, value) in headers {
+            let invalid = |err: &dyn std::fmt::Display| Error::Coded(Code::InvalidInput, format!("invalid header: {err}"));
+            map.append(HeaderName::from_bytes(name.as_bytes()).map_err(|e| invalid(&e))?, HeaderValue::from_str(value).map_err(|e| invalid(&e))?);
+        }
+        let start = ev::Event::Start {
+            verb: str(method.as_ref()),
+            url: str(u.as_str()),
+            scheme: str({{ scheme }}),
+            host: str({{ host }}),
+            port: {{ port }},
+            hasPort: {{ has_port }},
+            hasUserinfo: {{ userinfo }},
+            headers: header_seq(&map),
+            hasBody: body.is_some(),
+        };
+        let x = Exchange::new(
+            ev::_default::Initial(&self.origin, &seq(&self.public_key)),
+            self.session.clone(),
+            self.http_client.clone(),
+            body.map(|b| b.0),
+        );
+        let guard = Guard(x.clone());
+        x.feed(start).await;
+        // The native response leaves the exchange only on a passthrough.
+        let response = x
+            .response
+            .lock()
+            .await
+            .take_if(|_| x.out.lock().unwrap().passthrough);
+        let mut out = x.out.lock().unwrap();
+        if let Some(err) = out.failure.take() {
+            return Err(err);
+        }
+        let status =
+            {{ status }};
+        let headers = {{ headers }};
+        let body = if out.passthrough {
+            {{ prefixed }}
+        } else if out.done {
+            {{ plain }}
+        } else {
+            return Err(Error::Protocol("exchange ended without an outcome".into()));
+        };
+        Ok(Response {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+{%- endmacro %}
+
+{% macro discover_from() %}
+/// Runs discovery (`DiscoverStart`) against `origin`.
+async fn discover_from(
+    origin: &Arc<core::Origin>,
+    http_client: &{{ client_type }},
+) -> Result<Vec<u8>> {
+    let x = Exchange::new(
+        ev::_default::Initial(origin, &seq(&[])),
+        Arc::default(),
+        http_client.clone(),
+        None,
+    );
+    x.feed(ev::Event::DiscoverStart {}).await;
+    let mut out = x.out.lock().unwrap();
+    if let Some(err) = out.failure.take() {
+        return Err(err);
+    }
+    Ok(std::mem::take(&mut out.public_key))
+}
+{%- endmacro %}
+
+{% macro request_body() %}
+/// A request body: bytes (copied in once), or a stream the core seals
+/// chunk by chunk into bounded frames without buffering it.
+pub struct Body(BodyStream);
+
+impl Body {
+    /// A streamed body; a chunk's error fails the request.
+    pub fn stream<S, E>(body: S) -> Self
+    where
+        S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let mut body = Box::pin(body);
+        Body(Box::pin(async_stream::stream! {
+            while let Some(chunk) = poll_fn(|cx| body.as_mut().poll_next(cx)).await {
+                yield chunk.map_err(|err| Error::Protocol(format!("request body stream failed: {err}")));
+            }
+        }))
+    }
+}
+
+impl<T: AsRef<[u8]>> From<T> for Body {
+    fn from(body: T) -> Self {
+        let chunk = Bytes::copy_from_slice(body.as_ref());
+        Body(Box::pin(async_stream::stream! { yield Ok(chunk) }))
+    }
+}
+{%- endmacro %}
+
+{% macro request_response() %}
+/// The response; its body is the decrypted stream, or the pass-through, read
+/// as a `Stream` of chunks or whole with [`Self::bytes`].
+pub struct Response {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: BodyStream,
+}
+
+impl Response {
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    pub async fn bytes(mut self) -> Result<Bytes> {
+        let mut body = Vec::new();
+        while let Some(chunk) = poll_fn(|cx| self.body.as_mut().poll_next(cx)).await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(Bytes::from(body))
+    }
+}
+
+impl Stream for Response {
+    type Item = Result<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.body.as_mut().poll_next(cx)
+    }
+}
+{%- endmacro %}
+
+{% macro constructor_origin() %}
+/// Validates the origin (MakeOrigin) and makes relative paths resolve under it.
+fn parse_base_url(base_url: &str) -> Result<{{ url_type }}> {
+    let mut url = {{ parse_url }};
+    residue::result(&origin_of(&url))?;
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    Ok(url)
+}
+
+/// Hands the parsed parts of `u` to the core, which validates them.
+fn origin_of(u: &{{ url_type }}) -> Arc<core::Result<Arc<core::Origin>>> {
+    let port = Arc::new(match u.port() {
+        Some(port) => core::Option::Some {
+            value: DafnyInt::from(port),
+        },
+        None => core::Option::None {},
+    });
+    core::_default::MakeOrigin(
+        &str({{ scheme }}),
+        &str({{ host }}),
+        &port,
+        {{ userinfo }},
+    )
+}
+{%- endmacro %}
+
+{% macro selfcheck() %}
+// selfCheck: `tinfoil_ehbp::self_check` in lib.rs runs residue::self_check at the crate root.
+{%- endmacro %}

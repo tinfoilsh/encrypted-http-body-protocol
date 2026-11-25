@@ -89,7 +89,7 @@ FIXTURE_OPERATIONS = {
     "marshal_config", "request", "discover", "reject_reserved_header",
     "reject_cross_origin", "reject_url_credentials", "decrypt_request",
     "middleware_request", "large_body", "token_before_response", "request_stream", "close_response_early",
-    "token_after_exchange",
+    "token_after_exchange", "residue_selfcheck",
 }
 
 FIXTURE_FIELDS = {
@@ -101,7 +101,7 @@ EXPECT_FIELDS = {
     "outcome", "error_code", "status", "body_hex", "passthrough",
     "plaintext_emitted_before_error", "bytes_emitted_before_error",
     "response_headers_absent", "response_headers_present", "token_before_response", "token_before_close", "token_after_close",
-    "token_after_exchange",
+    "token_after_exchange", "residue_selfcheck",
 }
 
 
@@ -151,6 +151,8 @@ def build_adapters(names):
         swift_dir = ROOT / "conformance/adapters/swift"
         bin_path = swift_dir / ".build/release/ehbp-adapter"
         try:
+            # The verified core behind the Swift SDK is an xcframework built from rust/ffi.
+            subprocess.run([str(ROOT / "swift/build-core.sh")], check=True, stdout=subprocess.DEVNULL)
             subprocess.run(["swift", "build", "-c", "release"], cwd=swift_dir, check=True,
                            stdout=subprocess.DEVNULL)
             if bin_path.exists():

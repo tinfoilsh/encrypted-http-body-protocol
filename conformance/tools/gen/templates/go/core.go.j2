@@ -1,0 +1,15 @@
+// core: the pure helpers over the core, bytes and strings in and out (handler.md section 7).
+{% for m in members %}
+
+// {{ m.name }}: {{ m.doc }}
+func (CoreAPI) {{ m.name }}({{ m.params }}) {{ m.returns }} {
+	{{ m.body|indent("\t") }}
+}
+{% endfor %}
+
+func bytesResult(r core.Result) ([]byte, error) {
+	if r.Is_Err() {
+		return nil, eventresidue.Error(r.Dtor_code(), eventresidue.String(r.Dtor_message()), nil)
+	}
+	return eventresidue.Bytes(r.Dtor_value().(_dafny.Sequence)), nil
+}

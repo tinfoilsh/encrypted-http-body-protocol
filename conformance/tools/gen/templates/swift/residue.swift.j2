@@ -1,0 +1,68 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.swift.j2. #}
+
+{% macro session() %}
+// session: a mutex around one SessionStore value; every rule is SessionApply.
+
+final class Session: @unchecked Sendable {
+    {{ lock_field }}
+    private var store = Core.newSession()
+
+    private func apply(_ a: SessionAction) -> SessionStore {
+        {{ lock }} { store = Core.sessionApply(store, a); return store }
+    }
+
+    func beginSession() -> UInt64 {
+        apply(.begin).generation
+    }
+
+    func publishToken(_ generation: UInt64, _ exportedSecret: Data, _ requestEnc: Data) {
+        _ = apply(.publish(generation: generation, token: Token(exportedSecret: exportedSecret, requestEnc: requestEnc)))
+    }
+
+    func clearToken(_ generation: UInt64) {
+        _ = apply(.clear(generation: generation))
+    }
+
+    /// The stored token, or none; never computes anything.
+    func token() -> (Data, Data)? {
+        {{ lock }} { store }.token.map { ($0.exportedSecret, $0.requestEnc) }
+    }
+}
+{%- endmacro %}
+
+{% macro conversions() %}
+// conversions: the runtime boundary only. Bytes and strings cross the FFI as
+// they are; only headers change shape.
+
+/// The core's header list: URLSession coalesces repeated names into one value.
+func headerSeq(_ response: HTTPURLResponse) -> Headers {
+    response.allHeaderFields.compactMap { name, value in (name as? String).map { ($0, "\(value)") } }
+}
+
+/// The core's header list back as the native dictionary; repeated names join with ", ".
+func headerPairs(_ headers: Headers) -> [String: String] {
+    var map = [String: String]()
+    for (name, value) in headers { map[name] = map[name].map { "\($0), \(value)" } ?? value }
+    return map
+}
+{%- endmacro %}
+
+{% macro mapping() %}
+// mapping: from the core's CodeString; no table of strings.
+
+/// The canonical code of a core code; Transport has none.
+func code(_ c: Code) -> EHBPErrorCode? {
+    EHBPErrorCode(rawValue: Core.codeString(c))
+}
+
+/// A core failure as a Swift error: a coded protocol error, or the native
+/// cause of a Transport failure.
+func error(_ c: Code, _ message: String, _ cause: Error?) -> Error {
+    switch (code(c), cause) {
+    case (let code?, let cause?): return EHBPError(code, "\(message): \(cause.localizedDescription)")
+    case (let code?, nil): return EHBPError(code, message)
+    case (nil, let cause?): return cause
+    case (nil, nil): return EHBPError.network(message)
+    }
+}
+{%- endmacro %}

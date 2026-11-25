@@ -35,6 +35,7 @@
     "operation": {
       "type": "string",
       "enum": [
+        "residue_selfcheck",
         "derive_keys",
         "decrypt_response",
         "decrypt_response_streaming",

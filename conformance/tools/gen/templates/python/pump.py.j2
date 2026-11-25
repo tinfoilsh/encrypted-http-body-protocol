@@ -1,0 +1,59 @@
+{% macro perform(cases) %}
+def perform(x: Exchange, a: ev.Action) -> Optional[ev.Event]:
+    """Maps one action to one binding call and returns the result event."""
+{% for c in cases %}
+{% set if_ = "if" if loop.first else "elif" %}
+{% if c.kind == "event" %}
+    {{ if_ }} {{ c.test }}:
+        return {{ c.event_inline }}
+{% elif c.kind == "none" or c.kind == "write" %}
+    {{ if_ }} {{ c.test }}:
+        {{ c.call }}
+{% elif c.kind == "open" %}
+    {{ if_ }} {{ c.test }}:
+        {{ c.locals }} = {{ c.call }}
+        return {{ c.event }}
+{% elif c.kind == "chunk" %}
+    {{ if_ }} {{ c.test }}:
+        {{ c.locals }} = {{ c.call }}
+        if not ok:
+            return {{ c.failed }}
+        return {{ c.event }}
+{% endif %}
+{% endfor %}
+    return None
+{%- endmacro %}
+
+{% macro run(terminals) %}
+def run(x: Exchange, acts: list) -> Iterator[bytes]:
+    """Feeds events to Step until a terminal action. run is a generator, so the
+    actions after a Send with a body, the upload, become the request body that
+    httpx pulls while this lane waits inside send for the response head."""
+    events: list = []
+    while True:
+        for i, a in enumerate(acts):
+{% for t in terminals %}
+            if {{ t.test }}:
+{% for s in t.body %}
+                {{ s }}
+{% endfor %}
+                {{ t.exit }}
+{% endfor %}
+            if a.is_Send and a.hasBody:
+                x.lane = run(x, acts[i + 1:])
+            e = perform(x, a)
+            while x.pipe:
+                item = x.pipe.popleft()
+                if item is None:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+            if e is not None:
+                events.append(e)
+            if a.is_Send and a.hasBody:
+                break  # the lane owns the rest
+        if not events:
+            return
+        acts = step(x, events.pop())
+{%- endmacro %}

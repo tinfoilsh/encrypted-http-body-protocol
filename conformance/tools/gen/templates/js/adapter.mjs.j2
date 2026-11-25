@@ -1,0 +1,229 @@
+// EHBP conformance adapter (JavaScript / Node). See conformance/adapters/README.md.
+//
+// {{ gen }}
+//
+// Reads one fixture on stdin, runs it through the public ehbp API, prints one
+// normalized result. All native-error translation lives in mapError.
+
+import { Transport, core, discover, codeOf, selfCheck } from '../../../js/dist/esm/index.js';
+import { spawnSync } from 'node:child_process';
+
+// Node caps response headers at 16 KiB; the oracle sends larger ones to probe
+// nonce validation. Re-run under a higher cap so the library, not the parser, decides.
+if (!process.execArgv.some((a) => a.startsWith('--max-http-header-size'))) {
+  const { status } = spawnSync(process.execPath, ['--max-http-header-size=1048576', ...process.argv.slice(1)], { stdio: 'inherit' });
+  process.exit(status ?? 1);
+}
+
+const HEADER_SUBSET = [{% for h in header_subset %}'{{ h }}'{{ ", " if not loop.last }}{% endfor %}];
+
+async function main() {
+  const fx = JSON.parse(await readStdin());
+  const res = {
+    fixture_id: fx.id, outcome: 'ok', error_code: null, status: null, body_hex: null,
+    passthrough: false, plaintext_emitted_before_error: false,
+    bytes_emitted_before_error: 0, native_error: null, runner: 'js',
+  };
+  try {
+    await run(fx, res);
+  } catch (err) {
+    res.outcome = 'error';
+    res.error_code = mapError(err);
+    res.body_hex = null;
+    res.native_error = String(err?.message ?? err);
+  }
+  process.stdout.write(JSON.stringify(res));
+}
+
+// The canonical code the library attached (codeOf); anything uncoded is a caller/adapter input error.
+function mapError(err) {
+  return codeOf(err) ?? 'INVALID_INPUT';
+}
+
+async function run(fx, res) {
+  switch (fx.operation) {
+{% for c in cases %}
+    case '{{ c.op }}': {
+      {{ c.body|indent(6) }}
+    }
+{% endfor %}
+    default:
+      throw new Error(`unknown operation ${fx.operation}`);
+  }
+}
+
+/** A Transport over the oracle, discovering its key through the library. */
+async function oracle() {
+  const base = process.env.ORACLE_URL;
+  return [base, await Transport.create(base, { discover: true })];
+}
+
+/** The token-only response path over the framed body, fed whole or split at the fixture's byte offsets; reports the plaintext delivered. */
+async function decrypt(fx, res, streaming) {
+  const token = { exportedSecret: hexIn(fx, 'exportedSecret'), requestEnc: hexIn(fx, 'requestEnc') };
+  const framed = hexIn(fx, 'encryptedResponse');
+  const segments = streaming ? splitAt(framed, fx.chunking) : [framed];
+  const response = new Response(streamOf(segments), { headers: { '{{ nonce_header }}': bytesToHex(hexIn(fx, 'responseNonce')) } });
+  const decrypted = await core.decryptWithToken(response, token);
+  res.body_hex = await drain(decrypted.body, res);
+}
+
+/**
+ * Sends the fixture request to the oracle and reads the reply. body is how the
+ * fixture body is supplied (bytes, stream: unknown length, pattern: the lazy
+ * large body); hold reads the token while the oracle holds its reply; early
+ * reads one byte and closes; after reads the token once the exchange ended,
+ * also on error; rss reports peak RSS.
+ */
+async function exchange(fx, res, body, hold, early, after, rss) {
+  const [base, transport] = await oracle();
+  const req = fx.request;
+  const init = { method: req.method, headers: req.headers || {} };
+  if (body === 'pattern') {
+    init.body = patternStream(intIn(fx, 'size_bytes'), intIn(fx, 'block_seed'));
+    init.duplex = 'half';
+  } else if (req.body_hex != null) { // '' is a zero-length body, not absent
+    init.body = body === 'stream' ? streamOf([hb(req.body_hex)]) : hb(req.body_hex);
+    if (body === 'stream') init.duplex = 'half';
+  }
+  try {
+    const pending = transport.request(base + req.path, init);
+    pending.catch(() => {}); // awaited below; a rejection while holding must not be unhandled
+    if (hold) {
+      await new Promise((r) => setTimeout(r, {{ hold_ms }})); // the oracle holds 5 s
+      res.token_before_response = transport.sessionRecoveryToken() !== undefined;
+    }
+    const response = await pending;
+    res.status = response.status;
+    res.response_headers = subsetHeaders(response.headers);
+    if (early) {
+      const reader = response.body.getReader();
+      const { value } = await reader.read();
+      res.body_hex = bytesToHex((value ?? new Uint8Array()).subarray(0, 1));
+      res.token_before_close = transport.sessionRecoveryToken() !== undefined;
+      await reader.cancel();
+      res.token_after_close = transport.sessionRecoveryToken() !== undefined;
+    } else {
+      res.body_hex = await drain(response.body, res);
+      // No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+      res.passthrough = !('{{ nonce_header }}'.toLowerCase() in res.response_headers) && !(response.status >= 200 && response.status < 300);
+    }
+    if (rss) res.peak_rss_bytes = process.resourceUsage().maxRSS * 1024;
+  } finally {
+    if (after) res.token_after_exchange = transport.sessionRecoveryToken() !== undefined;
+  }
+}
+
+/** Sends a request the library must refuse before it reaches the wire; a reply from the oracle is the divergent result. */
+async function hardening(fx, target) {
+  const [base, transport] = await oracle();
+  let url = base + '{{ probe_path }}';
+  if (target === 'cross') url = '{{ cross_origin }}';
+  if (target === 'credentials') url = base.replace('://', '://user:pass@') + '{{ probe_path }}';
+  const headers = {};
+  if (target === 'header') {
+    const name = strIn(fx, 'header');
+    headers[name] = name.toLowerCase() === 'host' ? '{{ host_value }}' : '{{ reserved_value }}';
+  }
+  const response = await transport.request(url, { method: 'POST', headers, body: 'x' });
+  await response.arrayBuffer();
+}
+
+/** The oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else). */
+function discoverTarget(fx) {
+  const t = strIn(fx, 'target');
+  return (t !== 'ORACLE_URL' && process.env[`ORACLE_${t.toUpperCase()}_URL`]) || process.env.ORACLE_URL;
+}
+
+// --- helpers ---
+
+/** Reads to the end; on error records the bytes delivered before it. */
+async function drain(body, res) {
+  if (!body) return '';
+  const reader = body.getReader();
+  const chunks = [];
+  let n = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      n += value.length;
+    }
+  } catch (err) {
+    res.bytes_emitted_before_error = n;
+    res.plaintext_emitted_before_error = n > 0;
+    throw err;
+  }
+  const out = new Uint8Array(n);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return bytesToHex(out);
+}
+
+function streamOf(segments) {
+  return new ReadableStream({
+    start(controller) {
+      for (const s of segments) controller.enqueue(s);
+      controller.close();
+    },
+  });
+}
+
+function splitAt(data, offsets) {
+  const segs = [];
+  let prev = 0;
+  for (const o of offsets || []) {
+    if (o > prev && o < data.length) { segs.push(data.slice(prev, o)); prev = o; }
+  }
+  segs.push(data.slice(prev));
+  return segs;
+}
+
+/** size bytes of a 1 MiB block with block[i] = (i + seed) & 0xff, repeated, never materialised. */
+function patternStream(size, seed) {
+  const block = new Uint8Array(1 << {{ block_shift }});
+  for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
+  let remaining = size;
+  return new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) { controller.close(); return; }
+      const n = Math.min(remaining, block.length);
+      controller.enqueue(block.subarray(0, n));
+      remaining -= n;
+    },
+  });
+}
+
+function subsetHeaders(headers) {
+  const out = {};
+  for (const name of HEADER_SUBSET) {
+    const v = headers.get(name);
+    if (v != null) out[name] = v;
+  }
+  return out;
+}
+
+function hb(hex) { return new Uint8Array(Buffer.from(hex, 'hex')); }
+function bytesToHex(bytes) { return Buffer.from(bytes).toString('hex'); }
+
+// Fixture inputs are repository-controlled; a missing field is a broken fixture, so fail loudly (ADAPTER_CRASH).
+function hexIn(fx, key) { return hb(strIn(fx, key)); }
+function strIn(fx, key) {
+  const v = fx.inputs?.[key];
+  if (typeof v !== 'string') { console.error(`fixture ${fx.id}: input ${key} missing or not a string`); process.exit(2); }
+  return v;
+}
+function intIn(fx, key) { return Number(fx.inputs[key]); }
+
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => (data += c));
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+  });
+}
+
+main().catch((err) => { console.error(err); process.exit(2); });

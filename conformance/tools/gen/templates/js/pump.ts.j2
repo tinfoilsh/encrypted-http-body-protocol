@@ -1,0 +1,42 @@
+{% macro perform(cases) %}
+/** Maps one action to one binding call and returns the result event; undefined for none, null when the upload sink is gone and this lane ends. */
+export async function perform(x: Exchange, a: Action): Promise<CoreEvent | undefined | null> {
+  let E = Event;
+{% for c in cases %}
+{% if c.kind == "event" %}
+  if ({{ c.test }}) return {{ c.event_inline }};
+{% elif c.kind == "none" %}
+  if ({{ c.test }}) return void {{ c.call }};
+{% elif c.kind == "open" %}
+  if ({{ c.test }}) { let [{{ c.locals }}] = {{ c.call }}; return {{ c.event }}; }
+{% elif c.kind == "chunk" %}
+  if ({{ c.test }}) { let [{{ c.locals }}] = {{ c.call }}; return ok ? {{ c.event }} : {{ c.failed }}; }
+{% elif c.kind == "write" %}
+  if ({{ c.test }}) return ({{ c.call }}) ? undefined : null;
+{% endif %}
+{% endfor %}
+  return undefined;
+}
+{%- endmacro %}
+
+{% macro run(terminals) %}
+/** Feeds events to Step until a terminal action. A Send with a body hands the rest of its action list, the upload, to a second lane (an unawaited promise) so the transaction can await the response head; this lane stops there. */
+async function run(x: Exchange, acts: Action[]): Promise<void> {
+  let events: CoreEvent[] = [];
+  do {
+    for (let i = 0; i < acts.length; i++) {
+      let a = acts[i];
+{% for t in terminals %}
+      if ({{ t.test }}) { {{ t.body|join("; ") }}; {{ t.exit }}; }
+{% endfor %}
+      if (a.is_Send && a.dtor_hasBody) { x.handed = true; void run(x, acts.slice(i + 1)); }
+      let e = await perform(x, a);
+      if (e === null) return;
+      if (e) events.push(e);
+      if (a.is_Send && a.dtor_hasBody) break;
+    }
+    if (events.length === 0) return;
+    acts = step(x, events.pop()!);
+  } while (true);
+}
+{%- endmacro %}

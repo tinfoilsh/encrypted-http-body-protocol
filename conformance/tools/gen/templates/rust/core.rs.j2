@@ -1,0 +1,9 @@
+// core: the pure helpers over the core, bytes and strings in and out (handler.md section 7).
+{% for m in members %}
+
+/// {{ m.doc }}
+#[rustfmt::skip]
+pub fn {{ m.name }}({{ m.params }}) -> {{ m.returns }} {
+    {{ m.body|indent(4) }}
+}
+{% endfor %}

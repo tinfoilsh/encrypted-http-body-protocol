@@ -1,0 +1,21 @@
+// crypto: one native call each, bytes in, bytes out. A failure is an empty
+// result (or ok false for aeadOpen), which the core rejects by length.
+// CryptoKit: Curve25519.KeyAgreement (an all-zero output is a low-order point), HMAC<SHA256>, AES.GCM, SystemRandomNumberGenerator.
+{% for p in primitives %}
+
+{% if p.open %}
+func {{ p.name }}({{ p.params }}) -> (Bool, Data) {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return (true, {{ p.expr }})
+}
+{% else %}
+func {{ p.name }}({{ p.params }}) -> Data {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return {{ p.expr }}
+}
+{% endif %}
+{% endfor %}

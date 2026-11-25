@@ -1,0 +1,120 @@
+{# The API shim (handler.md sections 7 and 8), one macro per piece in the order the profile's shim.pieces lists; a piece belongs to the entry point its name starts with. #}
+
+{% macro constructor() %}
+// constructor: a Transport over one server origin and the key a KeySource yields.
+
+/** KeySource is where a Transport gets the server's HPKE public key (SPEC 3). */
+sealed class KeySource {
+    /** Fetch /.well-known/hpke-keys from the server. */
+    object Discover : KeySource()
+    /** A pre-fetched key configuration (RFC 9458 application/ohttp-keys bytes). */
+    class Config(val bytes: ByteArray) : KeySource()
+    /** A raw 32-byte X25519 public key, for example attestation-verified. */
+    class PublicKey(val bytes: ByteArray) : KeySource()
+}
+
+/**
+ * Transport encrypts request bodies to the server's key and decrypts response
+ * bodies, the way Go's client.Transport implements http.RoundTripper. Requests
+ * must target [server]'s origin. roundTrip is a single HTTP transaction on a
+ * copy of [httpClient] with redirects and the cache disabled; timeouts, TLS
+ * pinning, proxies and cookies stay as configured.
+ */
+class Transport(server: String, keys: KeySource, httpClient: {{ client_type }} = {{ default_client }}) {
+    private val origin = parseOrigin(server)
+    private val httpClient = httpClient.singleTransaction()
+    private val publicKey = when (keys) {
+        is KeySource.Discover -> discover(origin, this.httpClient)
+        is KeySource.Config -> bytes(unwrap(ParseConfig(seq(keys.bytes))))
+        is KeySource.PublicKey -> bytes(unwrap(CheckPublicKey(seq(keys.bytes))))
+    }
+    private val session = Exchange.Session()
+{%- endmacro %}
+
+{% macro token() %}
+    // token: the exchange in flight.
+
+    /** sessionRecoveryToken returns the token of the exchange in flight, or null (SPEC 6). */
+    fun sessionRecoveryToken(): SessionRecoveryToken? =
+        session.token()?.let { SessionRecoveryToken(bytes(it.dtor_exportedSecret()), bytes(it.dtor_requestEnc())) }
+{%- endmacro %}
+
+{% macro request() %}
+    // request: the one entry point, roundTrip; the core validates, seals, classifies and decrypts.
+
+    /**
+     * roundTrip performs one encrypted exchange. Throws ProtocolError (coded),
+     * KeyConfigError on a 422 key configuration problem, or OkHttp's
+     * IOException for transport failures.
+     */
+    fun roundTrip(req: {{ request_type }}): {{ response_type }} {
+        val body = req.body?.also { if (it.isDuplex()) throw ProtocolError(Code.InvalidInput, "duplex request bodies are unsupported") }
+        // OkHttp would add the body's media type itself; the core owns the header list.
+        val contentType = body?.contentType()?.takeIf { req.header("Content-Type") == null }?.let { "Content-Type" to it.toString() }
+        val u = req.url // HttpUrl already lowercases and resolves the default port
+        val start = Event.create_Start(str(req.method), str(u.toString()), str({{ scheme }}), str({{ host }}), {{ port }}, {{ has_port }},
+            {{ userinfo }}, headerSeq(req.headers + listOfNotNull(contentType)), body != null)
+        val x = Exchange(Initial(origin, seq(publicKey)), session, httpClient, body)
+        x.feed(start)
+        x.failure?.let { throw if (codeOf(it) == Code.KeyConfigMismatch) KeyConfigError(it) else it }
+        return outcome(x)
+    }
+}
+{%- endmacro %}
+
+{% macro discover() %}
+// discover: the same discovery the constructor runs; the 32-byte public key.
+
+/** discover fetches the server's public key from /.well-known/hpke-keys (SPEC 3.1), as the constructor does, for callers that cache keys. */
+fun discover(server: String, httpClient: {{ client_type }} = {{ default_client }}): ByteArray = discover(parseOrigin(server), httpClient.singleTransaction())
+
+private fun discover(origin: Origin, httpClient: {{ client_type }}): ByteArray {
+    val x = Exchange(Initial(origin, seq(ByteArray(0))), Exchange.Session(), httpClient, null)
+    x.feed(Event.create_DiscoverStart())
+    x.failure?.let { throw it }
+    return x.publicKey
+}
+{%- endmacro %}
+
+{% macro selfcheck() %}
+// selfCheck: the core's primitive vectors through this residue.
+
+/** selfCheck runs the core's primitive vectors through this language's bindings; empty means pass. */
+fun selfCheck(): List<String> = sh.tinfoil.ehbp.residue.selfCheck()
+{%- endmacro %}
+
+{% macro constructor_origin() %}
+// No HTTP cache either: ciphertext and recovery-bound responses are never written to disk or replayed.
+private fun {{ client_type }}.singleTransaction() = newBuilder().followRedirects(false).followSslRedirects(false).cache(null).build()
+
+/** parseOrigin hands the parsed parts of server to the core, which validates them. */
+private fun parseOrigin(server: String): Origin {
+    val u = {{ parse_url }} ?: throw ProtocolError(Code.InvalidInput, "base URL must include an HTTP origin")
+    val port = Option.create_Some(TypeDescriptor.BIG_INTEGER, {{ port }})
+    return unwrap(MakeOrigin(str({{ scheme }}), str({{ host }}), port, {{ userinfo }}))
+}
+{%- endmacro %}
+
+{% macro request_outcome() %}
+/**
+ * outcome is the response of an exchange the core has run to Passthrough or
+ * Done: the native response with its body replaced, as Go's eventclient does.
+ */
+internal fun outcome(x: Exchange): {{ response_type }} {
+    val resp = x.response!!
+    val type = resp.body!!.contentType()
+    return when {
+        x.passthrough -> if (x.prefix.isEmpty()) resp else resp.newBuilder().body({{ prefixed }}).build()
+        x.done -> resp.newBuilder().headers(x.headers!!).body({{ plain }}).build()
+        else -> throw IOException("exchange ended without an outcome")
+    }
+}
+
+/** responseBody wraps a stream as the replacement OkHttp body; closing it closes the stream. */
+private fun responseBody(type: MediaType?, stream: InputStream): ResponseBody = object : ResponseBody() {
+    private val src = stream.source().buffer()
+    override fun contentType(): MediaType? = type
+    override fun contentLength() = -1L
+    override fun source(): BufferedSource = src
+}
+{%- endmacro %}

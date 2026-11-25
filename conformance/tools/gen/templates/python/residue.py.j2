@@ -1,0 +1,82 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.py.j2. #}
+
+{% macro session() %}
+# session: a mutex around one SessionStore value; every rule is SessionApply.
+
+
+class Session:
+    def __init__(self) -> None:
+        {{ lock_field }}
+        self.store = ev.default__.NewSession
+
+    def apply(self, action: ev.SessionAction) -> ev.SessionStore:
+        {{ lock }}
+            self.store = ev.default__.SessionApply(self.store, action)
+            return self.store
+
+    def begin_session(self) -> int:
+        return self.apply(ev.SessionAction_Begin()).generation
+
+    def publish_token(self, generation: int, exported_secret: bytes, request_enc: bytes) -> None:
+        token = EHBP.Token_Token(seq(exported_secret), seq(request_enc))
+        self.apply(ev.SessionAction_Publish(generation, token))
+
+    def clear_token(self, generation: int) -> None:
+        self.apply(ev.SessionAction_Clear(generation))
+
+    def token(self) -> Optional[EHBP.Token]:
+        """The stored token, or None."""
+        {{ lock }}
+            return self.store.token.value if self.store.token.is_Some else None
+{%- endmacro %}
+
+{% macro conversions() %}
+# conversions: the runtime boundary only.
+
+
+def seq(items: Union[{{ bytes }}, Iterable[Any]]) -> _dafny.Seq:
+    return _dafny.Seq(items, isStr=None)
+
+
+def bytes_(s: _dafny.Seq) -> {{ bytes }}:
+    return bytes(s.Elements)
+
+
+def str_(s: str) -> _dafny.Seq:
+    return _dafny.Seq(map(_dafny.CodePoint, s), isStr=None)
+
+
+def string(s: _dafny.Seq) -> str:
+    return "".join(s.Elements)
+
+
+def header_seq(pairs: Iterable[tuple[str, str]]) -> _dafny.Seq:
+    return seq([(str_(k), str_(v)) for k, v in pairs])
+
+
+def header_pairs(s: _dafny.Seq) -> list[tuple[str, str]]:
+    return [(string(k), string(v)) for k, v in s.Elements]
+{%- endmacro %}
+
+{% macro mapping() %}
+# mapping: from the core's CodeString; no table of strings.
+
+
+def code(c: EHBP.Code) -> Optional[errors.Code]:
+    """The canonical code of a core code; Transport has none."""
+    name = string(EHBP.default__.CodeString(c))
+    return errors.Code(name) if name else None
+
+
+_BY_CODE = {cls.code: cls for cls in errors.EHBPError.__subclasses__()}
+
+
+def error(c: EHBP.Code, message: str, cause: Optional[BaseException] = None) -> BaseException:
+    """A coded failure becomes the protocol error; Transport the native cause."""
+    cls = _BY_CODE.get(code(c))
+    if cls is None:
+        return cause or errors.EHBPError(message)
+    err = cls(message)
+    err.__cause__ = cause
+    return err
+{%- endmacro %}

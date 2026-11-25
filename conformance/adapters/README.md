@@ -1,8 +1,16 @@
 # Adapters
 
-Every adapter is the same program in a different language. Keeping them
-structurally identical is what makes the results comparable and the suite
-extensible: to add a language you copy this shape and fill in the public-API calls.
+The Go, Python, JavaScript, Rust, Kotlin and Swift adapters are the same
+program in a different language, written by hand and following the operation
+table of `../spec/operations.md` (`handler.md` section 9); the browser adapter
+(`js-browser/`, `runner.mjs` + `page.html`) likewise. `python3
+conformance/tools/check.py operations` fails when an adapter's dispatch does
+not name every operation of the table. To add a language, write the adapter
+(the dispatch over the operation name, one expression per pure operation over
+the SDK's `core` accessor, a single `map_error`), list it in `ADAPTERS` of
+`../tools/check.py` and register it in `../harness/run.py`
+(`build_adapters`). Go adds the server-side operations (`server.go`) and its
+RSS probe (`rss_*.go`), which have no client in the other SDKs.
 
 ## Interface
 

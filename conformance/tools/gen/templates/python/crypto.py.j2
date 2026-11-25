@@ -1,0 +1,26 @@
+# crypto: one native call each, bytes in, bytes out. A failure is an empty
+# result (or ok False for aead_open), which the core rejects by length.
+# The cryptography package: X25519 (raises on a low-order point), HMAC, AESGCM; os.urandom.
+{% for p in primitives %}
+
+
+{% if p.open %}
+def {{ p.name }}({{ p.params }}) -> tuple[bool, bytes]:
+    try:
+{% if p.pre %}
+        {{ p.pre|indent(8) }}
+{% endif %}
+        return True, {{ p.expr }}
+    except Exception:  # noqa: BLE001 - a failure is an empty result
+        return False, b""
+{% else %}
+def {{ p.name }}({{ p.params }}) -> bytes:
+    try:
+{% if p.pre %}
+        {{ p.pre|indent(8) }}
+{% endif %}
+        return {{ p.expr }}
+    except Exception:  # noqa: BLE001 - a failure is an empty result
+        return b""
+{% endif %}
+{% endfor %}

@@ -664,6 +664,23 @@
     }
   },
   {
+    "id": "e2e-invalid-nonce-huge",
+    "description": "A 64 KiB hex nonce is rejected for its length without exhausting the stack or reading plaintext.",
+    "category": "e2e",
+    "operation": "request",
+    "server_scenario": "invalid_nonce_huge",
+    "request": {
+      "method": "POST",
+      "path": "/s/invalid_nonce_huge",
+      "body_hex": "68656c6c6f",
+      "headers": {}
+    },
+    "expect": {
+      "outcome": "error",
+      "error_code": "INVALID_RESPONSE_NONCE"
+    }
+  },
+  {
     "id": "e2e-invalid-nonce-0x-prefix",
     "description": "64 characters starting with 0x: strict hex has no prefix (SPEC 4.1).",
     "category": "e2e",
@@ -1040,11 +1057,7 @@
       "body_hex": "68",
       "token_before_close": true,
       "token_after_close": false
-    },
-    "runners": [
-      "go",
-      "kotlin"
-    ]
+    }
   },
   {
     "id": "e2e-token-before-response",

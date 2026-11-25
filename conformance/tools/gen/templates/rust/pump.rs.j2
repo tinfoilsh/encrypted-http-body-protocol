@@ -1,0 +1,77 @@
+{% macro perform(cases) %}
+    /// Maps one action to one binding call and returns the result event.
+    fn perform<'a>(&'a self, a: &'a ev::Action) -> impl Future<Output = Control> + 'a {
+        use ev::{Action as A, Event as E};
+        let ev = |e: E| Control::Event(Arc::new(e));
+        async move {
+            match a {
+{% for c in cases %}
+{% if c.tag == "BeginSession" %}
+                {{ c.test }} => {
+                    let generation = {{ c.call }};
+                    self.out.lock().unwrap().generation = Some(generation);
+                    ev({{ c.event }})
+                }
+{% elif c.kind == "event" %}
+                {{ c.test }} => ev({{ c.event_inline }}),
+{% elif c.kind == "none" %}
+                {{ c.test }} => { {{ c.call }}; Control::None }
+{% elif c.kind == "open" %}
+                {{ c.test }} => {
+                    let ({{ c.locals }}) = {{ c.call }};
+                    ev({{ c.event }})
+                }
+{% elif c.kind == "chunk" %}
+                {{ c.test }} => match {{ c.call }} {
+                    Some(({{ c.locals }})) => ev({{ c.event }}),
+                    None => ev({{ c.failed }}),
+                },
+{% elif c.kind == "write" %}
+                {{ c.test }} => if {{ c.call }} { Control::None } else { Control::Stop },
+{% endif %}
+{% endfor %}
+                _ => Control::None,
+            }
+        }
+    }
+{%- endmacro %}
+
+{% macro run(terminals) %}
+    /// Feeds events to Step until a terminal action. A Send with a body hands
+    /// the rest of its action list, the upload, to a second lane (a tokio task)
+    /// so the transaction can await the response head; this lane stops there.
+    fn run(self: Arc<Self>, mut acts: Vec<Arc<ev::Action>>) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        use ev::Action as A;
+        Box::pin(async move {
+            let mut events = Vec::new();
+            loop {
+                for i in 0..acts.len() {
+                    let a = &acts[i];
+                    let settled = {
+                        let mut out = self.out.lock().unwrap();
+                        match a.as_ref() {
+{% for t in terminals %}
+                            {{ t.test }} => { {{ t.body|join("; ") }}; {{ t.exit }} }
+{% endfor %}
+                            A::Send { hasBody: true, .. } => {
+                                let lane = tokio::spawn(self.clone().run(acts[i + 1..].to_vec()));
+                                out.lane = Some(lane.abort_handle());
+                                false
+                            }
+                            _ => false,
+                        }
+                    };
+                    if settled { return }
+                    match self.perform(a).await {
+                        Control::Stop => return,
+                        Control::Event(e) => events.push(e),
+                        Control::None => {}
+                    }
+                    if matches!(a.as_ref(), A::Send { hasBody: true, .. }) { break }
+                }
+                let Some(e) = events.pop() else { return };
+                acts = self.step(e);
+            }
+        })
+    }
+{%- endmacro %}

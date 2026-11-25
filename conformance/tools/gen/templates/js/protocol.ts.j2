@@ -1,0 +1,16 @@
+/** Protocol constants. {{ header }}. */
+export const PROTOCOL = {
+  ENCAPSULATED_KEY_HEADER: {{ k.EncapsulatedKeyHeader }},
+  RESPONSE_NONCE_HEADER: {{ k.ResponseNonceHeader }},
+  KEYS_MEDIA_TYPE: {{ k.KeysMediaType }},
+  KEYS_PATH: {{ k.KeysPath }},
+  PROBLEM_JSON_MEDIA_TYPE: {{ k.ProblemJsonMediaType }},
+  KEY_CONFIG_PROBLEM_TYPE: {{ k.KeyConfigProblemType }},
+} as const;
+
+/** HPKE suite identifiers (SPEC 3.2). */
+export const HPKE_CONFIG = {
+  KEM: {{ k.KemX25519 }},
+  KDF: {{ k.KdfHkdfSha256 }},
+  AEAD: {{ k.AeadAes256Gcm }},
+} as const;

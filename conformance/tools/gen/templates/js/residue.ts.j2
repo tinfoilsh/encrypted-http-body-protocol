@@ -1,0 +1,77 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.ts.j2. #}
+
+{% macro session() %}
+// session: one SessionStore value; every rule is SessionApply. JS is
+// single-threaded, so no lock is needed around it.
+
+export class Session {
+  private store: SessionStore = ev.NewSession;
+
+  private apply(a: Datatype): SessionStore {
+    return (this.store = ev.SessionApply(this.store, a));
+  }
+
+  beginSession(): BigNumber {
+    return this.apply(SessionAction.create_Begin()).dtor_generation;
+  }
+
+  publishToken(generation: BigNumber, exportedSecret: Uint8Array, requestEnc: Uint8Array): void {
+    this.apply(SessionAction.create_Publish(generation, Token.create_Token(seq(exportedSecret), seq(requestEnc))));
+  }
+
+  clearToken(generation: BigNumber): void {
+    this.apply(SessionAction.create_Clear(generation));
+  }
+
+  /** The stored token, or undefined. */
+  token(): CoreToken | undefined {
+    let t = this.store.dtor_token;
+    return t.is_Some ? t.dtor_value : undefined;
+  }
+}
+{%- endmacro %}
+
+{% macro conversions() %}
+// conversions: the runtime boundary only.
+
+export function seq(b: {{ bytes }}): Bytes {
+  let s = new Seq<number>(b.length);
+  for (let i = 0; i < b.length; i++) s[i] = b[i];
+  return s;
+}
+export function bytes(s: Bytes): {{ bytes }} {
+  let b = new Uint8Array(s.length);
+  for (let i = 0; i < b.length; i++) b[i] = s[i];
+  return b;
+}
+export const str = (s: string): Str => Seq.UnicodeFromString(s);
+export const string = (s: Str): string => s.toVerbatimString(false);
+/** Native headers to the core's seq<(string, string)>, one entry per value. */
+export function headerSeq(h: Headers): HeadersSeq {
+  let s = new Seq<[Str, Str]>();
+  for (let [name, value] of h) s.push(Tuple.of(str(name), str(value)) as [Str, Str]);
+  return s;
+}
+/** The core's header list back to name/value pairs (a `Headers` init). */
+export function headerPairs(s: HeadersSeq): [string, string][] {
+  return Array.from(s, ([name, value]) => [string(name), string(value)]);
+}
+{%- endmacro %}
+
+{% macro mapping() %}
+// mapping: from the core's CodeString; no table of strings.
+
+/** The canonical code of a core code; "" for Transport, which has none. */
+export const code = (c: CoreCode): string => string(core.CodeString(c));
+const classes: Record<string, new (detail: string, options?: { cause?: unknown }) => EhbpError> = {
+{% for c in codes %}
+  [Code.{{ c.value }}]: {{ c.name }}Error,
+{% endfor %}
+};
+/** A coded error for `c`; a Transport failure is the native cause itself. */
+export function error(c: CoreCode, message: string, cause?: unknown): Error {
+  let cls = classes[code(c)];
+  if (cls) return new cls(message, { cause });
+  return cause instanceof Error ? cause : new Error(message, { cause });
+}
+{%- endmacro %}

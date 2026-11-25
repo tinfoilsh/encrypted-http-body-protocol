@@ -1,0 +1,34 @@
+// crypto: one native call each, bytes in, bytes out. A failure is an empty
+// result (or ok false for aeadOpen), which the core rejects by length.
+// X25519 is @noble/curves (throws on a low-order point) because WebCrypto's X25519 is not
+// universal; AES-GCM, HMAC-SHA256 and randomness are WebCrypto (crypto.subtle / getRandomValues).
+// WebCrypto refuses an empty HMAC key; HMAC zero-pads keys to the block size, so 32 zero bytes is the same key.
+
+const subtle = globalThis.crypto.subtle;
+const buf = (b: Uint8Array): BufferSource => b as unknown as BufferSource;
+const aesKey = (key: Uint8Array, nonce: Uint8Array, usage: KeyUsage): Promise<CryptoKey> => {
+  if (nonce.length !== num(core.NonceLength)) throw new Error('nonce length'); // WebCrypto would accept any iv
+  return subtle.importKey('raw', buf(key), 'AES-GCM', false, [usage]);
+};
+{% for p in primitives %}
+
+{% if p.open %}
+export {{ "async " if p.async }}function {{ p.name }}({{ p.params }}): {{ "Promise<[boolean, Uint8Array]>" if p.async else "[boolean, Uint8Array]" }} {
+  try {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return [true, {{ p.expr }}];
+  } catch { return [false, EMPTY]; }
+}
+{% else %}
+export {{ "async " if p.async }}function {{ p.name }}({{ p.params }}): {{ "Promise<Uint8Array>" if p.async else "Uint8Array" }} {
+  try {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return {{ p.expr }};
+  } catch { return EMPTY; }
+}
+{% endif %}
+{% endfor %}

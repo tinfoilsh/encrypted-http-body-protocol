@@ -4,8 +4,7 @@
 //
 // The adapter performs no validation the library lacks and never special-cases a
 // fixture id: it reports exactly what the library does. mapErr is the single,
-// reviewable point where a native error becomes a canonical code. It mirrors
-// conformance/adapters/go/main.go minus the server-side operations.
+// reviewable point where a native error becomes a canonical code.
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -31,23 +30,20 @@ import okio.BufferedSink
 import okio.BufferedSource
 import okio.buffer
 import okio.source
-import sh.tinfoil.ehbp.client.newTransport
-import sh.tinfoil.ehbp.client.newTransportWithConfig
-import sh.tinfoil.ehbp.identity.ResponseKeyMaterial
+import sh.tinfoil.ehbp.Core
+import sh.tinfoil.ehbp.client.KeySource
+import sh.tinfoil.ehbp.client.Transport
+import sh.tinfoil.ehbp.client.discover
+import sh.tinfoil.ehbp.client.selfCheck
 import sh.tinfoil.ehbp.identity.SessionRecoveryToken
-import sh.tinfoil.ehbp.identity.decryptResponseWithToken
-import sh.tinfoil.ehbp.identity.deriveResponseKeys
-import sh.tinfoil.ehbp.identity.fromPublicKeyBytes
-import sh.tinfoil.ehbp.identity.newIdentity
-import sh.tinfoil.ehbp.identity.unmarshalPublicConfig
-import sh.tinfoil.ehbp.protocol.ResponseNonceHeader
 import sh.tinfoil.ehbp.protocol.codeOf
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
-import java.net.InetSocketAddress
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
+
+val HEADER_SUBSET = listOf("ehbp-response-nonce", "content-length", "transfer-encoding", "content-type")
 
 class Result(val fixtureId: String) {
     var outcome = "ok"
@@ -100,214 +96,168 @@ fun main() {
     exitProcess(0) // OkHttp's connection pool keeps non-daemon threads alive
 }
 
+/** mapErr reads the canonical code the library attached; uncoded errors are adapter/transport input errors. */
+fun mapErr(e: Throwable): String = codeOf(e)?.value ?: "INVALID_INPUT"
+
 fun run(fx: JsonObject, r: Result) {
     when (val op = fx.str("operation")) {
         "derive_keys" -> {
-            val km = deriveResponseKeys(fx.hexIn("exportedSecret"), fx.hexIn("requestEnc"), fx.hexIn("responseNonce"))
-            r.setBody(km.key + km.nonceBase)
+            val (key, nonceBase) = Core.deriveKeys(fx.hexIn("exportedSecret"), fx.hexIn("requestEnc"), fx.hexIn("responseNonce"))
+            r.setBody(key + nonceBase)
+        }
+        "decrypt_response" -> {
+            decrypt(fx, r, false)
+        }
+        "decrypt_response_streaming" -> {
+            decrypt(fx, r, true)
         }
         "compute_nonce" -> {
-            val seq = fx.strIn("seqHex").toULong(16)
-            val aead = ResponseKeyMaterial(ByteArray(32), fx.hexIn("nonceBase")).newResponseAEAD()
-            r.setBody(aead.nonceForSeq(seq))
+            r.setBody(Core.nonceFor(fx.hexIn("nonceBase"), fx.strIn("seqHex").toULong(16)))
         }
-        "decrypt_response", "decrypt_response_streaming" -> decryptResponse(fx, r)
         "token_roundtrip" -> {
-            val tok = SessionRecoveryToken.fromJson(fx.strIn("json"))
+            val tok = Core.parseToken(fx.strIn("json"))
             r.setBody(tok.exportedSecret + tok.requestEnc)
         }
-        "parse_config" -> r.setBody(unmarshalPublicConfig(fx.hexIn("config")).marshalPublicKey())
-        "marshal_config" -> r.setBody(fromPublicKeyBytes(fx.hexIn("publicKey")).marshalConfig())
-        "request", "request_stream", "close_response_early" -> doRequest(fx, r)
-        // The constructor performs discovery with content-type/status checks.
-        "discover" -> newTransport(discoverTarget(fx))
-        "reject_reserved_header", "reject_cross_origin", "reject_url_credentials" -> hardening(fx)
-        "large_body" -> largeBody(fx, r)
-        "token_before_response" -> tokenBeforeResponse(fx, r)
-        "token_after_exchange" -> tokenAfterExchange(fx, r)
+        "parse_config" -> {
+            r.setBody(Core.parseConfig(fx.hexIn("config")))
+        }
+        "marshal_config" -> {
+            r.setBody(Core.marshalConfig(fx.hexIn("publicKey"))) // keyId is opaque: always 0
+        }
+        "request" -> {
+            exchange(fx, r, "bytes", false, false, false, false)
+        }
+        "discover" -> {
+            discover(discoverTarget(fx)) // throws on a bad key configuration
+        }
+        "reject_reserved_header" -> {
+            hardening(fx, "header")
+        }
+        "reject_cross_origin" -> {
+            hardening(fx, "cross")
+        }
+        "residue_selfcheck" -> {
+            val lines = selfCheck() // the core's shared vectors through this language's bindings
+            r.setBody(lines.joinToString("\n").toByteArray())
+            if (lines.isNotEmpty()) r.native = lines.joinToString("; ")
+        }
+        "reject_url_credentials" -> {
+            hardening(fx, "credentials")
+        }
+        "large_body" -> {
+            exchange(fx, r, "pattern", false, false, false, true)
+        }
+        "request_stream" -> {
+            exchange(fx, r, "stream", false, false, false, false)
+        }
+        "close_response_early" -> {
+            exchange(fx, r, "bytes", false, true, false, false)
+        }
+        "token_before_response" -> {
+            exchange(fx, r, "bytes", true, false, false, false)
+        }
+        "token_after_exchange" -> {
+            exchange(fx, r, "bytes", false, false, true, false)
+        }
         else -> throw IllegalArgumentException("unknown operation \"$op\"")
     }
 }
 
-/**
- * hardening exercises request-boundary validation without contacting the URL
- * under test. A local recorder answers a plaintext 502 if the request escapes
- * validation; that successful pass-through is the divergent result.
- */
-fun hardening(fx: JsonObject) {
-    val op = fx.str("operation")
-    val server = com.sun.net.httpserver.HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-    server.createContext("/") { ex ->
-        ex.requestBody.readBytes()
-        ex.sendResponseHeaders(502, 5)
-        ex.responseBody.use { it.write("probe".toByteArray()) }
+/** A Transport over the oracle, discovering its key through the library. */
+fun oracle(): Pair<String, Transport> {
+    val base = System.getenv("ORACLE_URL")
+    return base to Transport(base, KeySource.Discover)
+}
+
+/** The token-only response path over the framed body, fed whole or split at the fixture's byte offsets; reports the plaintext delivered. */
+fun decrypt(fx: JsonObject, r: Result, streaming: Boolean) {
+    val token = SessionRecoveryToken(fx.hexIn("exportedSecret"), fx.hexIn("requestEnc"))
+    val framed = fx.hexIn("encryptedResponse")
+    var body: InputStream = ByteArrayInputStream(framed)
+    if (streaming) {
+        val offsets = (fx["chunking"] as? JsonArray)?.map { it.jsonPrimitive.int } ?: emptyList()
+        body = FragmentStream(splitAt(framed, offsets))
     }
-    server.start()
+    val resp = Core.decryptWithToken(fakeResponse(200, Headers.headersOf("Ehbp-Response-Nonce", hexEncode(fx.hexIn("responseNonce"))), body), token)
+    r.setBody(readTracked(resp.body!!.byteStream(), r))
+}
+
+/**
+ * Sends the fixture request to the oracle and reads the reply. body is how the
+ * fixture body is supplied (bytes, stream: unknown length, pattern: the lazy
+ * large body); hold reads the token while the oracle holds its reply; early
+ * reads one byte and closes; after reads the token once the exchange ended,
+ * also on error; rss reports peak RSS.
+ */
+fun exchange(fx: JsonObject, r: Result, body: String, hold: Boolean, early: Boolean, after: Boolean, rss: Boolean) {
+    val (serverURL, tr) = oracle()
     try {
-        // The configured origin is the recorder itself, so any request that reaches
-        // the wire is observable; the cross-origin and credential probes must not.
-        val base = "http://127.0.0.1:${server.address.port}"
-        val tr = newTransportWithConfig(base, newIdentity().marshalConfig())
-        val target = when (op) {
-            "reject_cross_origin" -> "http://attacker.invalid/probe"
-            "reject_url_credentials" -> "http://user:pass@127.0.0.1:${server.address.port}/probe"
-            else -> "$base/probe"
+        val request = fx.getValue("request").jsonObject
+        val method = request.str("method")
+        val bodyHex = request["body_hex"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
+        val reqBody = when {
+            body == "pattern" -> patternBody(fx.intIn("size_bytes"), fx.intIn("block_seed").toInt())
+            // OkHttp insists on a body object for POST/PUT; a zero-length one is the closest to absent.
+            bodyHex == null -> if (method in setOf("POST", "PUT", "PATCH", "PROPPATCH", "REPORT")) ByteArray(0).toRequestBody() else null
+            body == "stream" -> object : RequestBody() {
+                override fun contentType() = null
+                override fun writeTo(sink: BufferedSink) { sink.write(hex(bodyHex)) }
+            }
+            else -> hex(bodyHex).toRequestBody()
         }
-        val req = Request.Builder().url(target).post("x".toByteArray().toRequestBody())
-        if (op == "reject_reserved_header") {
-            val name = (fx["inputs"] as? JsonObject)?.get("header")?.jsonPrimitive?.contentOrNull ?: ResponseNonceHeader
-            req.header(name, if (name.equals("Host", true)) "attacker.invalid" else "0".repeat(64))
+        val builder = Request.Builder().url(serverURL + request.str("path")).method(method, reqBody)
+        (request["headers"] as? JsonObject)?.forEach { (k, v) -> builder.header(k, v.jsonPrimitive.content) }
+        val req = builder.build()
+        var outcome: kotlin.Result<Response>? = null
+        val t = thread { outcome = runCatching { tr.roundTrip(req) } }
+        if (hold) {
+            Thread.sleep(500) // the oracle holds 5 s
+            r.tokenEarly = tr.sessionRecoveryToken() != null
         }
-        tr.roundTrip(req.build()).close()
+        t.join()
+        val resp = outcome!!.getOrThrow()
+        r.status = resp.code
+        r.headers = subsetHeaders(resp.headers)
+        if (early) {
+            resp.use {
+                val byte = it.body!!.byteStream().read()
+                check(byte >= 0) { "expected a response prefix" }
+                r.setBody(byteArrayOf(byte.toByte()))
+                r.tokenBeforeClose = tr.sessionRecoveryToken() != null
+            }
+            r.tokenAfterClose = tr.sessionRecoveryToken() != null
+        } else {
+            val plain = readTracked(resp.body!!.byteStream(), r)
+            resp.close()
+            // No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+            r.passthrough = resp.headers("Ehbp-Response-Nonce").isEmpty() && resp.code !in 200..299
+            r.setBody(plain)
+        }
+        if (rss) r.peakRss = peakRssBytes()
     } finally {
-        server.stop(0)
+        if (after) r.tokenAfter = tr.sessionRecoveryToken() != null
     }
 }
 
-fun tokenBeforeResponse(fx: JsonObject, r: Result) {
-    val serverURL = System.getenv("ORACLE_URL")
-    val tr = newTransport(serverURL)
-    val request = fx.getValue("request").jsonObject
-    val req = Request.Builder().url(serverURL + request.str("path"))
-        .method(request.str("method"), hex(request.str("body_hex")).toRequestBody())
-        .build()
-    var outcome: kotlin.Result<Response>? = null
-    val t = thread { outcome = runCatching { tr.roundTrip(req) } }
-    Thread.sleep(500) // oracle holds 5 s: 10x margin
-    r.tokenEarly = tr.getSessionRecoveryToken() != null
-    t.join()
-    val resp = outcome!!.getOrThrow()
-    r.status = resp.code
-    r.setBody(readTracked(resp.body!!.byteStream(), r))
-}
-
-/** patternBody streams size bytes of a 1 MiB block with block[i] = (i+seed)&0xff, repeated, lazily. */
-fun patternBody(size: Long, seed: Int) = object : RequestBody() {
-    override fun contentType(): MediaType? = null
-    override fun contentLength() = -1L
-    override fun writeTo(sink: BufferedSink) {
-        val block = ByteArray(1 shl 20) { ((it + seed) and 0xff).toByte() }
-        var remaining = size
-        while (remaining > 0) {
-            val n = minOf(block.size.toLong(), remaining).toInt()
-            sink.write(block, 0, n)
-            remaining -= n
-        }
+/** Sends a request the library must refuse before it reaches the wire; a reply from the oracle is the divergent result. */
+fun hardening(fx: JsonObject, target: String) {
+    val (base, tr) = oracle()
+    val url = when (target) {
+        "cross" -> "http://other.invalid/probe"
+        "credentials" -> base.replaceFirst("://", "://user:pass@") + "/probe"
+        else -> base + "/probe"
     }
-}
-
-fun largeBody(fx: JsonObject, r: Result) {
-    val inputs = fx.getValue("inputs").jsonObject
-    val serverURL = System.getenv("ORACLE_URL")
-    val tr = newTransport(serverURL)
-    val request = fx.getValue("request").jsonObject
-    val req = Request.Builder().url(serverURL + request.str("path"))
-        .method(request.str("method"), patternBody(inputs.getValue("size_bytes").jsonPrimitive.long, inputs.getValue("block_seed").jsonPrimitive.int))
-        .build()
-    val resp = tr.roundTrip(req)
-    r.status = resp.code
-    r.setBody(readTracked(resp.body!!.byteStream(), r))
-    r.peakRss = peakRssBytes()
-}
-
-/**
- * Peak resident set size of this process, as the Go adapter reports, or null
- * when not measurable. Linux: VmHWM from /proc/self/status (true high-water
- * mark). macOS: `ps` RSS at completion; the JVM does not uncommit heap without
- * periodic GC, so for this one-shot process it tracks the peak.
- */
-fun peakRssBytes(): Long? = runCatching {
-    val status = java.io.File("/proc/self/status")
-    if (status.exists()) {
-        return status.readLines().firstOrNull { it.startsWith("VmHWM:") }
-            ?.split(Regex("\\s+"))?.getOrNull(1)?.toLongOrNull()?.times(1024)
+    val req = Request.Builder().url(url).post("x".toByteArray().toRequestBody())
+    if (target == "header") {
+        val name = fx.strIn("header")
+        req.header(name, if (name.equals("Host", true)) "attacker.invalid" else "0000000000000000000000000000000000000000000000000000000000000000")
     }
-    val pid = ProcessHandle.current().pid()
-    val out = ProcessBuilder("ps", "-o", "rss=", "-p", pid.toString()).redirectErrorStream(true).start()
-        .inputStream.bufferedReader().readText().trim()
-    out.toLongOrNull()?.times(1024)
-}.getOrNull()
+    tr.roundTrip(req.build()).close()
+}
 
 /** discoverTarget maps a fixture target to the oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else). */
 fun discoverTarget(fx: JsonObject): String =
     fx.strIn("target").takeIf { it != "ORACLE_URL" }?.let { System.getenv("ORACLE_${it.uppercase()}_URL") } ?: System.getenv("ORACLE_URL")
-
-/**
- * tokenAfterExchange runs the fixture request, lets the exchange end (fully read
- * or failed), then
- * reports whether the public token accessor still returns one (SPEC 6.3).
- */
-fun tokenAfterExchange(fx: JsonObject, r: Result) {
-    val serverURL = System.getenv("ORACLE_URL")
-    val tr = newTransport(serverURL)
-    val request = fx.getValue("request").jsonObject
-    val bodyHex = request["body_hex"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
-    val req = Request.Builder().url(serverURL + request.str("path")).method(request.str("method"), bodyHex?.let { hex(it).toRequestBody() }).build()
-    try {
-        val resp = tr.roundTrip(req)
-        r.status = resp.code
-        r.headers = subsetHeaders(resp.headers)
-        val plain = readTracked(resp.body!!.byteStream(), r)
-        resp.close()
-        if (resp.headers(ResponseNonceHeader).isEmpty() && resp.code !in 200..299) r.passthrough = true
-        r.setBody(plain)
-    } finally {
-        r.tokenAfter = tr.getSessionRecoveryToken() != null
-    }
-}
-
-fun decryptResponse(fx: JsonObject, r: Result) {
-    val token = SessionRecoveryToken(fx.hexIn("exportedSecret"), fx.hexIn("requestEnc"))
-    val framed = fx.hexIn("encryptedResponse")
-    var body: InputStream = ByteArrayInputStream(framed)
-    if (fx.str("operation") == "decrypt_response_streaming") {
-        val offsets = (fx["chunking"] as? JsonArray)?.map { it.jsonPrimitive.int } ?: emptyList()
-        body = FragmentStream(splitAt(framed, offsets))
-    }
-    val resp = decryptResponseWithToken(fakeResponse(200, Headers.headersOf(ResponseNonceHeader, hexEncode(fx.hexIn("responseNonce"))), body), token)
-    r.setBody(readTracked(resp.body!!.byteStream(), r))
-}
-
-fun doRequest(fx: JsonObject, r: Result) {
-    val serverURL = System.getenv("ORACLE_URL")
-    val tr = newTransport(serverURL)
-    val request = fx.getValue("request").jsonObject
-    val method = request.str("method")
-    val bodyHex = request["body_hex"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
-    // OkHttp insists on a body object for POST/PUT; a zero-length one is bodyless to the library.
-    val body = when {
-        fx.str("operation") == "request_stream" -> object : RequestBody() {
-            override fun contentType() = null
-            override fun writeTo(sink: BufferedSink) { sink.write(hex(requireNotNull(bodyHex))) }
-        }
-        bodyHex != null -> hex(bodyHex).toRequestBody()
-        method in setOf("POST", "PUT", "PATCH", "PROPPATCH", "REPORT") -> ByteArray(0).toRequestBody()
-        else -> null
-    }
-    val builder = Request.Builder().url(serverURL + request.str("path")).method(method, body)
-    (request["headers"] as? JsonObject)?.forEach { (k, v) -> builder.header(k, v.jsonPrimitive.content) }
-    val resp = tr.roundTrip(builder.build())
-    r.status = resp.code
-    r.headers = subsetHeaders(resp.headers)
-    if (fx.str("operation") == "close_response_early") {
-        resp.use {
-            val byte = it.body!!.byteStream().read()
-            check(byte >= 0) { "expected a response prefix" }
-            r.setBody(byteArrayOf(byte.toByte()))
-            r.tokenBeforeClose = tr.getSessionRecoveryToken() != null
-        }
-        r.tokenAfterClose = tr.getSessionRecoveryToken() != null
-        return
-    }
-    val plain = readTracked(resp.body!!.byteStream(), r)
-    resp.close()
-    // SPEC 5.3 permits a plaintext error response from an intermediary.
-    if (resp.headers(ResponseNonceHeader).isEmpty() && resp.code in 400..599) r.passthrough = true
-    r.setBody(plain)
-}
-
-/** mapErr reads the canonical code the library attached; uncoded errors are adapter/transport input errors. */
-fun mapErr(e: Throwable): String = codeOf(e)?.value ?: "INVALID_INPUT"
 
 // --- helpers ---
 
@@ -334,6 +284,39 @@ fun splitAt(b: ByteArray, offsets: List<Int>): List<ByteArray> {
     return segs
 }
 
+/** patternBody streams size bytes of a 1 MiB block with block[i] = (i+seed)&0xff, repeated, lazily. */
+fun patternBody(size: Long, seed: Int) = object : RequestBody() {
+    override fun contentType(): MediaType? = null
+    override fun contentLength() = -1L
+    override fun writeTo(sink: BufferedSink) {
+        val block = ByteArray(1 shl 20) { ((it + seed) and 0xff).toByte() }
+        var remaining = size
+        while (remaining > 0) {
+            val n = minOf(block.size.toLong(), remaining).toInt()
+            sink.write(block, 0, n)
+            remaining -= n
+        }
+    }
+}
+
+/**
+ * Peak resident set size of this process, as the Go adapter reports, or null
+ * when not measurable. Linux: VmHWM from /proc/self/status (true high-water
+ * mark). macOS: `ps` RSS at completion; the JVM does not uncommit heap without
+ * periodic GC, so for this one-shot process it tracks the peak.
+ */
+fun peakRssBytes(): Long? = runCatching {
+    val status = java.io.File("/proc/self/status")
+    if (status.exists()) {
+        return status.readLines().firstOrNull { it.startsWith("VmHWM:") }
+            ?.split(Regex("\\s+"))?.getOrNull(1)?.toLongOrNull()?.times(1024)
+    }
+    val pid = ProcessHandle.current().pid()
+    val out = ProcessBuilder("ps", "-o", "rss=", "-p", pid.toString()).redirectErrorStream(true).start()
+        .inputStream.bufferedReader().readText().trim()
+    out.toLongOrNull()?.times(1024)
+}.getOrNull()
+
 /** Reads to EOF; on error records the authenticated prefix actually delivered and rethrows. */
 fun readTracked(s: InputStream, r: Result): ByteArray {
     val out = java.io.ByteArrayOutputStream()
@@ -351,9 +334,7 @@ fun readTracked(s: InputStream, r: Result): ByteArray {
     }
 }
 
-fun subsetHeaders(h: Headers): Map<String, String> =
-    listOf(ResponseNonceHeader, "Content-Length", "Transfer-Encoding", "Content-Type")
-        .mapNotNull { k -> h[k]?.let { k.lowercase() to it } }.toMap()
+fun subsetHeaders(h: Headers): Map<String, String> = HEADER_SUBSET.mapNotNull { k -> h[k]?.let { k to it } }.toMap()
 
 fun fakeResponse(status: Int, headers: Headers, body: InputStream): Response =
     Response.Builder()
@@ -377,6 +358,7 @@ fun JsonObject.str(key: String): String = (this[key] as? JsonPrimitive)?.takeIf 
     ?: fatal("fixture: field \"$key\" missing or not a string")
 fun JsonObject.strIn(key: String): String = (this["inputs"] as? JsonObject)?.str(key) ?: fatal("fixture: inputs missing")
 fun JsonObject.hexIn(key: String): ByteArray = hex(strIn(key))
+fun JsonObject.intIn(key: String): Long = (this["inputs"] as? JsonObject)?.get(key)?.jsonPrimitive?.long ?: fatal("fixture: input \"$key\" missing or not a number")
 fun hex(s: String): ByteArray {
     if (s.length % 2 != 0) fatal("bad hex: odd length")
     // toInt(16) alone would accept signed pairs like "-1" or "+f".

@@ -1,0 +1,8 @@
+    // The pure core functions by op number (OPS in gen_ffi.py), over the C ABI.
+{% for op in ops %}
+
+    static func {{ op.name }}({{ op.params }}){{ " throws" if op.throws }} -> {{ op.ret }} {
+        {{ op.setup }}
+        var r = call({{ loop.index0 }}, w); defer { precondition(r.atEnd, "core: trailing bytes") }; return {{ op.result }}
+    }
+{% endfor %}

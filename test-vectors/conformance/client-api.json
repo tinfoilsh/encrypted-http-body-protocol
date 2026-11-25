@@ -197,5 +197,20 @@
       "outcome": "error",
       "error_code": "INVALID_INPUT"
     }
+  },
+  {
+    "id": "residue-selfcheck",
+    "description": "The core's SelfCheckActions run through this language's crypto bindings and are judged by SelfCheckJudge (handler.md section 7); body_hex is the hex of the failed checks, so empty means pass.",
+    "category": "client-api",
+    "operation": "residue_selfcheck",
+    "inputs": {},
+    "browser": {
+      "runnable": false,
+      "skip_reason": "client-api-ops-tested-in-native-adapters"
+    },
+    "expect": {
+      "outcome": "ok",
+      "body_hex": ""
+    }
   }
 ]

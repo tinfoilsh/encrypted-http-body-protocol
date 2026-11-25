@@ -1,0 +1,64 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.kt.j2. #}
+
+{% macro session() %}
+    // session: a mutex around one SessionStore value; every rule is SessionApply (SPEC 6).
+
+    internal class Session {
+        private var store: SessionStore = EHBPEvents.__default.NewSession()
+
+        {{ lock }}
+        private fun apply(a: SessionAction): SessionStore {
+            store = EHBPEvents.__default.SessionApply(store, a)
+            return store
+        }
+
+        fun beginSession(): Long = apply(SessionAction.create_Begin()).dtor_generation()
+
+        fun publishToken(generation: Long, exportedSecret: ByteArray, requestEnc: ByteArray) {
+            apply(SessionAction.create_Publish(generation, Token.create(seq(exportedSecret), seq(requestEnc))))
+        }
+
+        fun clearToken(generation: Long) {
+            apply(SessionAction.create_Clear(generation))
+        }
+
+        /** token returns the stored token, or null. */
+        {{ lock }}
+        fun token(): Token? = store.dtor_token().takeIf { it.is_Some }?.dtor_value()
+    }
+{%- endmacro %}
+
+{% macro conversions() %}
+// conversions: the runtime boundary only.
+
+internal typealias Bytes = DafnySequence<out Byte>
+internal typealias Str = DafnySequence<out CodePoint>
+internal typealias HeaderSeq = DafnySequence<out Tuple2<Str, Str>>
+
+private val strTd: TypeDescriptor<Str> = DafnySequence._typeDescriptor(TypeDescriptor.UNICODE_CHAR)
+private val headerTd: TypeDescriptor<Tuple2<Str, Str>> = Tuple2._typeDescriptor(strTd, strTd)
+
+internal fun seq(b: {{ bytes }}): Bytes = DafnySequence.fromBytes(b)
+@Suppress("UNCHECKED_CAST")
+internal fun bytes(s: Bytes): {{ bytes }} = DafnySequence.toByteArray(s as DafnySequence<Byte>)
+internal fun str(s: String): Str = DafnySequence.asUnicodeString(s)
+internal fun string(s: Str): String = s.verbatimString()
+
+/** headerSeq converts headers to the core's seq<(string, string)>, one entry per value. */
+internal fun headerSeq(h: Iterable<Pair<String, String>>): HeaderSeq = DafnySequence.fromList(headerTd, h.map { (n, v) -> Tuple2.create<Str, Str>(str(n), str(v)) })
+
+/** headerPairs converts the core's header list back to name/value pairs. */
+internal fun headerPairs(s: HeaderSeq): List<Pair<String, String>> = s.map { string(it.dtor__0()) to string(it.dtor__1()) }
+
+internal fun headersOf(pairs: List<Pair<String, String>>): Headers = Headers.Builder().apply { for ((n, v) in pairs) addUnsafeNonAscii(n, v) }.build()
+{%- endmacro %}
+
+{% macro mapping() %}
+// mapping: from the core's CodeString; no table of strings.
+
+/** code maps a core code to the canonical protocol code; Transport has none. */
+internal fun code(c: Code): sh.tinfoil.ehbp.protocol.Code? = string(EHBP.__default.CodeString(c)).let { s -> sh.tinfoil.ehbp.protocol.Code.entries.firstOrNull { it.value == s } }
+
+/** error turns a core failure into a Kotlin exception: a coded ProtocolError, or the native cause of a Transport failure. */
+internal fun error(c: Code, message: String, cause: Throwable?): Throwable = code(c)?.let { ProtocolError(it, message, cause) } ?: cause ?: IOException(message)
+{%- endmacro %}

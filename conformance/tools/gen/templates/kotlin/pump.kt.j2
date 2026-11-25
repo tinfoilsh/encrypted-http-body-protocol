@@ -1,0 +1,50 @@
+{% macro perform(cases) %}
+    /** perform maps one action to one binding call and returns the result event. */
+    fun perform(a: Action): Pair<Event?, Ctl> {
+        val none = null to Ctl.None
+        return when {
+{% for c in cases %}
+{% if c.kind == "event" %}
+            {{ c.test }} -> {{ c.event_inline }} to Ctl.Event
+{% elif c.kind == "none" %}
+            {{ c.test }} -> { {{ c.call }}; none }
+{% elif c.kind == "open" %}
+            {{ c.test }} -> {{ c.call }}.let { ({{ c.locals }}) -> {{ c.event }} to Ctl.Event }
+{% elif c.kind == "chunk" %}
+            {{ c.test }} -> {{ c.call }}.let { ({{ c.locals }}) -> (if (ok) {{ c.event }} else {{ c.failed }}) to Ctl.Event }
+{% elif c.kind == "write" %}
+            {{ c.test }} -> if ({{ c.call }}) none else null to Ctl.Stop
+{% endif %}
+{% endfor %}
+            else -> none
+        }
+    }
+{%- endmacro %}
+
+{% macro run(terminals) %}
+    /**
+     * run feeds events to Step until a terminal action. A Send with a body hands
+     * the rest of its action list, the upload, to a second lane (a thread) so
+     * the transaction can block for the response head; this lane stops there.
+     */
+    fun run(first: List<Action>) {
+        var acts = first
+        val events = ArrayList<Event>()
+        while (true) {
+            for ((i, a) in acts.withIndex()) {
+                when {
+{% for t in terminals %}
+                    {{ t.test }} -> { {{ t.body|join("; ") }}; {{ t.exit }} }
+{% endfor %}
+                    a.is_Send && a.dtor_hasBody() -> { handed = true; thread(name = "EHBP upload", isDaemon = true) { run(acts.subList(i + 1, acts.size)) } }
+                }
+                val (e, ctl) = perform(a)
+                if (ctl == Ctl.Stop) return
+                if (e != null) events += e
+                if (a.is_Send && a.dtor_hasBody()) break // the upload lane owns the rest of this list
+            }
+            if (events.isEmpty()) return
+            acts = step(events.removeAt(events.size - 1))
+        }
+    }
+{%- endmacro %}

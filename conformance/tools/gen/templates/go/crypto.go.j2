@@ -1,0 +1,46 @@
+// crypto: one native call each, bytes in, bytes out. A failure is an empty
+// result (or ok false for AeadOpen), which the core rejects by length.
+// The stdlib: crypto/ecdh (nil on a low-order point), crypto/hmac, crypto/aes with
+// crypto/cipher, crypto/rand.
+
+// gcm is AES-256-GCM under key; the nonce must be the standard 12 bytes.
+func gcm(key, nonce []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(block)
+	if err == nil && len(nonce) != g.NonceSize() {
+		return nil, errors.New("nonce length")
+	}
+	return g, err
+}
+
+// Rand is the source of the ephemeral KEM scalar; tests may replace it.
+var Rand io.Reader = rand.Reader
+
+func orNil(v []byte, err error) []byte {
+	if err != nil {
+		return nil
+	}
+	return v
+}
+{% for p in primitives %}
+
+{% if p.open %}
+func {{ p.name }}({{ p.params }}) (bool, []byte) {
+{% if p.pre %}
+	{{ p.pre|indent("\t") }}
+{% endif %}
+	v, err := {{ p.expr }}
+	return err == nil, v
+}
+{% else %}
+func {{ p.name }}({{ p.params }}) []byte {
+{% if p.pre %}
+	{{ p.pre|indent("\t") }}
+{% endif %}
+	return {{ p.expr }}
+}
+{% endif %}
+{% endfor %}
