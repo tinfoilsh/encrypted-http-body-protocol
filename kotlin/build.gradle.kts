@@ -30,13 +30,18 @@ repositories { mavenCentral() }
 val ehbpDependencies by extra(listOf(
     "org.bouncycastle:bcprov-jdk18on:1.79",
     "com.squareup.okhttp3:okhttp:4.12.0",
-    "org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0",
+    "org.dafny:DafnyRuntime:4.11.0",
 ))
+// The event-driven protocol core, generated from ../dafny/ehbp_events.dfy (see ../dafny/generate.sh).
+val ehbpCoreSources by extra("../dafny/gen-events/java")
 
 dependencies {
     ehbpDependencies.forEach { api(it) }
     testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0") // test vectors only
 }
+
+sourceSets.main { java.srcDir(ehbpCoreSources) }
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
