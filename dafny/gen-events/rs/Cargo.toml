@@ -1,0 +1,11 @@
+[package]
+name = "ehbp-events-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/ehbp_events.rs"
+
+[dependencies]
+dafny_runtime = { package = "dafny-runtime", version = "=0.3.1", features = ["small-int", "sync"] }

@@ -1,0 +1,8 @@
+{
+  "name": "ehbp-dafny-gen",
+  "private": true,
+  "description": "Dafny-generated EHBP event core for JavaScript; regenerate with ../../generate-events.sh",
+  "dependencies": {
+    "bignumber.js": "^9.3.0"
+  }
+}
