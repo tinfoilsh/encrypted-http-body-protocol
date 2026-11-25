@@ -2,7 +2,7 @@
 //
 // It serves the reference HPKE key config and a set of scenario routes under
 // /s/{scenario}. Every scenario first derives a CORRECT bound response through
-// the reference identity API, then applies one deterministic transform (drop a
+// the reference middleware, then applies one deterministic transform (drop a
 // header, flip a tag byte, truncate a frame). No route depends on timing, so a
 // client's observed result is fully determined by the scenario. See
 // conformance/spec and conformance/README.md.
@@ -278,7 +278,6 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 		// assert the key header is present iff a body is, lowercase, and that
 		// caller headers survive. The format is fixed: enc=<count>:<len>:<case>.
 		if name == "request_meta" {
-			raw, _ := io.ReadAll(r.Body)
 			keys := r.Header.Values(protocol.EncapsulatedKeyHeader)
 			first, kase := "", "none"
 			if len(keys) > 0 {
@@ -293,23 +292,11 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 				}
 			}
 			line := fmt.Sprintf("enc=%d:%d:%s x-caller=%s", len(keys), len(first), kase, r.Header.Get("X-Caller"))
-			if len(keys) == 0 {
-				w.Header().Set("Content-Type", "text/plain")
-				w.WriteHeader(http.StatusOK)
-				io.WriteString(w, line)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(raw))
-			respCtx, err := id.DecryptRequestWithContext(r)
-			if err != nil || respCtx == nil {
-				http.Error(w, "bad encrypted request", http.StatusBadRequest)
-				return
-			}
-			if _, err := io.ReadAll(r.Body); err != nil {
-				http.Error(w, "request decryption failed", http.StatusBadRequest)
-				return
-			}
-			sealAndWrite(w, id, respCtx, []byte(line))
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.ReadAll(r.Body); err == nil {
+					io.WriteString(w, line)
+				}
+			})).ServeHTTP(w, r)
 			return
 		}
 
@@ -333,53 +320,57 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 				obsMu.Unlock()
 			}
 			r.Body = io.NopCloser(bytes.NewReader(raw))
-			respCtx, err := id.DecryptRequestWithContext(r)
-			if err != nil || respCtx == nil {
-				http.Error(w, "shape route requires an encrypted request body", http.StatusBadRequest)
-				return
-			}
-			plaintext, _ := io.ReadAll(r.Body)
-			sealAndWrite(w, id, respCtx, plaintext)
+			id.Middleware()(http.HandlerFunc(echo)).ServeHTTP(w, r)
 			return
 		}
 
-		// Remaining routes bind a response to the request. Decrypt it first.
-		respCtx, err := id.DecryptRequestWithContext(r)
-		if err != nil {
-			http.Error(w, "bad encrypted request", http.StatusBadRequest)
-			return
-		}
-		if respCtx == nil {
-			http.Error(w, "scenario requires an encrypted request body", http.StatusBadRequest)
-			return
-		}
-		if name == "digest" {
+		// The scenarios whose reply is the middleware's own, unmodified.
+		switch name {
+		case "digest":
 			// Stream the decrypted body straight into a hash so a multi-GiB
 			// request never lands in memory; reply with the raw 32-byte digest.
-			h := sha256.New()
-			if _, err := io.Copy(h, r.Body); err != nil {
-				http.Error(w, "request decryption failed", http.StatusBadRequest)
-				return
-			}
-			sealAndWrite(w, id, respCtx, h.Sum(nil))
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h := sha256.New()
+				if _, err := io.Copy(h, r.Body); err == nil {
+					_, _ = w.Write(h.Sum(nil))
+				}
+			})).ServeHTTP(w, r)
 			return
-		}
-		plaintext, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "request decryption failed", http.StatusBadRequest)
+		case "empty_frame":
+			// An empty response as a conforming server sends it: one frame
+			// sealing an empty plaintext, which the client authenticates.
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.ReadAll(r.Body) })).ServeHTTP(w, r)
+			return
+		case "encrypted_422_problem":
+			// A 422 that carries a nonce is ciphertext like any other response
+			// (SPEC 5.1); it is never a key-config problem.
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.ReadAll(r.Body); err != nil {
+					return
+				}
+				w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"encrypted"}`)
+			})).ServeHTTP(w, r)
 			return
 		}
 
 		// Produce a correct bound response into a recorder, then transform it.
-		nonce, framed, err := sealResponse(id, respCtx, plaintext)
-		if err != nil {
-			http.Error(w, "response setup failed", http.StatusInternalServerError)
+		rec := httptest.NewRecorder()
+		id.Middleware()(http.HandlerFunc(echo)).ServeHTTP(rec, r)
+		nonce, framed := rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes()
+		if nonce == "" {
+			http.Error(w, "scenario requires an encrypted request body", http.StatusBadRequest)
 			return
 		}
 
 		switch name {
 		case "echo":
 			writeEncrypted(w, nonce, framed, http.StatusOK)
+		case "empty_encrypted":
+			// A nonce but zero frames: nothing authenticates the success, so
+			// the client must fail it (SPEC 5.3).
+			writeEncrypted(w, nonce, nil, http.StatusOK)
 		case "hold":
 			// The whole request has been read; keep the response pending long
 			// enough for the client to be observed mid-flight (SPEC 6: the
@@ -387,28 +378,6 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			// probe at 500 ms, so this is a 10x timing margin, not a handshake.
 			time.Sleep(5 * time.Second)
 			writeEncrypted(w, nonce, framed, http.StatusOK)
-		case "empty_frame":
-			// An empty response as a conforming server sends it: one frame
-			// sealing an empty plaintext, which the client authenticates.
-			rec := httptest.NewRecorder()
-			dw, e := id.SetupDerivedResponseEncryption(rec, respCtx)
-			if e == nil {
-				e = dw.Finish()
-			}
-			if e != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes(), http.StatusOK)
-		case "empty_encrypted":
-			// A nonce but zero frames: nothing authenticates the success, so
-			// the client must fail it (SPEC 5.3).
-			emptyNonce, emptyFramed, e := sealResponse(id, respCtx, nil)
-			if e != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, emptyNonce, emptyFramed, http.StatusOK)
 		case "drop_nonce_200":
 			writeEncrypted(w, "", framed, http.StatusOK)
 		case "empty_nonce_200", "empty_nonce_502":
@@ -426,19 +395,6 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			writeEncrypted(w, "0x"+nonce[:62], framed, http.StatusOK)
 		case "invalid_nonce_space":
 			writeEncrypted(w, nonce[:10]+" "+nonce[11:], framed, http.StatusOK)
-		case "encrypted_422_problem":
-			// A 422 that carries a nonce is ciphertext like any other response
-			// (SPEC 5.1); it is never a key-config problem.
-			problem := `{"type":"` + protocol.KeyConfigProblemType + `","title":"encrypted"}`
-			pNonce, pFramed, e := sealResponse(id, respCtx, []byte(problem))
-			if e != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set(protocol.ResponseNonceHeader, pNonce)
-			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = w.Write(pFramed)
 		case "invalid_nonce_len":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 16)), framed, http.StatusOK)
 		case "invalid_nonce_hex":
@@ -447,17 +403,16 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			writeEncrypted(w, strings.Repeat("0", 63), framed, http.StatusOK)
 		case "invalid_nonce_too_long":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 33)), framed, http.StatusOK)
+		case "invalid_nonce_huge":
+			// 64 KiB of valid hex digits: a nonce check that recurses per byte
+			// would exhaust a stack before rejecting it (SPEC 4.1).
+			writeEncrypted(w, strings.Repeat("ab", 32*1024), framed, http.StatusOK)
 		case "duplicate_nonce":
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(framed)
 		case "truncate_final_frame", "tamper_tag":
-			if len(framed) == 0 {
-				// An empty plaintext seals to zero frames; nothing to mutate.
-				http.Error(w, "scenario needs a non-empty request body", http.StatusBadRequest)
-				return
-			}
 			bad := append([]byte(nil), framed...)
 			if name == "truncate_final_frame" {
 				bad = bad[:len(bad)-1]
@@ -492,32 +447,12 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 	}
 }
 
-// sealAndWrite seals body under the request's response context and writes it
-// as an encrypted 200. Used by every scenario that answers with an unmodified
-// encrypted reply (echo, shape, digest); mutating scenarios call sealResponse
-// and writeEncrypted themselves.
-func sealAndWrite(w http.ResponseWriter, id *identity.Identity, respCtx *identity.ResponseContext, body []byte) {
-	nonce, framed, err := sealResponse(id, respCtx, body)
-	if err != nil {
-		http.Error(w, "response setup failed", http.StatusInternalServerError)
-		return
+// echo returns the decrypted request as one write; a request that stops
+// decrypting returns without writing, so the middleware answers with its status.
+func echo(w http.ResponseWriter, r *http.Request) {
+	if plaintext, err := io.ReadAll(r.Body); err == nil {
+		_, _ = w.Write(plaintext)
 	}
-	writeEncrypted(w, nonce, framed, http.StatusOK)
-}
-
-// sealResponse derives a correct EHBP response for the request context and
-// returns its nonce header value and framed ciphertext, using only the public
-// identity API via an in-memory recorder.
-func sealResponse(id *identity.Identity, respCtx *identity.ResponseContext, body []byte) (string, []byte, error) {
-	rec := httptest.NewRecorder()
-	dw, err := id.SetupDerivedResponseEncryption(rec, respCtx)
-	if err != nil {
-		return "", nil, err
-	}
-	if _, err := dw.Write(body); err != nil {
-		return "", nil, err
-	}
-	return rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes(), nil
 }
 
 func writeEncrypted(w http.ResponseWriter, nonce string, body []byte, status int) {

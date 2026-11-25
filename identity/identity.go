@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 
+	core "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen/go/EHBP"
+	_dafny "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen/go/dafny"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/internal/eventresidue"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
-	"golang.org/x/crypto/cryptobyte"
 )
 
 type Identity struct {
@@ -18,18 +20,6 @@ type Identity struct {
 	kem  hpke.KEM
 	kdf  hpke.KDF
 	aead hpke.AEAD
-}
-
-func (i *Identity) KEM() hpke.KEM {
-	return i.kem
-}
-
-func (i *Identity) KDF() hpke.KDF {
-	return i.kdf
-}
-
-func (i *Identity) AEAD() hpke.AEAD {
-	return i.aead
 }
 
 // IdentityStore is a serializable representation of an Identity
@@ -49,7 +39,9 @@ func NewIdentity() (*Identity, error) {
 	kdf := hpke.HKDFSHA256()
 	aead := hpke.AES256GCM()
 
-	sk, err := kem.GenerateKey()
+	// The scalar comes from the residue's RandomBytes; crypto/hpke only
+	// clamps it and derives the public key.
+	sk, err := kem.NewPrivateKey(eventresidue.RandomBytes(32))
 	if err != nil {
 		return nil, err
 	}
@@ -61,36 +53,6 @@ func NewIdentity() (*Identity, error) {
 		kdf:  kdf,
 		aead: aead,
 	}, nil
-}
-
-// FromPublicKeyBytes builds a public-key-only identity from a raw HPKE public
-// key using the default suite (DHKEM-X25519-HKDF-SHA256 / HKDF-SHA256 /
-// AES-256-GCM). The resulting identity can encrypt requests but never decrypt.
-func FromPublicKeyBytes(publicKey []byte) (*Identity, error) {
-	kem := hpke.DHKEM(ecdh.X25519())
-
-	pk, err := kem.NewPublicKey(publicKey)
-	if err != nil {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid public key: %w", err)
-	}
-
-	return &Identity{
-		pk:   pk,
-		sk:   nil,
-		kem:  kem,
-		kdf:  hpke.HKDFSHA256(),
-		aead: hpke.AES256GCM(),
-	}, nil
-}
-
-// FromPublicKeyHex builds a public-key-only identity from a hex-encoded HPKE
-// public key. See FromPublicKeyBytes.
-func FromPublicKeyHex(publicKeyHex string) (*Identity, error) {
-	raw, err := hex.DecodeString(publicKeyHex)
-	if err != nil {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid public key hex: %w", err)
-	}
-	return FromPublicKeyBytes(raw)
 }
 
 // FromFile loads an identity from a file or creates a new one if it doesn't exist
@@ -121,16 +83,6 @@ func FromFile(filename string) (*Identity, error) {
 	return i, nil
 }
 
-// PublicKey returns the public key of an identity
-func (i *Identity) PublicKey() hpke.PublicKey {
-	return i.pk
-}
-
-// PrivateKey returns the private key of an identity
-func (i *Identity) PrivateKey() hpke.PrivateKey {
-	return i.sk
-}
-
 // MarshalPublicKey returns a binary representation of the public key
 func (i *Identity) MarshalPublicKey() []byte {
 	return i.pk.Bytes()
@@ -143,18 +95,11 @@ func (i *Identity) MarshalPublicKeyHex() string {
 
 // MarshalConfig returns a binary representation of the identity compatible with RFC9458 application/ohttp-keys
 func (i *Identity) MarshalConfig() ([]byte, error) {
-	pkBytes := i.pk.Bytes()
-
-	b := cryptobyte.NewBuilder(nil)
-	b.AddUint8(0) // Key ID
-	b.AddUint16(i.kem.ID())
-	b.AddBytes(pkBytes)
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddUint16(i.kdf.ID())
-		b.AddUint16(i.aead.ID())
-	})
-
-	return b.Bytes()
+	r := core.Companion_Default___.MarshalConfig(eventresidue.Seq(i.pk.Bytes()))
+	if err := resultErr(r); err != nil {
+		return nil, err
+	}
+	return eventresidue.Bytes(r.Dtor_value().(_dafny.Sequence)), nil
 }
 
 // ConfigHandler is an HTTP handler that returns the identity's configuration
@@ -168,112 +113,12 @@ func (i *Identity) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(configs)
 }
 
-// kemPublicKeySize returns the public key size for a given KEM ID per RFC 9180.
-func kemPublicKeySize(kemID uint16) (int, error) {
-	switch kemID {
-	case 0x0010: // DHKEM(P-256, HKDF-SHA256)
-		return 65, nil
-	case 0x0011: // DHKEM(P-384, HKDF-SHA384)
-		return 97, nil
-	case 0x0012: // DHKEM(P-521, HKDF-SHA512)
-		return 133, nil
-	case 0x0020: // DHKEM(X25519, HKDF-SHA256)
-		return 32, nil
-	case 0x0021: // DHKEM(X448, HKDF-SHA512)
-		return 56, nil
-	default:
-		return 0, protocol.Errorf(protocol.UnsupportedSuite, "unknown KEM ID: 0x%04x", kemID)
+// resultErr is a core Result as a Go error: nil for Ok.
+func resultErr(r core.Result) error {
+	if r.Is_Err() {
+		return eventresidue.Error(r.Dtor_code(), eventresidue.String(r.Dtor_message()), nil)
 	}
-}
-
-// UnmarshalPublicConfig unmarshals a keys config into an identity
-//
-// Per https://github.com/chris-wood/ohttp-go/blob/main/ohttp.go
-func UnmarshalPublicConfig(data []byte) (*Identity, error) {
-	s := cryptobyte.String(data)
-
-	var id uint8
-	var kemID uint16
-	if !s.ReadUint8(&id) ||
-		!s.ReadUint16(&kemID) {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
-	}
-
-	// SPEC 3.2 defines a single suite; a config advertising any other KEM,
-	// KDF, or AEAD is unsupported, not negotiable (matches Python/Rust/Swift).
-	if kemID != 0x0020 {
-		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported KEM: 0x%04x", kemID)
-	}
-	kem, err := hpke.NewKEM(kemID)
-	if err != nil {
-		return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KEM: %w", err)
-	}
-
-	pkSize, err := kemPublicKeySize(kemID)
-	if err != nil {
-		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported KEM: %w", err)
-	}
-
-	publicKeyBytes := make([]byte, pkSize)
-	if !s.ReadBytes(&publicKeyBytes, pkSize) {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
-	}
-
-	var cipherSuites cryptobyte.String
-	if !s.ReadUint16LengthPrefixed(&cipherSuites) {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
-	}
-
-	type cipherSuite struct {
-		kdf  hpke.KDF
-		aead hpke.AEAD
-	}
-	var suites []cipherSuite
-	for !cipherSuites.Empty() {
-		var kdfID uint16
-		var aeadID uint16
-		if !cipherSuites.ReadUint16(&kdfID) ||
-			!cipherSuites.ReadUint16(&aeadID) {
-			return nil, protocol.Errorf(protocol.InvalidKeyConfig, "invalid config")
-		}
-
-		kdf, err := hpke.NewKDF(kdfID)
-		if err != nil {
-			return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid KDF: %w", err)
-		}
-		aead, err := hpke.NewAEAD(aeadID)
-		if err != nil {
-			return nil, protocol.Errorf(protocol.UnsupportedSuite, "invalid AEAD: %w", err)
-		}
-
-		suites = append(suites, cipherSuite{kdf: kdf, aead: aead})
-	}
-
-	pk, err := kem.NewPublicKey(publicKeyBytes)
-	if err != nil {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "unmarshal public key: %w", err)
-	}
-
-	if len(suites) == 0 {
-		return nil, protocol.Errorf(protocol.InvalidKeyConfig, "no cipher suites found in config")
-	}
-	// SPEC 3.2 defines exactly one suite; a list of several is not a
-	// negotiation we support.
-	if len(suites) != 1 {
-		return nil, protocol.Errorf(protocol.UnsupportedSuite, "expected exactly one cipher suite, got %d", len(suites))
-	}
-	if suites[0].kdf.ID() != 0x0001 || suites[0].aead.ID() != 0x0002 {
-		return nil, protocol.Errorf(protocol.UnsupportedSuite, "unsupported cipher suite: KDF=0x%04x, AEAD=0x%04x",
-			suites[0].kdf.ID(), suites[0].aead.ID())
-	}
-
-	return &Identity{
-		kem:  kem,
-		kdf:  suites[0].kdf,
-		aead: suites[0].aead,
-		pk:   pk,
-		sk:   nil, // public key only
-	}, nil
+	return nil
 }
 
 // Export returns a JSON representation of the identity

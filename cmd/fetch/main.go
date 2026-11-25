@@ -32,21 +32,13 @@ func main() {
 		log.Fatalf("URL is required")
 	}
 
-	secureTransport, err := client.NewTransport(url)
+	secureTransport, err := client.New(url, client.Discovered())
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}
 	httpClient := &http.Client{
 		Transport: secureTransport,
 	}
-
-	serverID := secureTransport.ServerIdentity()
-	log.WithFields(log.Fields{
-		"public_key_hex": serverID.MarshalPublicKeyHex(),
-		"hpke_kem":       serverID.KEM().ID(),
-		"hpke_kdf":       serverID.KDF().ID(),
-		"hpke_aead":      serverID.AEAD().ID(),
-	}).Debug("Server Identity")
 
 	var body io.Reader
 	if *data != "" {

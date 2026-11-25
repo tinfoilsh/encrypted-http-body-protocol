@@ -1,95 +1,43 @@
+// Package client is the Go API shim over the event-driven EHBP core
+// (dafny/ehbp_events.dfy): an http.RoundTripper that encrypts request bodies
+// and decrypts responses. Every exchange is driven by internal/eventresidue's
+// pump; every protocol decision is made by the core (conformance/spec/handler.md
+// section 7).
 package client
 
 import (
 	"bytes"
-	"encoding/json"
-	"fmt"
+	"context"
+	"errors"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
-	"strings"
-	"sync"
+	"strconv"
 
+	ev "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen-events/go/EHBPEvents"
+	core "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen/go/EHBP"
+	_dafny "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen/go/dafny"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/internal/eventresidue"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
+// constructor: a Transport over one server origin and the key a KeySource yields.
+
+// Transport is an http.RoundTripper bound to one server origin and its HPKE
+// public key.
 type Transport struct {
-	serverIdentity *identity.Identity
-	httpClient     *http.Client
-	// origin is the scheme://host[:port] the key configuration was fetched
-	// from or declared for; requests must target it. Nil when the Transport
-	// was built from a bare identity (NewTransportWithIdentity).
-	origin *url.URL
-
-	mu                       sync.Mutex
-	lastSessionRecoveryToken *identity.SessionRecoveryToken
-	requestGeneration        uint64
+	publicKey  []byte
+	httpClient *http.Client
+	origin     core.Origin
+	session    eventresidue.Session
 }
-
-const maxProblemDetailsBytes = 64 << 10
-
-// maxKeyConfigBytes bounds the discovery read to the largest possible first
-// key_config: 37 fixed bytes plus a suites vector of up to 65535 bytes. Only
-// the first config is read (SPEC 3.1), so this covers every accepted config
-// and every rejectable one with its proper error class.
-const maxKeyConfigBytes = 37 + (1 << 16) - 1
-
-type preservingReadCloser struct {
-	io.Reader
-	io.Closer
-}
-
-type tokenOwningReadCloser struct {
-	io.ReadCloser
-	onComplete func()
-	onError    func()
-	once       sync.Once
-}
-
-func (r *tokenOwningReadCloser) Read(p []byte) (int, error) {
-	n, err := r.ReadCloser.Read(p)
-	if err == io.EOF {
-		r.once.Do(r.onComplete)
-	} else if err != nil {
-		r.once.Do(r.onError)
-	}
-	return n, err
-}
-
-// Close ends the exchange whatever was read (SPEC 6.3): a body abandoned
-// before EOF consumes its token too.
-func (r *tokenOwningReadCloser) Close() error {
-	r.once.Do(r.onComplete)
-	return r.ReadCloser.Close()
-}
-
-var _ http.RoundTripper = (*Transport)(nil)
 
 // Option configures a Transport.
 type Option func(*Transport)
 
-// WithHTTPClient sets the underlying HTTP client used to send encrypted
-// requests (and, for NewTransport, to fetch the server key configuration). It
-// lets callers compose EHBP with a TLS-pinned or otherwise customized
-// http.Client. A nil client is ignored so the default remains in place.
-//
-// Encrypted requests are sent through the client's Transport only. Cookie jar
-// and timeout are supplied by the outer http.Client that drives this
-// RoundTripper, not by the client passed here; the key-configuration fetch uses
-// the client's Transport and Timeout but never follows redirects (SPEC 3.1).
-//
-// Redirects: SPEC 5.1 says a redirect of an encrypted request is never
-// followed automatically. A RoundTripper cannot enforce that; the outer
-// http.Client does. Configure it with
-//
-//	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-//
-// so a 3xx is returned to the caller as a plaintext pass-through. With Go's
-// default policy a 301/302/303 is re-sent as a bodyless GET (plaintext
-// response) and a 307/308 is re-encrypted for its target; neither leaks the
-// body, but both differ from every other EHBP client.
+// WithHTTPClient sets the http.Client whose Transport sends encrypted
+// requests and which fetches the key configuration. A nil client keeps the default.
 func WithHTTPClient(c *http.Client) Option {
 	return func(t *Transport) {
 		if c != nil {
@@ -98,83 +46,158 @@ func WithHTTPClient(c *http.Client) Option {
 	}
 }
 
-func applyOptions(t *Transport, opts []Option) {
+// KeySource yields the server's HPKE public key for New: Discover, Config or PublicKey.
+type KeySource func(ctx context.Context, server string, opts ...Option) ([]byte, error)
+
+// Config is a KeySource for pre-fetched /.well-known/hpke-keys bytes (RFC 9458).
+func Config(hpkeConfig []byte) KeySource {
+	return func(context.Context, string, ...Option) ([]byte, error) { return Core().ParseConfig(hpkeConfig) }
+}
+
+// PublicKey is a KeySource for an already-trusted raw X25519 public key, for
+// example one verified through attestation; the core checks its length.
+func PublicKey(key []byte) KeySource {
+	return func(context.Context, string, ...Option) ([]byte, error) { return Core().CheckPublicKey(key) }
+}
+
+// Discovered is the KeySource that fetches /.well-known/hpke-keys from the server (Discover).
+func Discovered() KeySource { return Discover }
+
+// New returns a Transport bound to server's origin, with the key keys yields.
+func New(server string, keys KeySource, opts ...Option) (*Transport, error) {
+	if keys == nil {
+		return nil, protocol.Errorf(protocol.InvalidInput, "key source is required")
+	}
+	t, err := newTransport(server, opts)
+	if err != nil {
+		return nil, err
+	}
+	if t.publicKey, err = keys(context.Background(), server, opts...); err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+func newTransport(server string, opts []Option) (*Transport, error) {
+	origin, err := parseOrigin(server)
+	if err != nil {
+		return nil, err
+	}
+	t := &Transport{httpClient: &http.Client{}, origin: origin}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(t)
 		}
 	}
-}
-
-func NewTransport(server string, opts ...Option) (*Transport, error) {
-	origin, err := parseOrigin(server)
-	if err != nil {
-		return nil, err
-	}
-	t := &Transport{
-		httpClient: &http.Client{},
-		origin:     origin,
-	}
-	applyOptions(t, opts)
-
-	if err := t.syncServerPublicKey(server); err != nil {
-		return nil, fmt.Errorf("failed to sync server public key: %w", err)
-	}
-
 	return t, nil
 }
 
-// NewTransportWithConfig creates a new Transport with a pre-fetched HPKE key configuration.
-// The hpkeConfig should be the raw bytes from /.well-known/hpke-keys (RFC 9458 format).
-func NewTransportWithConfig(server string, hpkeConfig []byte, opts ...Option) (*Transport, error) {
-	origin, err := parseOrigin(server)
-	if err != nil {
-		return nil, err
+// parts is a parsed URL the way MakeOrigin and Start take it.
+func parts(u *url.URL) (scheme, host string, port int, hasPort, hasUserinfo bool) {
+	if p := u.Port(); p != "" {
+		port, _ = strconv.Atoi(p)
+		hasPort = true
 	}
-	serverIdentity, err := identity.UnmarshalPublicConfig(hpkeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal public key config: %w", err)
-	}
-
-	t := &Transport{
-		serverIdentity: serverIdentity,
-		httpClient:     &http.Client{},
-		origin:         origin,
-	}
-	applyOptions(t, opts)
-	return t, nil
+	return u.Scheme, u.Hostname(), port, hasPort, u.User != nil
 }
 
-// NewTransportWithIdentity creates a Transport from an already-trusted server
-// identity, for example one built from an attestation-verified HPKE public key
-// via identity.FromPublicKeyHex. No network request is made to fetch keys.
-func NewTransportWithIdentity(serverIdentity *identity.Identity, opts ...Option) (*Transport, error) {
-	if serverIdentity == nil {
-		return nil, protocol.Errorf(protocol.InvalidInput, "server identity is required")
-	}
-
-	t := &Transport{
-		serverIdentity: serverIdentity,
-		httpClient:     &http.Client{},
-	}
-	applyOptions(t, opts)
-	return t, nil
-}
-
-// parseOrigin validates a base URL the way the Python and Rust clients do:
-// http(s) scheme, a host, and no credentials.
-func parseOrigin(server string) (*url.URL, error) {
+// parseOrigin hands the parsed parts of server to the core, which validates them.
+func parseOrigin(server string) (core.Origin, error) {
 	u, err := url.Parse(server)
+	if err != nil {
+		return core.Origin{}, protocol.Errorf(protocol.InvalidInput, "failed to parse server URL: %w", err)
+	}
+	scheme, host, port, hasPort, hasUserinfo := parts(u)
+	optPort := core.Companion_Option_.Create_None_()
+	if hasPort {
+		optPort = core.Companion_Option_.Create_Some_(_dafny.IntOfInt(port))
+	}
+	r := core.Companion_Default___.MakeOrigin(eventresidue.Str(scheme), eventresidue.Str(host), optPort, hasUserinfo)
+	if r.Is_Err() {
+		return core.Origin{}, eventresidue.Error(r.Dtor_code(), eventresidue.String(r.Dtor_message()), nil)
+	}
+	return r.Dtor_value().(core.Origin), nil
+}
+
+// request: the one entry point, RoundTrip; the core validates, seals, classifies and decrypts.
+
+// RoundTrip performs one encrypted exchange. The core validates the request,
+// seals the body when present, classifies the response and decrypts it; the
+// returned response is the stack's own with its body replaced.
+func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL == nil {
+		return nil, protocol.Errorf(protocol.InvalidInput, "request has no URL")
+	}
+	outgoing := req.Clone(req.Context())
+	// A request derived from an inbound one (httputil.ReverseProxy) carries
+	// RequestURI and Host; the wire target and Host follow the validated URL.
+	outgoing.RequestURI = ""
+	outgoing.Host = ""
+
+	var body = req.Body
+	if body == http.NoBody {
+		body = nil
+	}
+	if body != nil {
+		// A cancelled context closes the body so a blocked read in the upload lane returns.
+		defer context.AfterFunc(req.Context(), func() { _ = body.Close() })()
+	}
+	scheme, host, port, hasPort, hasUserinfo := parts(req.URL)
+	start := ev.Companion_Event_.Create_Start_(eventresidue.Str(req.Method), eventresidue.Str(req.URL.String()),
+		eventresidue.Str(scheme), eventresidue.Str(host), _dafny.IntOfInt(port), hasPort, hasUserinfo,
+		eventresidue.HeaderSeq(req.Header), body != nil)
+	x := eventresidue.NewExchange(ev.Companion_Default___.Initial(t.origin, eventresidue.Seq(t.publicKey)),
+		&t.session, t.roundTripper().RoundTrip, outgoing, body)
+	x.Feed(start)
+	switch {
+	case x.Failure != nil:
+		if protocol.CodeOf(x.Failure) == protocol.KeyConfigMismatch {
+			return nil, identity.NewKeyConfigError(x.Failure)
+		}
+		return nil, x.Failure
+	case x.Passthrough:
+		resp := x.Response
+		if len(x.Prefix) > 0 {
+			resp.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(x.Prefix), resp.Body), resp.Body}
+		}
+		return resp, nil
+	case x.Done:
+		resp := x.Response
+		resp.Header, resp.ContentLength, resp.Body = x.Headers, -1, &eventresidue.BodyReader{X: x}
+		return resp, nil
+	}
+	return nil, errors.New("exchange ended without an outcome")
+}
+
+func (t *Transport) roundTripper() http.RoundTripper {
+	if t.httpClient.Transport != nil {
+		return t.httpClient.Transport
+	}
+	return http.DefaultTransport
+}
+
+// discover: the same discovery the constructor runs; the 32-byte public key.
+
+// Discover fetches server's key configuration (SPEC 3.1) and returns the
+// public key; `Discovered()` is the same discovery as a KeySource for New.
+func Discover(ctx context.Context, server string, opts ...Option) ([]byte, error) {
+	t, err := newTransport(server, opts)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := http.NewRequestWithContext(ctx, http.MethodGet, server, nil)
 	if err != nil {
 		return nil, protocol.Errorf(protocol.InvalidInput, "failed to parse server URL: %w", err)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, protocol.Errorf(protocol.InvalidInput, "base URL must include an HTTP origin")
+	x := eventresidue.NewExchange(ev.Companion_Default___.Initial(t.origin, eventresidue.Seq(nil)), &t.session, noRedirectClient(t.httpClient).Do, keys, nil)
+	x.Feed(ev.Companion_Event_.Create_DiscoverStart_())
+	if x.Failure != nil {
+		return nil, x.Failure
 	}
-	if u.User != nil {
-		return nil, protocol.Errorf(protocol.InvalidInput, "base URL must not include credentials")
-	}
-	return &url.URL{Scheme: u.Scheme, Host: u.Host}, nil
+	return x.PublicKey, nil
 }
 
 // noRedirectClient copies c with a policy that returns the first response, so
@@ -185,282 +208,23 @@ func noRedirectClient(c *http.Client) *http.Client {
 	return &cp
 }
 
-func portOf(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
+// token: the exchange in flight.
+
+// SessionRecoveryToken returns the token of the exchange in flight, or nil
+// (SPEC 6): nil before any request, after a bodyless one, and once an
+// exchange has ended.
+func (t *Transport) SessionRecoveryToken() *SessionRecoveryToken {
+	tok := t.session.Token()
+	if tok == nil {
+		return nil
 	}
-	if u.Scheme == "https" {
-		return "443"
+	return &SessionRecoveryToken{
+		ExportedSecret: eventresidue.Bytes(tok.Dtor_exportedSecret()),
+		RequestEnc:     eventresidue.Bytes(tok.Dtor_requestEnc()),
 	}
-	return "80"
 }
 
-func sameOrigin(a, b *url.URL) bool {
-	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		portOf(a) == portOf(b)
-}
+// selfCheck: the core's primitive vectors through this residue.
 
-// setToken publishes (or clears, with nil) the token for generation unless a
-// newer request has since started.
-func (t *Transport) setToken(generation uint64, token *identity.SessionRecoveryToken) {
-	t.mu.Lock()
-	if t.requestGeneration == generation {
-		t.lastSessionRecoveryToken = token
-	}
-	t.mu.Unlock()
-}
-
-// validateRequest rejects requests that would let the caller influence the
-// authority or the protocol headers the library owns (SPEC 5.1): the Ehbp-*
-// headers and Host. Content-Length and Transfer-Encoding entries in req.Header
-// never reach the wire in Go's client (the transport derives them from the
-// request itself). req.Host, the field, is cleared in RoundTrip instead of
-// rejected: a reverse proxy sets it from the inbound request.
-func (t *Transport) validateRequest(req *http.Request) error {
-	if req.URL == nil {
-		return protocol.Errorf(protocol.InvalidInput, "request has no URL")
-	}
-	if req.URL.User != nil {
-		return protocol.Errorf(protocol.InvalidInput, "request URL must not include credentials")
-	}
-	if t.origin != nil && !sameOrigin(t.origin, req.URL) {
-		return protocol.Errorf(protocol.InvalidInput, "request URL must use the configured origin: %s", t.origin)
-	}
-	for name := range req.Header {
-		if strings.EqualFold(name, protocol.EncapsulatedKeyHeader) || strings.EqualFold(name, protocol.ResponseNonceHeader) || strings.EqualFold(name, "Host") {
-			return protocol.Errorf(protocol.InvalidInput, "reserved request header cannot be set by callers: %s", name)
-		}
-	}
-	return nil
-}
-
-func (t *Transport) syncServerPublicKey(server string) error {
-	parsed, err := url.Parse(server)
-	if err != nil {
-		return protocol.Errorf(protocol.InvalidInput, "failed to parse server URL: %w", err)
-	}
-	// Exactly /.well-known/hpke-keys on the origin: no base path, query, or fragment.
-	keysURL := &url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: protocol.KeysPath}
-
-	resp, err := noRedirectClient(t.httpClient).Get(keysURL.String())
-	if err != nil {
-		return fmt.Errorf("failed to get server public key: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// SPEC 3.1: status 200 only (a 3xx surfaces here because redirects are not followed).
-	if resp.StatusCode != http.StatusOK {
-		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned status %d", resp.StatusCode)
-	}
-
-	if !isMediaType(resp.Header.Get("Content-Type"), protocol.KeysMediaType) {
-		return protocol.Errorf(protocol.InvalidKeyConfig, "server returned invalid content type: %s", resp.Header.Get("Content-Type"))
-	}
-
-	// Only the first key_config is used (SPEC 3.1); bound the read so a hostile
-	// endpoint cannot make discovery allocate without limit.
-	ohttpKeys, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyConfigBytes))
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	serverIdentity, err := identity.UnmarshalPublicConfig(ohttpKeys)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal public key: %w", err)
-	}
-	t.serverIdentity = serverIdentity
-
-	return nil
-}
-
-func (t *Transport) ServerIdentity() *identity.Identity {
-	return t.serverIdentity
-}
-
-// GetSessionRecoveryToken returns the session recovery token from the most
-// recent request that had a body. Returns nil if no token is available (e.g.
-// no request has been made yet, or the last request was bodyless).
-func (t *Transport) GetSessionRecoveryToken() *identity.SessionRecoveryToken {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.lastSessionRecoveryToken
-}
-
-// isMediaType reports whether contentType's media type is want, compared
-// case-insensitively with any parameters ignored.
-func isMediaType(contentType, want string) bool {
-	if contentType == "" {
-		return false
-	}
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		mediaType = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
-	}
-	return strings.EqualFold(mediaType, want)
-}
-
-func isProblemJSONContentType(contentType string) bool {
-	return isMediaType(contentType, protocol.ProblemJSONMediaType)
-}
-
-func isKeyConfigMismatchResponse(resp *http.Response) (bool, string, error) {
-	if resp.StatusCode != http.StatusUnprocessableEntity {
-		return false, "", nil
-	}
-	if !isProblemJSONContentType(resp.Header.Get("Content-Type")) {
-		return false, "", nil
-	}
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxProblemDetailsBytes+1))
-	if err != nil {
-		return false, "", fmt.Errorf("failed to read problem response: %w", err)
-	}
-	if len(bodyBytes) > maxProblemDetailsBytes {
-		resp.Body = &preservingReadCloser{
-			Reader: io.MultiReader(bytes.NewReader(bodyBytes), resp.Body),
-			Closer: resp.Body,
-		}
-		return false, "", nil
-	}
-	_ = resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	resp.ContentLength = int64(len(bodyBytes))
-
-	// SPEC 5.4.2: the exact, case-sensitive "type" member decides; "title" is
-	// used only when it is a string. encoding/json's case-insensitive field
-	// matching is deliberately not used.
-	var problem map[string]json.RawMessage
-	if err := json.Unmarshal(bodyBytes, &problem); err != nil {
-		return false, "", nil
-	}
-	var typ string
-	if err := json.Unmarshal(problem["type"], &typ); err != nil || typ != protocol.KeyConfigProblemType {
-		return false, "", nil
-	}
-	var title string
-	_ = json.Unmarshal(problem["title"], &title)
-	return true, title, nil
-}
-
-// roundTripper returns the RoundTripper used to send encrypted requests,
-// honoring a Transport configured via WithHTTPClient.
-func (t *Transport) roundTripper() http.RoundTripper {
-	if t.httpClient.Transport != nil {
-		return t.httpClient.Transport
-	}
-	return http.DefaultTransport
-}
-
-func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := t.validateRequest(req); err != nil {
-		return nil, err
-	}
-
-	t.mu.Lock()
-	t.requestGeneration++
-	generation := t.requestGeneration
-	t.lastSessionRecoveryToken = nil
-	t.mu.Unlock()
-
-	// Create a copy of the request to avoid modifying the original
-	newReq := req.Clone(req.Context())
-
-	// A RoundTripper may be handed a request derived from an inbound server
-	// request (for example when used behind httputil.ReverseProxy), which
-	// carries RequestURI. http.Client.Do rejects any client request with
-	// RequestURI set, and the outbound request-target is taken from URL, so
-	// clear it. RequestURI is outside EHBP's protection (bodies only, empty
-	// AAD) and is not read during encryption, so clearing it changes no
-	// authenticated data.
-	newReq.RequestURI = ""
-
-	// req.Host, not req.URL.Host, is what Go sends as the wire Host header,
-	// so a caller (or a reverse proxy forwarding its inbound Host) could
-	// address another virtual host while the URL passes the origin check.
-	// Clear it so the Host header always follows the validated URL, as the
-	// Python and Rust clients do.
-	newReq.Host = ""
-
-	// Encrypt request to server's public key and get context for response decryption
-	// For bodyless requests, reqCtx will be nil - response passes through unencrypted
-	reqCtx, err := t.serverIdentity.EncryptRequestWithContext(newReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt request: %w", err)
-	}
-
-	var token *identity.SessionRecoveryToken
-	if reqCtx != nil {
-		token, err = identity.ExtractSessionRecoveryToken(reqCtx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract session recovery token: %w", err)
-		}
-		// Publish before sending (SPEC 6): the token must survive a crash
-		// while the response is pending. Every failure path below clears it.
-		t.setToken(generation, token)
-	}
-
-	// Send through a RoundTripper rather than a nested http.Client: a
-	// RoundTripper performs a single HTTP transaction, so a redirect is
-	// seen here and is never followed on the caller's behalf.
-	resp, err := t.roundTripper().RoundTrip(newReq)
-	if err != nil {
-		t.setToken(generation, nil)
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-
-	// Only decrypt if we encrypted the request (had a body)
-	if reqCtx != nil {
-		// A response carrying a nonce (even an empty one) is handled by the
-		// nonce rules: the key-config problem is only looked for without one
-		// (SPEC 5.4.2), and an empty value is malformed, not absent (SPEC 4.2).
-		nonceAbsent := len(resp.Header.Values(protocol.ResponseNonceHeader)) == 0
-		rekey, title := false, ""
-		if nonceAbsent {
-			var checkErr error
-			rekey, title, checkErr = isKeyConfigMismatchResponse(resp)
-			if checkErr != nil {
-				resp.Body.Close()
-				t.setToken(generation, nil)
-				return nil, checkErr
-			}
-		}
-		if rekey {
-			resp.Body.Close()
-			t.setToken(generation, nil)
-			if title == "" {
-				title = "key configuration mismatch"
-			}
-			return nil, identity.NewKeyConfigError(protocol.Errorf(protocol.KeyConfigMismatch, "%s", title))
-		}
-
-		// A redirect is refused whether or not it carries a nonce (SPEC 5.3):
-		// its Location is unauthenticated, and following it can turn the
-		// encrypted exchange into a bodyless one that EHBP does not protect.
-		if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
-			resp.Body.Close()
-			t.setToken(generation, nil)
-			return nil, protocol.Errorf(protocol.UnexpectedRedirect, "status %d in response to an encrypted request", resp.StatusCode)
-		}
-
-		if nonceAbsent && resp.StatusCode >= http.StatusBadRequest {
-			// Unauthenticated pass-through: the exchange's token is consumed (SPEC 5.1).
-			t.setToken(generation, nil)
-			return resp, nil
-		}
-
-		if err := identity.DecryptResponseWithToken(resp, token); err != nil {
-			resp.Body.Close()
-			t.setToken(generation, nil)
-			return nil, fmt.Errorf("failed to decrypt response: %w", err)
-		}
-
-		resp.Body = &tokenOwningReadCloser{
-			ReadCloser: resp.Body,
-			onComplete: func() { t.setToken(generation, nil) },
-			onError:    func() { t.setToken(generation, nil) },
-		}
-	}
-
-	return resp, nil
-}
+// SelfCheck runs the core's primitive vectors through this residue.
+func SelfCheck() []string { return eventresidue.SelfCheck() }

@@ -25,7 +25,7 @@ func main() {
 		log.Debug("Verbose logging enabled")
 	}
 
-	secureTransport, err := client.NewTransport(*serverURL)
+	secureTransport, err := client.New(*serverURL, client.Discovered())
 	if err != nil {
 		log.Fatalf("failed to create secure client: %v", err)
 	}

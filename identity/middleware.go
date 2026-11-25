@@ -1,102 +1,62 @@
 package identity
 
 import (
-	"encoding/json"
 	"net/http"
 
-	log "github.com/sirupsen/logrus"
-	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
+	sv "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen-events/go/EHBPServer"
+	_dafny "github.com/tinfoilsh/encrypted-http-body-protocol/dafny/gen/go/dafny"
+	"github.com/tinfoilsh/encrypted-http-body-protocol/internal/eventresidue"
 )
 
-type problemDetails struct {
-	Type  string `json:"type"`
-	Title string `json:"title"`
-}
-
-func sendError(w http.ResponseWriter, err error, text string, status int) {
-	log.Debugf("ehbp middleware error: %s: %v", text, err)
-
-	if status == http.StatusUnprocessableEntity {
-		w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(problemDetails{
-			Type:  protocol.KeyConfigProblemType,
-			Title: text,
-		})
-		return
-	}
-
-	http.Error(w, text, status)
-}
-
-func statusForProtocolError(err error) int {
-	if IsKeyConfigError(err) {
-		return http.StatusUnprocessableEntity
-	}
-	if IsClientError(err) {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
-}
-
-// Middleware wraps an HTTP handler to encrypt/decrypt requests and responses.
-// Requests with Ehbp-Encapsulated-Key header are decrypted and responses are encrypted.
-// Requests without the header are passed through as plaintext.
+// Middleware wraps an HTTP handler to decrypt requests and encrypt responses
+// on the core's server driver (EHBPServer.ServerStep). Requests with an
+// Ehbp-Encapsulated-Key header are decrypted and their responses encrypted;
+// requests without one are passed through as plaintext. A request the core
+// refuses is answered with its status (400, 422 problem document or 500)
+// before the handler runs; a frame that fails after the handler started
+// fails its read and, once the handler returns, is answered with a 400 or,
+// if the response has started, aborts it (SPEC 5.2).
 func (i *Identity) Middleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// A present key requires authenticated request payload, even when
-			// HTTP reports an empty body. Only an absent key selects plaintext.
-			if len(r.Header.Values(protocol.EncapsulatedKeyHeader)) == 0 {
-				log.Debugf("no %s header, passing through as plaintext", protocol.EncapsulatedKeyHeader)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Decrypt request body and get context for response
-			respCtx, err := i.DecryptRequestWithContext(r)
+			sk, err := i.sk.Bytes()
 			if err != nil {
-				status := statusForProtocolError(err)
-				sendError(w, err, "failed to decrypt request", status)
+				http.Error(w, "failed to decrypt request", http.StatusInternalServerError)
 				return
 			}
-
-			// Require authenticated payload before invoking the handler.
-			if err := respCtx.decryptor.requireRequestPayload(); err != nil {
-				sendError(w, err, "failed to read decrypted request body", statusForProtocolError(err))
-				_ = r.Body.Close()
-				return
+			x := eventresidue.NewServer(sk, i.pk.Bytes(), r.Body, w)
+			x.Pass = func() { next.ServeHTTP(w, r) }
+			x.Handler = func() {
+				// The handler reads the core's plaintext stream in place of the wire body.
+				r.Body, r.ContentLength = &eventresidue.Body{X: x}, -1
+				r.Header.Del("Content-Length")
+				next.ServeHTTP(&responseWriter{ResponseWriter: w, x: x}, r)
 			}
-
-			// Setup response encryption using derived keys
-			encryptedWriter, err := i.SetupDerivedResponseEncryption(w, respCtx)
-			if err != nil {
-				status := statusForProtocolError(err)
-				sendError(w, err, "failed to setup response encryption", status)
-				return
-			}
-
-			// Pass with encrypted writer
-			next.ServeHTTP(encryptedWriter, r)
-
-			// SPEC 5.2: a chunk that failed after the handler started must not
-			// let the exchange complete. If nothing has been sent yet this is a
-			// normal protocol error; otherwise abort so the client sees a
-			// transport failure instead of a complete message.
-			if ferr := respCtx.decryptor.Err(); ferr != nil {
-				if !encryptedWriter.wroteHeader {
-					// Nothing has been sent: answer in plaintext, so drop the
-					// response-encryption headers set up for the handler.
-					w.Header().Del(protocol.ResponseNonceHeader)
-					w.Header().Del("Transfer-Encoding")
-					sendError(w, ferr, "failed to read decrypted request body", statusForProtocolError(ferr))
-					return
-				}
-				panic(http.ErrAbortHandler)
-			}
-			if err := encryptedWriter.Finish(); err != nil {
-				panic(http.ErrAbortHandler)
-			}
+			x.Start(r.Header, r.Body != nil && r.Body != http.NoBody)
 		})
+	}
+}
+
+// responseWriter hands what the handler writes to the core, which seals it
+// under the keys derived from the request's HPKE context, one frame per
+// write; 204 and 205 are sent as 200 so the response can carry a frame and
+// a response with no body gets one frame of empty plaintext (SPEC 5.2, 5.3).
+type responseWriter struct {
+	http.ResponseWriter
+	x *eventresidue.Server
+}
+
+func (w *responseWriter) WriteHeader(statusCode int) {
+	w.x.Feed(sv.Companion_SEvent_.Create_HandlerHead_(_dafny.IntOfInt(statusCode)))
+}
+
+func (w *responseWriter) Write(data []byte) (int, error) {
+	w.x.Feed(sv.Companion_SEvent_.Create_HandlerChunk_(eventresidue.Seq(data)))
+	return len(data), nil
+}
+
+func (w *responseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
