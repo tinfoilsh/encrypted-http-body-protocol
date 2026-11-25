@@ -17,14 +17,11 @@ public enum EHBPProtocol {
     /// Problem type identifying a key configuration mismatch (SPEC 5.4.2)
     public static let keyConfigProblemType = "urn:ietf:params:ehbp:error:key-config"
 
-    /// Largest problem-details body the client inspects; larger ones pass through
-    public static let maxProblemDetailsBytes = 64 * 1024
-
     /// Well-known path for HPKE keys endpoint
     public static let keysPath = "/.well-known/hpke-keys"
 }
 
-/// HPKE suite configuration matching the Go implementation
+/// HPKE suite identifiers (SPEC 3)
 public enum HPKEConfig {
     /// KEM: X25519 HKDF SHA256 (0x0020)
     public static let kem: UInt16 = 0x0020
@@ -59,16 +56,9 @@ public enum EHBPConstants {
     /// X25519 encapsulated key length
     public static let requestEncLength = 32
 
-    /// Length of a framed response chunk's big-endian length prefix
-    public static let responseLengthPrefixBytes = 4
-
     /// Label for deriving response key
     public static let responseKeyLabel = "key"
 
     /// Label for deriving response nonce
     public static let responseNonceLabel = "nonce"
-
-    /// Maximum size of a single framed response chunk the client will buffer
-    /// (64 MiB). Bounds memory from an attacker-controlled length prefix.
-    public static let maxResponseChunkBytes = 64 * 1024 * 1024
 }

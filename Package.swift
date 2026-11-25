@@ -1,6 +1,10 @@
 // swift-tools-version:5.9
 import PackageDescription
 
+// EHBPCore is the verified Dafny core behind a C ABI (rust/ffi), packaged as
+// an xcframework by swift/build-core.sh; run it before building. Release
+// builds attach the xcframework to the GitHub release and pin its checksum
+// here (conformance/spec/swift-ffi.md).
 let package = Package(
     name: "EHBP",
     platforms: [
@@ -15,15 +19,14 @@ let package = Package(
             targets: ["EHBP"]
         )
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
-    ],
     targets: [
+        .binaryTarget(
+            name: "EHBPCore",
+            path: "swift/EHBPCore.xcframework"
+        ),
         .target(
             name: "EHBP",
-            dependencies: [
-                .product(name: "Crypto", package: "swift-crypto")
-            ],
+            dependencies: ["EHBPCore"],
             path: "swift/Sources/EHBP"
         ),
         .testTarget(
