@@ -14,17 +14,18 @@
   },
   "scripts": {
     "clean": "node -e \"const fs = require('node:fs'); for (const dir of ['dist/esm', 'dist/cjs']) fs.rmSync(dir, { recursive: true, force: true })\"",
-    "build": "npm run clean && npm run build:esm && npm run build:cjs",
-    "build:esm": "tsc -p tsconfig.esm.json && echo '{\"type\":\"module\"}' > dist/esm/package.json",
-    "build:cjs": "tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
-    "build:browser": "node build-browser.js",
+    "build": "npm run clean && npm run build:core && npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.esm.json && node scripts/copy-core.js dist/esm/gen && echo '{\"type\":\"module\"}' > dist/esm/package.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/copy-core.js dist/cjs/gen && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
+    "build:browser": "npm run build:core && node build-browser.js",
     "build:all": "npm run build && npm run build:browser",
     "dev": "tsc --watch",
     "test": "npm run build && node --test dist/esm/test/*.test.js",
     "prepack": "npm run build",
     "test:integration": "node dist/esm/test/streaming.integration.js",
     "example": "node --experimental-strip-types examples/example.ts",
-    "serve": "node serve.js"
+    "serve": "node serve.js",
+    "build:core": "node scripts/copy-core.js src/gen"
   },
   "keywords": [
     "hpke",
@@ -40,11 +41,13 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@panva/hpke-noble": "^1.0.3",
-    "hpke": "^1.0.1"
+    "@noble/curves": "^2.0.1",
+    "bignumber.js": "^9.3.1"
   },
   "devDependencies": {
+    "@panva/hpke-noble": "^1.0.3",
     "@types/node": "^20.0.0",
+    "hpke": "^1.0.1",
     "esbuild": "^0.25.9",
     "typescript": "^5.0.0"
   },

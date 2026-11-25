@@ -4,13 +4,16 @@
  * This library provides secure HTTP communication using Hybrid Public Key Encryption (HPKE)
  * as specified in RFC 9180. It automatically encrypts request bodies and decrypts response
  * bodies while preserving HTTP headers for routing.
+ *
+ * The public surface is conformance/spec/handler.md section 7: Transport
+ * (create, request, sessionRecoveryToken), discover, selfCheck, the error
+ * classes and the protocol constants. `core` is for conformance and tests only.
  */
 
-export { Identity } from './identity.js';
-export type { RequestContext, SessionRecoveryToken } from './identity.js';
-export { extractSessionRecoveryToken, decryptResponseWithToken, serializeSessionRecoveryToken, deserializeSessionRecoveryToken } from './identity.js';
-export { Transport, createTransport } from './client.js';
-export type { TransportOptions } from './client.js';
+export { Transport, discover, selfCheck } from './client.js';
+export type { TransportOptions, KeySource, ResolvedKeys } from './client.js';
+export { core } from './identity.js';
+export type { SessionRecoveryToken } from './identity.js';
 export { PROTOCOL, HPKE_CONFIG } from './protocol.js';
 export {
   Code,
@@ -32,22 +35,3 @@ export {
   InvalidTokenError,
   InvalidInputError,
 } from './errors.js';
-
-// Export key derivation utilities for advanced usage
-export {
-  deriveResponseKeys,
-  computeNonce,
-  encryptChunk,
-  decryptChunk,
-  hexToBytes,
-  bytesToHex,
-  HPKE_REQUEST_INFO,
-  EXPORT_LABEL,
-  EXPORT_LENGTH,
-  RESPONSE_NONCE_LENGTH,
-  AES256_KEY_LENGTH,
-  AES_GCM_NONCE_LENGTH,
-} from './derive.js';
-export type { ResponseKeyMaterial } from './derive.js';
-
-export type { CipherSuite, SenderContext, RecipientContext, Key } from 'hpke';

@@ -1,394 +1,154 @@
-import { Identity } from './identity.js';
-import { extractSessionRecoveryToken, decryptResponseWithToken, canStreamUpload } from './identity.js';
+// The JavaScript API shim over the event-driven EHBP core (dafny/ehbp_events.dfy):
+// fetch-shaped calls in, every exchange driven by residue.ts's pump, the
+// core's outcome back out as a Response. Every protocol decision is the core's.
+// The surface is conformance/spec/handler.md section 7 and nothing else.
+import { type State, EHBP, EHBPEvents, EMPTY, Event, Token, core, ev, int } from './core.js';
+import { Exchange, Session, bytes, decrypted, feed, headerSeq, originOf, prefixed, seq, str, string, unwrap } from './residue.js';
+import { canStreamUpload } from './spool.js';
+import { InvalidInputError } from './errors.js';
 import type { SessionRecoveryToken } from './identity.js';
-import { PROTOCOL } from './protocol.js';
 import { forwardedRequestInit } from './request-options.js';
-import { InvalidInputError, InvalidKeyConfigError, KeyConfigMismatchError, MissingResponseNonceError, UnexpectedRedirectError } from './errors.js';
-import type { Key } from 'hpke';
 
-interface ProblemDetails {
-  type?: string;
-  title?: string;
-}
-
-const MAX_PROBLEM_DETAILS_BYTES = 64 * 1024;
-
-/**
- * HTTP transport for EHBP
- */
-/** Headers the protocol or the validated origin owns; callers cannot set them. */
-const RESERVED_REQUEST_HEADERS = [
-  'host',
-  PROTOCOL.ENCAPSULATED_KEY_HEADER,
-  PROTOCOL.RESPONSE_NONCE_HEADER,
-];
-/** Body framing is the implementation's; caller values are dropped (SPEC 5.1). */
-const FRAMING_HEADERS = ['content-length', 'transfer-encoding'];
-
-/** Network transport used after request encryption and before response decryption. */
+/** Native transport options. */
 export interface TransportOptions {
   /**
    * Fetch-compatible implementation for all network I/O, including key
-   * discovery in Transport.create(). Called with no `this`. Defaults to global
-   * fetch. See the README's "Custom network transport" section for what it
-   * receives, what it must do, and which responses are not authenticated.
+   * discovery. Called with no `this`. Defaults to global fetch. See the
+   * README's "Custom network transport" section.
    */
   fetch?: typeof fetch;
+  /** Applied to the key discovery fetch only (e.g. credentials). */
+  discoverInit?: RequestInit;
+}
+
+const fetchOf = (options: TransportOptions): typeof fetch => {
+  const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  return (input, init) => send(input, init);
+};
+
+/**
+ * The browser spool hook: where uploads cannot stream, a stream or Blob must
+ * not reach the Request constructor (Firefox stringifies a stream), so it is
+ * kept aside as the exchange's source and `init` loses its body.
+ */
+function divert(input: RequestInfo | URL, init: RequestInit | undefined, hasInitBody: boolean): [RequestInit | undefined, ReadableStream<Uint8Array> | Blob | undefined] {
+  if (canStreamUpload() || !hasInitBody || !(init!.body instanceof ReadableStream || init!.body instanceof Blob)) return [init, undefined];
+  const diverted = init!.body as ReadableStream<Uint8Array> | Blob;
+  const headers = new Headers(init!.headers ?? (input instanceof Request ? input.headers : undefined));
+  if (diverted instanceof Blob && diverted.type && !headers.has('content-type')) headers.set('content-type', diverted.type);
+  return [{ ...init, body: null, headers }, diverted];
+}
+
+/** Decrypts a response from a SessionRecoveryToken alone (SPEC 6.2); exported through `core` for conformance and tests. */
+export async function decryptWithToken(response: Response, token: SessionRecoveryToken): Promise<Response> {
+  const { Phase, Upload, Response: Resp } = EHBPEvents;
+  const s = ev.Initial(unwrap(core.MakeOrigin(str('https'), str('localhost'), EHBP.Option.create_None(), false)), seq(EMPTY)); // the response lane never reads the origin
+  const state: State = EHBPEvents.State.create_State(Phase.create_Exchanging(Upload.create_NoUpload(), Resp.create_AwaitHead(true)),
+    s.dtor_origin, s.dtor_publicKey, s.dtor_verb, s.dtor_url, s.dtor_headers, s.dtor_generation, false,
+    Token.create_Token(seq(token.exportedSecret), seq(token.requestEnc)), s.dtor_ctx);
+  const x = new Exchange(state, new Session(), null!, {}, null); // nothing is sent
+  x.response = response;
+  return outcome(x, Event.create_ResponseHead(int(response.status), headerSeq(response.headers), false));
+}
+
+// constructor: a Transport over one server origin and the key a KeySource yields.
+
+/** The server's key, already resolved: an RFC 9458 key configuration or a 32-byte public key. */
+export type ResolvedKeys = { config: Uint8Array } | { publicKey: Uint8Array };
+/** `keys` for Transport.create: `discover` fetches `/.well-known/hpke-keys` (SPEC 3.1). */
+export type KeySource = ResolvedKeys | { discover: true };
+
+/** The native Response for an outcome: the stack's own when its body is untouched, else a rebuilt one over the exchange. */
+async function outcome(x: Exchange, first: Event): Promise<Response> {
+  await feed(x, first);
+  if (x.failure) throw x.failure;
+  const native = x.response!;
+  const init = { status: native.status, statusText: native.statusText };
+  if (x.passthrough && x.prefix.length === 0) return native;
+  if (x.passthrough) return new Response(prefixed(x), { ...init, headers: native.headers });
+  if (x.done) return new Response(decrypted(x), { ...init, headers: x.headers });
+  throw new Error('exchange ended without an outcome');
+}
+
+// discover: the same discovery the constructor runs; the 32-byte public key.
+
+/** The same discovery Transport.create runs (SPEC 3.1), for callers that cache keys: the server's 32-byte public key. */
+export async function discover(server: string, options: TransportOptions = {}): Promise<Uint8Array> {
+  const x = new Exchange(ev.Initial(unwrap(originOf(server)), seq(EMPTY)), new Session(), fetchOf(options), { ...options.discoverInit }, null);
+  await feed(x, Event.create_DiscoverStart());
+  if (x.failure) throw x.failure;
+  return x.publicKey!;
 }
 
 export class Transport {
   private readonly fetchImpl: typeof fetch;
-  private serverIdentity: Identity;
-  private serverHost: string;
-  private serverHostname: string;
-  /** Explicit port from a host-only configuration; undefined means the scheme default. */
-  private serverPort?: string;
-  private serverOrigin?: string;
-  private _lastSessionRecoveryToken?: SessionRecoveryToken;
-  private requestGeneration = 0;
+  private readonly origin;
+  private readonly publicKey: Uint8Array;
+  private readonly session = new Session();
 
-  /** `serverHost` is a host (`example.com:8443`) or an origin (`https://example.com`); an origin also pins the scheme. */
-  constructor(serverIdentity: Identity, serverHost: string, options: TransportOptions = {}) {
-    const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    this.fetchImpl = (input, init) => send(input, init);
-    this.serverIdentity = serverIdentity;
-    this.serverHost = serverHost;
-    const originUrl = serverHost.includes('://') ? new URL(serverHost) : undefined;
-    if (originUrl && (originUrl.username || originUrl.password)) {
-      throw new InvalidInputError('base URL must not include credentials');
-    }
-    this.serverOrigin = originUrl?.origin;
-    // Canonicalize the hostname (lower-case, IDNA) so the comparison in
-    // request() is spelling-independent, but keep an explicit port as given:
-    // URL would drop ":80" and let "example.com:80" match https on 443.
-    const parsed = new URL(`http://${this.serverOrigin ? new URL(this.serverOrigin).host : serverHost}`);
-    this.serverHostname = parsed.hostname;
-    this.serverPort = /:(\d+)$/.exec(serverHost)?.[1];
+  /** `server` is the http(s) origin every request must target (`https://example.com`); `keys` must already be resolved (see `create`). */
+  constructor(server: string, keys: ResolvedKeys, options: TransportOptions = {}) {
+    this.fetchImpl = fetchOf(options);
+    this.origin = unwrap(originOf(server));
+    this.publicKey = 'config' in keys ? bytes(unwrap(core.ParseConfig(seq(keys.config)))) : bytes(unwrap(core.CheckPublicKey(seq(keys.publicKey))));
   }
 
-  getSessionRecoveryToken(): SessionRecoveryToken {
-    if (!this._lastSessionRecoveryToken) {
-      throw new Error('No session recovery token available — no request has been made yet');
-    }
-    return this._lastSessionRecoveryToken;
+  /** The constructor path for every key source; `{ discover: true }` fetches the server's key configuration first. */
+  static async create(server: string, keys: KeySource, options: TransportOptions = {}): Promise<Transport> {
+    return new Transport(server, 'discover' in keys ? { publicKey: await discover(server, options) } : keys, options);
   }
 
-  /**
-   * Create a new transport by fetching server public key.
-   * The optional init is applied to the key fetch (e.g. credentials).
-   */
-  static async create(serverURL: string, init?: RequestInit, options: TransportOptions = {}): Promise<Transport> {
-    const url = new URL(serverURL);
-    // Same canonical rejection as the constructor and request(), before the
-    // key fetch can fail with an uncoded TypeError.
-    if (url.username || url.password) {
-      throw new InvalidInputError('base URL must not include credentials');
-    }
+  // token: the exchange in flight.
 
-    // Fetch server public key
-    const keysURL = new URL(PROTOCOL.KEYS_PATH, serverURL);
-    const send = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
-    // SPEC 3.1: never follow redirects; a 3xx (or an opaqueredirect in
-    // browsers) then fails the status check below.
-    const response = await send(keysURL.toString(), { ...init, redirect: 'manual' });
-
-    if (response.status !== 200) {
-      throw new InvalidKeyConfigError(`failed to get server public key: status ${response.status}`);
-    }
-
-    const contentType = response.headers.get('content-type');
-    if (!Transport.isMediaType(contentType, PROTOCOL.KEYS_MEDIA_TYPE)) {
-      throw new InvalidKeyConfigError(`invalid key content type: ${contentType}`);
-    }
-
-    const keysData = new Uint8Array(await response.arrayBuffer());
-    const serverIdentity = await Identity.unmarshalPublicConfig(keysData);
-
-    return new Transport(serverIdentity, url.origin, options);
+  /** The token of the exchange in flight (SPEC 6), or undefined. */
+  sessionRecoveryToken(): SessionRecoveryToken | undefined {
+    const t = this.session.token();
+    return t && { exportedSecret: bytes(t.dtor_exportedSecret), requestEnc: bytes(t.dtor_requestEnc) };
   }
 
-  /** Media type compared case-insensitively, parameters ignored. */
-  private static isMediaType(contentType: string | null, want: string): boolean {
-    return (contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? '') === want;
-  }
+  // request: the one entry point with fetch() semantics; the verbs are one-line wrappers.
 
-  private static isProblemJSONContentType(contentType: string | null): boolean {
-    return Transport.isMediaType(contentType, PROTOCOL.PROBLEM_JSON_MEDIA_TYPE);
-  }
-
-  private static async checkKeyConfigMismatch(response: Response): Promise<void> {
-    if (response.status !== 422) return;
-    if (!Transport.isProblemJSONContentType(response.headers.get('content-type'))) return;
-
-    let problem: ProblemDetails | undefined;
-    try {
-      const clone = response.clone();
-      if (!clone.body) return;
-
-      const reader = clone.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let length = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        length += value.byteLength;
-        if (length > MAX_PROBLEM_DETAILS_BYTES) {
-          reader.cancel().catch(() => {});
-          return;
-        }
-        chunks.push(value);
-      }
-
-      const body = new Uint8Array(length);
-      let offset = 0;
-      for (const chunk of chunks) {
-        body.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      problem = JSON.parse(new TextDecoder().decode(body)) as ProblemDetails;
-    } catch {
-      return; // Not valid JSON — not a key config mismatch
-    }
-    if (problem?.type === PROTOCOL.KEY_CONFIG_PROBLEM_TYPE) {
-      throw new KeyConfigMismatchError(
-        typeof problem.title === 'string' ? problem.title : 'key configuration mismatch'
-      );
-    }
-  }
-
-  private static async shouldDecryptResponse(response: Response): Promise<boolean> {
-    // A redirect is refused with or without a nonce (SPEC 5.3): its Location
-    // is not authenticated, and following it can swap the encrypted exchange
-    // for a bodyless one that EHBP does not protect. `redirected` covers a
-    // fetch that followed one despite being asked not to.
-    if (response.type === 'opaqueredirect' || response.redirected || (response.status >= 300 && response.status < 400)) {
-      await response.body?.cancel().catch(() => {});
-      throw new UnexpectedRedirectError('redirect in response to an encrypted request');
-    }
-
-    if (response.headers.has(PROTOCOL.RESPONSE_NONCE_HEADER)) {
-      return true;
-    }
-
-    await Transport.checkKeyConfigMismatch(response);
-
-    // Only an error status may pass through without a nonce (SPEC 5.3).
-    if (response.status >= 400) {
-      return false;
-    }
-
-    throw new MissingResponseNonceError(`missing ${PROTOCOL.RESPONSE_NONCE_HEADER} header`);
-  }
-
-  /**
-   * Get the server identity
-   */
-  getServerIdentity(): Identity {
-    return this.serverIdentity;
-  }
-
-  /**
-   * Get the server public key
-   */
-  getServerPublicKey(): Key {
-    return this.serverIdentity.getPublicKey();
-  }
-
-  /**
-   * Get the server public key as hex string
-   */
-  async getServerPublicKeyHex(): Promise<string> {
-    return this.serverIdentity.getPublicKeyHex();
-  }
-
-  /**
-   * Make an encrypted HTTP request.
-   */
-  private matchesConfiguredServer(url: URL): boolean {
-    if (this.serverOrigin) return url.origin === this.serverOrigin;
-    if (url.hostname !== this.serverHostname) return false;
-    // url.port is '' for the scheme default; an explicit configured port must
-    // match the effective port, and no configured port means the default.
-    const effectivePort = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
-    return this.serverPort === undefined ? url.port === '' : effectivePort === this.serverPort;
-  }
-
+  /** One encrypted exchange with fetch() semantics for `input` and `init`. */
   async request(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const generation = ++this.requestGeneration;
-    this._lastSessionRecoveryToken = undefined;
-
-    // Skip EHBP for non-network URLs (data:, blob:)
     const inputUrl = input instanceof Request ? input.url : String(input);
-    if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) {
-      return this.fetchImpl(input, init);
-    }
-    // Reject credential-bearing URLs with the canonical code before the
-    // platform Request constructor rejects them with an uncoded TypeError,
-    // so every SDK reports the same error for the same input.
-    // Resolve against the configured server so protocol-relative forms
-    // ("//user:pass@host/x") are inspected too.
-    const credentialed = (() => {
-      try {
-        const u = new URL(inputUrl, this.serverOrigin ?? `http://${this.serverHost}`);
-        return Boolean(u.username || u.password);
-      } catch { return false; }
-    })();
-    if (credentialed) {
-      throw new InvalidInputError('request URL must not include credentials');
-    }
-
-    // Where uploads cannot stream (browsers), a stream or Blob body must not
-    // reach the Request constructor (Firefox stringifies a stream); keep it
-    // aside as the source the identity seals from, and spool the frames.
-    // A GET or HEAD cannot carry a body; say so with the canonical code
-    // before any body is consumed or spooled (fetch would throw an uncoded
-    // TypeError later).
+    // Non-network URLs skip EHBP and reach the fetch implementation as given.
+    if (inputUrl.startsWith('data:') || inputUrl.startsWith('blob:')) return this.fetchImpl(input, init);
     const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
     const hasInitBody = init?.body !== undefined && init?.body !== null;
-    if ((method === 'GET' || method === 'HEAD') && hasInitBody) {
-      throw new InvalidInputError(`request with ${method} method cannot have a body`);
-    }
-    let source: ReadableStream<Uint8Array> | Blob | undefined;
-    if (!canStreamUpload() && hasInitBody && (init!.body instanceof ReadableStream || init!.body instanceof Blob)) {
-      source = init!.body as ReadableStream<Uint8Array> | Blob;
-      // Fetch would derive Content-Type from a typed Blob; keep that behaviour
-      // for the diverted body unless the caller set one.
-      const headers = new Headers(init!.headers ?? (input instanceof Request ? input.headers : undefined));
-      if (source instanceof Blob && source.type && !headers.has('content-type')) {
-        headers.set('content-type', source.type);
-      }
-      init = { ...init, body: null, headers };
-    }
-
-    // Normalize through the platform Request constructor first so RequestInit
-    // overrides a Request input with the same semantics as fetch().
-    const normalizedRequest = new Request(input, init);
-
-    // Validate before consuming the body so a rejected request never buffers
-    // or waits on a caller-supplied stream.
-    const url = new URL(normalizedRequest.url);
-    if (!this.matchesConfiguredServer(url)) {
-      throw new InvalidInputError(`request URL must use the configured origin: ${this.serverOrigin ?? this.serverHost}`);
-    }
-    for (const name of RESERVED_REQUEST_HEADERS) {
-      if (normalizedRequest.headers.has(name)) {
-        throw new InvalidInputError(`reserved request header cannot be set by callers: ${name}`);
-      }
-    }
-    // Browsers drop these before we see them; do the same everywhere else.
-    const outgoingHeaders = new Headers(normalizedRequest.headers);
-    for (const name of FRAMING_HEADERS) outgoingHeaders.delete(name);
-
-    // Hand the body over as a stream where the runtime exposes one so large
-    // uploads are sealed frame by frame; Firefox does not expose Request.body
-    // even when payload bytes are present, so buffer there.
-    let requestBody: BodyInit | null;
-    if (source) {
-      requestBody = null;
-    } else if (normalizedRequest.body) {
-      requestBody = normalizedRequest.body;
-    } else {
-      const requestBodyBytes = await normalizedRequest.arrayBuffer();
-      requestBody = requestBodyBytes.byteLength > 0 ? requestBodyBytes : null;
-    }
-
-    const request = new Request(url.toString(), {
-      ...forwardedRequestInit(normalizedRequest),
-      method: normalizedRequest.method,
-      headers: outgoingHeaders,
-      body: requestBody,
-      duplex: 'half',
-    } as RequestInit);
-
-    // Encrypt request (returns context for response decryption)
-    // For bodyless requests, context will be null and request passes through unmodified
-    const { request: encryptedRequest, context, cleanup } =
-      await this.serverIdentity.encryptRequestWithContext(request, source);
-
-    const token = context
-      ? await extractSessionRecoveryToken(context)
-      : undefined;
-
-    // Bodyless requests: context is null, response is plaintext
-    if (!token) {
-      return this.fetchImpl(encryptedRequest);
-    }
-
-    // SPEC 6: the token exists once the body is sealed, before it is sent,
-    // so a caller can persist it ahead of the response. Anything that ends
-    // the exchange without an authenticated response consumes it.
-    const clearToken = () => {
-      if (this.requestGeneration === generation) {
-        this._lastSessionRecoveryToken = undefined;
-      }
-    };
-    if (this.requestGeneration === generation) {
-      this._lastSessionRecoveryToken = token;
-    }
-
-    let response: Response;
-    let shouldDecrypt: boolean;
+    // The platform would reject this later with an uncoded TypeError, after the body was touched.
+    if ((method === 'GET' || method === 'HEAD') && hasInitBody) throw new InvalidInputError(`request with ${method} method cannot have a body`);
+    let diverted: ReadableStream<Uint8Array> | Blob | undefined;
+    [init, diverted] = divert(input, init, hasInitBody);
+    // The URL and headers exactly as fetch() would combine them, validated by the
+    // core before the platform Request constructor can reject credentials uncoded
+    // or a caller-supplied stream is touched.
+    const u = new URL(inputUrl, string(core.OriginUrl(this.origin)));
+    const headers = init?.headers !== undefined ? new Headers(init.headers) : input instanceof Request ? input.headers : new Headers();
+    unwrap(core.ValidateRequest(this.origin, originOf(u.href), headerSeq(headers)));
+    const normalized = new Request(input, init);
+    const template = forwardedRequestInit(normalized);
+    // Firefox does not expose Request.body even when payload bytes are present; buffer there.
+    const source = diverted ?? normalized.body ?? new Blob([await normalized.arrayBuffer()]).stream();
+    const start = Event.create_Start(str(normalized.method), str(u.href), str(u.protocol.slice(0, -1)), str(u.hostname),
+      int(u.port ? Number(u.port) : 0), u.port !== '', Boolean(u.username || u.password), headerSeq(normalized.headers), true);
+    const exchange = (body: ReadableStream<Uint8Array> | Blob, memoryOnly = false) =>
+      new Exchange(ev.Initial(this.origin, seq(this.publicKey)), this.session, this.fetchImpl, template,
+        body instanceof Blob ? body.stream() : body, body instanceof Blob ? body.size : undefined, memoryOnly);
+    const x = exchange(source);
     try {
-      // Never followed: a redirect is returned and refused below, unless the
-      // caller already asked for it to fail the fetch.
-      response = await this.fetchImpl(encryptedRequest, encryptedRequest.redirect === 'error' ? undefined : { redirect: 'manual' });
-      shouldDecrypt = await Transport.shouldDecryptResponse(response);
+      return await outcome(x, start);
     } catch (err) {
-      clearToken();
-      throw err;
-    } finally {
-      // Response headers mean the upload finished; a spool file is done. A
-      // removal failure must neither fail a completed exchange nor mask the
-      // real error: the file holds ciphertext only and the orphan sweep
-      // removes it on the next large upload.
-      await cleanup?.().catch(() => {});
-    }
-    if (!shouldDecrypt) {
-      clearToken();
-      return response;
-    }
-
-    try {
-      return await decryptResponseWithToken(response, token, clearToken, clearToken);
-    } catch (err) {
-      clearToken();
-      throw err;
+      // A Blob can be re-read: seal it again under a fresh context into memory when the browser spool failed.
+      if (!(diverted instanceof Blob) || !x.spoolFailed) throw err;
+      return outcome(exchange(diverted, true), start);
     }
   }
 
-  /**
-   * Convenience method for GET requests
-   */
-  async get(url: string | URL, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'GET' });
-  }
-
-  /**
-   * Convenience method for POST requests
-   */
-  async post(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'POST', body });
-  }
-
-  /**
-   * Convenience method for PUT requests
-   */
-  async put(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'PUT', body });
-  }
-
-  /**
-   * Convenience method for DELETE requests
-   */
-  async delete(url: string | URL, init?: RequestInit): Promise<Response> {
-    return this.request(url, { ...init, method: 'DELETE' });
-  }
+  get(url: string | URL, init?: RequestInit): Promise<Response> { return this.request(url, { ...init, method: 'GET' }); }
+  post(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> { return this.request(url, { ...init, method: 'POST', body }); }
+  put(url: string | URL, body?: BodyInit, init?: RequestInit): Promise<Response> { return this.request(url, { ...init, method: 'PUT', body }); }
+  delete(url: string | URL, init?: RequestInit): Promise<Response> { return this.request(url, { ...init, method: 'DELETE' }); }
 }
 
-/**
- * Create a new transport instance.
- * The optional init is applied to the server key fetch (e.g. credentials).
- */
-export async function createTransport(serverURL: string, init?: RequestInit, options: TransportOptions = {}): Promise<Transport> {
-  return Transport.create(serverURL, init, options);
-}
+// selfCheck: the core's primitive vectors through this residue.
+export { selfCheck } from './residue.js';
