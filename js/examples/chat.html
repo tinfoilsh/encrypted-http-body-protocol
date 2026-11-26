@@ -126,7 +126,7 @@
     </div>
 
     <script type="module">
-        import { createTransport } from '../dist/browser.js';
+        import { Transport } from '../dist/browser.js';
 
         const serverUrl = 'http://localhost:8443';
 
@@ -135,7 +135,7 @@
 
         async function initializeClient() {
             try {
-                transport = await createTransport(serverUrl);
+                transport = await Transport.create(serverUrl, { discover: true });
                 return true;
             } catch (error) {
                 console.error('Failed to connect:', error.message);

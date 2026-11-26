@@ -1,0 +1,19 @@
+[package]
+name = "ehbp-ffi"
+version = "0.7.0"
+edition = "2021"
+publish = false
+description = "C ABI over the verified EHBP event core, for the Swift SDK"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+ehbp-core = { path = "../../dafny/gen-events/rs", package = "ehbp-events-core" }
+
+[profile.release]
+panic = "unwind"
+
+# Its own workspace: not a member of rust/ or the Dafny bundle.
+[workspace]

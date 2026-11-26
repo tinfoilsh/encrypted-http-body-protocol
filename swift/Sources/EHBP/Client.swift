@@ -1,725 +1,152 @@
+// The API shim over the event-driven EHBP core (dafny/ehbp_events.dfy).
+// Every protocol decision is made by the core; this file parses URLs,
+// collects headers, wraps bodies, runs the pump in Pump.swift and turns the
+// core's terminal actions back into URLSession-shaped responses
+// (conformance/spec/handler.md section 7).
+
 import Foundation
 
-/// Pull-based request body: return the next plaintext chunk, or nil at end.
-public typealias RequestBodySource = () throws -> Data?
+/// Where the server's HPKE public key comes from (SPEC 3).
+public enum KeySource: Sendable {
+    /// Fetch `/.well-known/hpke-keys` from the server.
+    case discover
+    /// A key configuration (RFC 9458 bytes).
+    case config(Data)
+    /// The X25519 public key itself (32 bytes).
+    case publicKey(Data)
+}
 
-/// Streaming EHBP client for making encrypted HTTP requests
+/// Streaming EHBP client for making encrypted HTTP requests.
 public final class EHBPClient: @unchecked Sendable {
-    private let identity: Identity
-    private let baseURL: String
-    private let session: URLSession
-    private let tokenLock = NSLock()
-    private var _lastSessionRecoveryToken: SessionRecoveryToken?
-    private var requestGeneration: UInt64 = 0
+    private let baseURL: URL
+    private let origin: Origin
+    private let publicKey: Data
+    private let urlSession: URLSession
+    private let session = Session()
 
-    private static let passThroughChunkSize = 16 * 1024
+    // constructor: a Client over one server origin and the key a KeySource yields.
 
-    /// Creates a new EHBP client
-    ///
-    /// - Parameters:
-    ///   - baseURL: Base URL for the server (e.g., "https://api.example.com")
-    ///   - publicKey: Server's X25519 public key (32 bytes)
-    ///   - session: URLSession to use (defaults to shared)
-    public init(baseURL: String, publicKey: Data, session: URLSession = .shared) throws {
-        self.identity = try Identity(publicKeyBytes: publicKey)
-        self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        self.session = session
-    }
-
-    /// Creates a new EHBP client from RFC 9458 key configuration
-    ///
-    /// - Parameters:
-    ///   - baseURL: Base URL for the server
-    ///   - config: RFC 9458 key configuration data
-    ///   - session: URLSession to use (defaults to shared)
-    public init(baseURL: String, config: Data, session: URLSession = .shared) throws {
-        self.identity = try Identity(config: config)
-        self.baseURL = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        self.session = session
-    }
-
-    /// Returns the session recovery token from the last request with a body
-    ///
-    /// - Throws: `EHBPError` with code `.invalidInput` if no token is available
-    public func getSessionRecoveryToken() throws -> SessionRecoveryToken {
-        tokenLock.lock()
-        let token = _lastSessionRecoveryToken
-        tokenLock.unlock()
-        guard let token else {
-            throw EHBPError(.invalidInput, "no session recovery token available")
+    /// `server` is an http(s) origin; `session` carries the native transport
+    /// options (timeouts, pinning). Redirects are never followed.
+    public init(server: String, keys: KeySource, session: URLSession = .shared) async throws {
+        let (baseURL, origin) = try EHBPClient.parse(server)
+        self.baseURL = baseURL
+        self.origin = origin
+        self.urlSession = session
+        switch keys {
+        case .discover: publicKey = try await EHBPClient.discover(origin, session)
+        case .config(let config): publicKey = try Core.parseConfig(config)
+        case .publicKey(let key): publicKey = try Core.checkPublicKey(key)
         }
-        return token
     }
 
-    /// Makes an encrypted request and returns the decrypted response
-    ///
-    /// - Parameters:
-    ///   - method: HTTP method
-    ///   - path: URL path (will be appended to baseURL)
-    ///   - headers: Additional headers to include
-    ///   - timeoutInterval: Idle timeout for this request, in seconds: the
-    ///     longest URLSession waits for the next byte, not a deadline for the
-    ///     whole request. Overrides the session configuration's
-    ///     `timeoutIntervalForRequest`, whether shorter or longer; nil keeps it.
-    ///   - body: Request body (will be encrypted)
-    /// - Returns: Decrypted response data, or an untouched 4xx or 5xx response
-    ///   when an intermediary returns an unencrypted error
-    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
-    public func request(
-        method: String,
-        path: String,
-        headers: [String: String] = [:],
-        timeoutInterval: TimeInterval? = nil,
-        body: Data?
-    ) async throws -> (data: Data, response: HTTPURLResponse) {
-        try await request(method: method, path: path, headers: headers,
-                          timeoutInterval: timeoutInterval, body: .data(body))
+    // discover: the same discovery the constructor runs; the 32-byte public key.
+
+    /// The discovery the constructor runs (SPEC 3.1), for callers that cache
+    /// keys: the server's public key, for `KeySource.publicKey`.
+    public static func discover(_ server: String, session: URLSession = .shared) async throws -> Data {
+        try await discover(parse(server).origin, session)
     }
 
-    /// Streaming-body variant: `bodySource` is pulled chunk by chunk (return
-    /// nil at end) and encrypted with O(frame) memory, so multi-GiB uploads work.
-    public func request(
-        method: String,
-        path: String,
-        headers: [String: String] = [:],
-        timeoutInterval: TimeInterval? = nil,
-        bodySource: @escaping RequestBodySource
-    ) async throws -> (data: Data, response: HTTPURLResponse) {
-        try await request(method: method, path: path, headers: headers,
-                          timeoutInterval: timeoutInterval, body: .source(bodySource))
+    private static func discover(_ origin: Origin, _ session: URLSession) async throws -> Data {
+        let x = Exchange(state: CoreState(origin: origin, publicKey: Data()), session: Session(), urlSession: session, body: nil)
+        await x.feed(.discoverStart)
+        if let failure = x.out.failure { throw failure }
+        return x.out.publicKey
     }
 
-    private func request(
-        method: String,
-        path: String,
-        headers: [String: String],
-        timeoutInterval: TimeInterval?,
-        body: RequestBody
-    ) async throws -> (data: Data, response: HTTPURLResponse) {
-        let prepared = try prepareRequest(method: method, path: path, headers: headers,
-                                          timeoutInterval: timeoutInterval, body: body)
-        defer { prepared.cleanup() }
-        let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
-        // SPEC 6: the token is obtainable before the request is sent. Any
-        // outcome of this exchange consumes it.
-        if let token { publishToken(token, for: generation) }
-        defer { clearToken(for: generation) }
+    // token: the exchange in flight.
 
-        let (data, response) = try await session.data(
-            for: request,
-            delegate: requestContext == nil ? nil : RedirectRefusal()
-        )
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw EHBPError.network("expected HTTP response")
-        }
-        if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: data) {
-            throw mismatch
-        }
-
-        guard let responseNonceHex = try EHBPClient.responseNonceHex(
-            from: httpResponse,
-            requestWasEncrypted: requestContext != nil
-        ) else {
-            return (data, httpResponse)
-        }
-
-        let responseNonce = try parseResponseNonce(responseNonceHex)
-
-        let decryptedData = try EHBP.decryptResponseBody(
-            token: token!,
-            responseNonce: responseNonce,
-            encryptedData: data,
-            requireFrame: EHBPClient.claimsSuccess(httpResponse)
-        )
-
-        return (decryptedData, EHBPClient.sanitizedResponse(httpResponse))
+    /// The token of the exchange in flight, or nil (SPEC 6): nil before any
+    /// request, after a bodyless one, and once an exchange has ended.
+    public func sessionRecoveryToken() -> SessionRecoveryToken? {
+        session.token().map { SessionRecoveryToken(exportedSecret: $0.0, requestEnc: $0.1) }
     }
 
-    /// Makes an encrypted streaming request and returns chunks as an AsyncStream
-    ///
-    /// - Parameters:
-    ///   - method: HTTP method
-    ///   - path: URL path
-    ///   - headers: Additional headers
-    ///   - timeoutInterval: Idle timeout for this request; see `request(method:path:headers:timeoutInterval:body:)`
-    ///   - body: Request body (will be encrypted)
-    /// - Returns: AsyncThrowingStream of decrypted response chunks, or untouched
-    ///   4xx or 5xx response chunks when an intermediary returns an unencrypted error
-    /// - Throws: `UNEXPECTED_REDIRECT` when the answer is a redirect, which is never followed
+    // request: the one entry point; the buffered forms are wrappers.
+
+    /// One exchange: the core validates, seals the body when present,
+    /// classifies the response and decrypts its body as the stream is read.
+    /// `path` resolves against the server; `bodySource` is pulled chunk by
+    /// chunk (nil at end) and encrypted with O(frame) memory, or nil for a
+    /// bodyless request. A 4xx or 5xx an intermediary answers in plaintext
+    /// passes through untouched; `UNEXPECTED_REDIRECT` when the answer is a
+    /// redirect, which is never followed.
     public func requestStream(
         method: String,
         path: String,
         headers: [String: String] = [:],
-        timeoutInterval: TimeInterval? = nil,
-        body: Data?
+        bodySource: RequestBodySource?
     ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        try await requestStream(method: method, path: path, headers: headers,
-                                timeoutInterval: timeoutInterval, body: .data(body))
-    }
-
-    /// Streaming-body variant of `requestStream`; see `request(bodySource:)`.
-    public func requestStream(
-        method: String,
-        path: String,
-        headers: [String: String] = [:],
-        timeoutInterval: TimeInterval? = nil,
-        bodySource: @escaping RequestBodySource
-    ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        try await requestStream(method: method, path: path, headers: headers,
-                                timeoutInterval: timeoutInterval, body: .source(bodySource))
-    }
-
-    private func requestStream(
-        method: String,
-        path: String,
-        headers: [String: String],
-        timeoutInterval: TimeInterval?,
-        body: RequestBody
-    ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
-        let prepared = try prepareRequest(method: method, path: path, headers: headers,
-                                          timeoutInterval: timeoutInterval, body: body)
-        let (request, generation, requestContext, token) = (prepared.request, prepared.generation, prepared.context, prepared.token)
-        // SPEC 6: the token is obtainable before the request is sent.
-        if let token { publishToken(token, for: generation) }
-
-        let (asyncBytes, response): (URLSession.AsyncBytes, URLResponse)
-        do {
-            (asyncBytes, response) = try await session.bytes(
-                for: request,
-                delegate: requestContext == nil ? nil : RedirectRefusal()
-            )
-        } catch {
-            prepared.cleanup()
-            clearToken(for: generation)
-            throw error
-        }
-        // Response headers mean the upload finished; the spool is no longer needed.
-        prepared.cleanup()
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            clearToken(for: generation)
-            throw EHBPError.network("expected HTTP response")
-        }
-        var iterator = asyncBytes.makeAsyncIterator()
-        var prefetched = Data()
-        // Any failure before the decryptor owns the token (problem-body read,
-        // key-config mismatch, invalid or missing nonce) ends the exchange
-        // unauthenticated: cancel the transfer and consume the token.
-        let responseNonceHex: String?
-        do {
-            if EHBPClient.mayBeKeyConfigMismatch(httpResponse) {
-                // Read the (small) problem body so it can be classified; anything
-                // over the limit is not a problem document and passes through.
-                while prefetched.count <= EHBPProtocol.maxProblemDetailsBytes,
-                      let byte = try await iterator.next() {
-                    prefetched.append(byte)
-                }
-                if let mismatch = EHBPClient.keyConfigMismatch(httpResponse, body: prefetched) {
-                    throw mismatch
-                }
-            }
-            responseNonceHex = try EHBPClient.responseNonceHex(
-                from: httpResponse,
-                requestWasEncrypted: requestContext != nil
-            )
-        } catch {
-            asyncBytes.task.cancel()
-            clearToken(for: generation)
-            throw error
-        }
-
-        guard let responseNonceHex else {
-            // A nonce-less pass-through consumes the token (SPEC 5.1).
-            clearToken(for: generation)
-            let chunker = PullDrivenByteChunker(
-                iterator: iterator,
-                prefix: prefetched,
-                chunkSize: EHBPClient.passThroughChunkSize,
-                onFailure: { self.clearToken(for: generation) },
-                onCancel: { asyncBytes.task.cancel() }
-            )
-            let lifetime = StreamCancellation {
-                asyncBytes.task.cancel()
-            }
-            let stream = AsyncThrowingStream<Data, Error>(unfolding: {
-                _ = lifetime
-                return try await chunker.next()
-            })
-            return (stream, httpResponse)
-        }
-
-        var responseDecryptor: ResponseDecryptor
-        do {
-            responseDecryptor = try token!.makeResponseDecryptor(
-                responseNonce: try parseResponseNonce(responseNonceHex)
-            )
-        } catch {
-            asyncBytes.task.cancel()
-            clearToken(for: generation)
-            throw error
-        }
-        responseDecryptor.requiresFrame = EHBPClient.claimsSuccess(httpResponse)
-
-        let decryptor = PullDrivenResponseDecryptor(
-            iterator: iterator,
-            decryptor: responseDecryptor,
-            onComplete: { self.clearToken(for: generation) },
-            onFailure: { self.clearToken(for: generation) },
-            onCancel: { asyncBytes.task.cancel() }
-        )
-        let lifetime = StreamCancellation {
-            asyncBytes.task.cancel()
-        }
-        let stream = AsyncThrowingStream<Data, Error>(unfolding: {
-            _ = lifetime
-            return try await decryptor.next()
-        })
-
-        return (stream, EHBPClient.sanitizedResponse(httpResponse))
-    }
-
-    /// Resolves `path` against the configured base URL (RFC 3986) and refuses
-    /// anything that would change the authority: a different origin, or
-    /// userinfo in either the base or the path. String concatenation let a
-    /// path like `@attacker.invalid/x` turn the configured host into userinfo.
-    func resolveURL(_ path: String) throws -> URL {
-        guard let base = URLComponents(string: baseURL),
-              let scheme = base.scheme, let host = base.host,
-              base.user == nil, base.password == nil else {
-            throw EHBPError(.invalidInput, "base URL must be an origin without credentials: \(baseURL)")
-        }
-        guard let url = URL(string: path, relativeTo: base.url)?.absoluteURL,
-              let resolved = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
+              let u = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw EHBPError(.invalidInput, "invalid URL: \(path)")
         }
-        guard resolved.user == nil, resolved.password == nil else {
-            throw EHBPError(.invalidInput, "request URL must not include credentials")
+        let x = Exchange(state: CoreState(origin: origin, publicKey: publicKey), session: session, urlSession: urlSession, body: bodySource)
+        await x.feed(.start(
+            verb: method, url: url.absoluteString, scheme: u.scheme ?? "", host: u.host ?? "",
+            port: Int64(u.port ?? 0), hasPort: u.port != nil, hasUserinfo: u.user != nil || u.password != nil,
+            headers: headers.map { ($0.key, $0.value) }, hasBody: bodySource != nil))
+        if let failure = x.out.failure { throw failure }
+        guard let response = HTTPURLResponse(url: url, statusCode: Int(x.out.status), httpVersion: "HTTP/1.1", headerFields: headerPairs(x.out.headers)) else {
+            throw EHBPError.network("transport reported an impossible status")
         }
-        guard resolved.scheme?.lowercased() == scheme.lowercased(),
-              resolved.host?.lowercased() == host.lowercased(),
-              resolved.port == base.port else {
-            throw EHBPError(.invalidInput, "request URL must use the configured origin: \(scheme)://\(host)")
-        }
-        return url
+        if x.out.passthrough { return (passthrough(x), response) }
+        if x.out.done { return (plaintext(x), response) }
+        throw EHBPError.network("exchange ended without an outcome")
     }
 
-    /// Headers the library or the transport owns; callers may not set them.
-    /// Same list as the Python client.
-    static let reservedRequestHeaders: Set<String> = [
-        "content-length", "transfer-encoding", "host",
-        EHBPProtocol.encapsulatedKeyHeader.lowercased(),
-        EHBPProtocol.responseNonceHeader.lowercased(),
-    ]
-
-    static func callerHeaders(_ headers: [String: String]) throws -> [String: String] {
-        for name in headers.keys where reservedRequestHeaders.contains(name.lowercased()) {
-            throw EHBPError(.invalidInput, "reserved request header cannot be set by callers: \(name)")
-        }
-        return headers
-    }
-
-    /// Everything that happens before the request leaves the client, shared by
-    /// the buffered and streaming paths so the two cannot diverge: URL
-    /// resolution against the configured origin, generation tracking,
-    /// reserved-header validation, and body encryption.
-    private enum RequestBody {
-        case data(Data?)
-        case source(RequestBodySource)
-    }
-
-    private struct PreparedRequest {
-        let request: URLRequest
-        let generation: UInt64
-        let context: RequestContext?
-        let token: SessionRecoveryToken?
-        /// Encrypted body spooled for a streaming source; removed after upload.
-        let spool: URL?
-
-        func cleanup() {
-            if let spool { try? FileManager.default.removeItem(at: spool) }
-        }
-    }
-
-    private func prepareRequest(
+    /// Reads the whole response of `requestStream`.
+    public func request(
         method: String,
         path: String,
-        headers: [String: String],
-        timeoutInterval: TimeInterval?,
-        body: RequestBody
-    ) throws -> PreparedRequest {
-        let url = try resolveURL(path)
-        let generation = beginRequest()
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        if let timeoutInterval { request.timeoutInterval = timeoutInterval }
-
-        for (key, value) in try EHBPClient.callerHeaders(headers) {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-
-        var requestContext: RequestContext?
-        var token: SessionRecoveryToken?
-        var spool: URL?
-
-        switch body {
-        case .data(let data):
-            if let data, !data.isEmpty {
-                let (encryptedBody, context) = try identity.encryptRequest(body: data)
-                requestContext = context
-                token = try extractSessionRecoveryToken(context: context)
-                request.httpBody = encryptedBody
-            }
-        case .source(let next):
-            // Set up the throwing cryptographic state before touching the
-            // caller's (possibly non-rewindable) source, so a setup failure
-            // never costs it a chunk. The token therefore exists before any
-            // byte is read or sent (SPEC 6).
-            let encryptor = try identity.makeRequestEncryptor()
-            let candidate = try extractSessionRecoveryToken(context: encryptor.context)
-            // A source that yields no bytes is a bodyless request: same path as
-            // `.data(nil)`, the unused context is dropped and no header is sent.
-            var first = try next()
-            while let chunk = first, chunk.isEmpty { first = try next() }
-            if let first {
-                requestContext = encryptor.context
-                token = candidate
-                spool = try EHBPClient.spoolEncrypted(first: first, then: next, with: encryptor)
-                request.httpBodyStream = InputStream(url: spool!)
-            }
-        }
-        if let context = requestContext {
-            request.setValue(
-                context.requestEnc.hexString,
-                forHTTPHeaderField: EHBPProtocol.encapsulatedKeyHeader
-            )
-        }
-        return PreparedRequest(request: request, generation: generation,
-                               context: requestContext, token: token, spool: spool)
+        headers: [String: String] = [:],
+        bodySource: RequestBodySource?
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        let (stream, response) = try await requestStream(method: method, path: path, headers: headers, bodySource: bodySource)
+        var data = Data()
+        for try await chunk in stream { data.append(chunk) }
+        return (data, response)
     }
 
-    /// Encrypts a streaming source frame by frame into a temporary file so
-    /// memory stays O(frame) while URLSession gets a body it can upload.
-    // ponytail: temp-file spool costs O(size) disk; replace with a custom
-    // InputStream that seals on demand if disk becomes the constraint.
-    private static func spoolEncrypted(first: Data, then next: RequestBodySource, with encryptor: RequestEncryptor) throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ehbp-\(UUID().uuidString)")
-        guard FileManager.default.createFile(atPath: url.path, contents: nil),
-              let handle = FileHandle(forWritingAtPath: url.path) else {
-            throw EHBPError.network("cannot create upload spool file")
-        }
-        defer { try? handle.close() }
-        do {
-            var chunk: Data? = first
-            while let current = chunk {
-                // One frame per write so a large pull never materialises all
-                // of its ciphertext at once.
-                for start in stride(from: current.startIndex, to: current.endIndex, by: RequestEncryptor.frameSize) {
-                    try handle.write(contentsOf: try encryptor.seal(current[start..<min(start + RequestEncryptor.frameSize, current.endIndex)]))
-                }
-                chunk = try next()
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: url)
-            throw error
-        }
-        return url
+    public func request(
+        method: String,
+        path: String,
+        headers: [String: String] = [:],
+        body: Data?
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
+        try await request(method: method, path: path, headers: headers, bodySource: body.map(EHBPClient.once))
     }
 
-    static func mayBeKeyConfigMismatch(_ response: HTTPURLResponse) -> Bool {
-        // A problem document is plaintext. A 422 carrying a response nonce is
-        // an encrypted body and must reach the decryptor untouched.
-        guard response.statusCode == 422,
-              response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) == nil,
-              let contentType = response.value(forHTTPHeaderField: "Content-Type"),
-              let mediaType = contentType.split(separator: ";", maxSplits: 1).first else {
-            return false
-        }
-        return mediaType.trimmingCharacters(in: .whitespaces).lowercased() == EHBPProtocol.problemJSONMediaType
+    public func requestStream(
+        method: String,
+        path: String,
+        headers: [String: String] = [:],
+        body: Data?
+    ) async throws -> (stream: AsyncThrowingStream<Data, Error>, response: HTTPURLResponse) {
+        try await requestStream(method: method, path: path, headers: headers, bodySource: body.map(EHBPClient.once))
     }
 
-    /// A 422 problem-details body whose type is the key-config URN means the
-    /// server rejected a stale client key (SPEC 5.4.2); callers re-fetch the
-    /// key configuration and retry. Mirrors the Go client.
-    static func keyConfigMismatch(_ response: HTTPURLResponse, body: Data) -> EHBPError? {
-        guard mayBeKeyConfigMismatch(response),
-              body.count <= EHBPProtocol.maxProblemDetailsBytes,
-              let problem = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              problem["type"] as? String == EHBPProtocol.keyConfigProblemType else {
-            return nil
-        }
-        let title = problem["title"] as? String ?? ""
-        return EHBPError(.keyConfigMismatch, title.isEmpty ? "stale client key configuration" : title)
+    // selfCheck: the core's known-answer vectors through this residue's bindings.
+
+    /// The failed checks of the core's self-check (dafny/ehbp_events.dfy
+    /// `SelfCheckActions`) through this SDK's crypto bindings; empty on pass.
+    public static func selfCheck() async -> [String] { await EHBP.selfCheck() }
+
+    /// Helpers over the pure core, for the conformance adapter and tests only.
+    public static var core: CoreHelpers.Type { CoreHelpers.self }
+
+    /// Validates the origin (MakeOrigin) and makes relative paths resolve under it.
+    private static func parse(_ server: String) throws -> (baseURL: URL, origin: Origin) {
+        guard var u = URLComponents(string: server) else { throw EHBPError(.invalidInput, "invalid URL: \(server)") }
+        let origin = try Core.makeOrigin(u.scheme ?? "", u.host ?? "", u.port.map(Int64.init), u.user != nil || u.password != nil)
+        if !u.path.hasSuffix("/") { u.path += "/" }
+        return (u.url!, origin)
     }
 
-    private func beginRequest() -> UInt64 {
-        tokenLock.lock()
-        requestGeneration &+= 1
-        let generation = requestGeneration
-        _lastSessionRecoveryToken = nil
-        tokenLock.unlock()
-        return generation
-    }
-
-    private func publishToken(_ token: SessionRecoveryToken, for generation: UInt64) {
-        tokenLock.lock()
-        if requestGeneration == generation {
-            _lastSessionRecoveryToken = token
-        }
-        tokenLock.unlock()
-    }
-
-    private func clearToken(for generation: UInt64) {
-        tokenLock.lock()
-        if requestGeneration == generation {
-            _lastSessionRecoveryToken = nil
-        }
-        tokenLock.unlock()
-    }
-
-    /// 204 No Content and 205 Reset Content.
-    private static let bodylessSuccessStatuses: Set<Int> = [204, 205]
-
-    /// Whether a response claims success, and so must carry an authenticated
-    /// chunk (SPEC 5.3).
-    private static func claimsSuccess(_ response: HTTPURLResponse) -> Bool {
-        response.statusCode < 400
-    }
-
-    private static func responseNonceHex(
-        from response: HTTPURLResponse,
-        requestWasEncrypted: Bool
-    ) throws -> String? {
-        guard requestWasEncrypted else { return nil }
-        // A redirect is refused with or without a nonce (SPEC 5.3): its
-        // Location is not authenticated, and following it can swap the
-        // encrypted exchange for a bodyless one that EHBP does not protect.
-        guard !(300..<400).contains(response.statusCode) else {
-            throw EHBPError(.unexpectedRedirect, "status \(response.statusCode) in response to an encrypted request")
-        }
-        if let nonce = response.value(forHTTPHeaderField: EHBPProtocol.responseNonceHeader) {
-            // 204 and 205 cannot carry a body, so nothing could authenticate them.
-            guard !bodylessSuccessStatuses.contains(response.statusCode) else {
-                throw EHBPError(.framingTruncated, "status \(response.statusCode) cannot carry an authenticated chunk")
-            }
-            return nonce
-        }
-        // Only an error status may pass through without a nonce (SPEC 5.3).
-        guard response.statusCode >= 400 else {
-            throw EHBPError(.missingResponseNonce, "missing \(EHBPProtocol.responseNonceHeader) header")
-        }
-        return nil
-    }
-
-    /// Removes framing headers that describe the encrypted body. The
-    /// decrypted data has a different length, so consumers that forward the
-    /// response headers verbatim (for example a proxy) would otherwise
-    /// announce a body length that no longer matches what is written,
-    /// truncating the reply.
-    static func sanitizedResponse(_ response: HTTPURLResponse) -> HTTPURLResponse {
-        var headers: [String: String] = [:]
-        for (name, value) in response.allHeaderFields {
-            guard let name = name as? String, let value = value as? String else { continue }
-            let lowered = name.lowercased()
-            if lowered == "content-length" || lowered == "transfer-encoding" { continue }
-            headers[name] = value
-        }
-        guard let url = response.url,
-              let sanitized = HTTPURLResponse(
-                  url: url,
-                  statusCode: response.statusCode,
-                  httpVersion: nil,
-                  headerFields: headers
-              ) else {
-            return response
-        }
-        return sanitized
-    }
-
-}
-
-actor PullDrivenByteChunker<Iterator: AsyncIteratorProtocol & Sendable>
-where Iterator.Element == UInt8 {
-    private var iterator: Iterator
-    private var prefix: Data
-    private let chunkSize: Int
-    private let onFailure: @Sendable () -> Void
-    private let onCancel: @Sendable () -> Void
-    private var isReading = false
-
-    init(
-        iterator: Iterator,
-        prefix: Data = Data(),
-        chunkSize: Int,
-        onFailure: @escaping @Sendable () -> Void = {},
-        onCancel: @escaping @Sendable () -> Void = {}
-    ) {
-        precondition(chunkSize > 0)
-        self.iterator = iterator
-        self.prefix = prefix
-        self.chunkSize = chunkSize
-        self.onFailure = onFailure
-        self.onCancel = onCancel
-    }
-
-    func next() async throws -> Data? {
-        guard !isReading else {
-            throw EHBPError(.invalidInput, "concurrent stream iteration is unsupported")
-        }
-        isReading = true
-        defer { isReading = false }
-
-        if !prefix.isEmpty {
-            defer { prefix = Data() }
-            return prefix
-        }
-
-        do {
-            let cancel = onCancel
-            return try await withTaskCancellationHandler {
-                var iterator = self.iterator
-                var chunk = Data(capacity: chunkSize)
-                while chunk.count < chunkSize {
-                    guard let byte = try await iterator.next() else {
-                        self.iterator = iterator
-                        return chunk.isEmpty ? nil : chunk
-                    }
-                    chunk.append(byte)
-                }
-                self.iterator = iterator
-                return chunk
-            } onCancel: {
-                cancel()
-            }
-        } catch {
-            onFailure()
-            throw error
-        }
-    }
-}
-
-actor PullDrivenResponseDecryptor<Iterator: AsyncIteratorProtocol & Sendable>
-where Iterator.Element == UInt8 {
-    private var iterator: Iterator
-    private var decryptor: ResponseDecryptor
-    private let onComplete: @Sendable () -> Void
-    private let onFailure: @Sendable () -> Void
-    private let onCancel: @Sendable () -> Void
-    private var isReading = false
-    private var isFinished = false
-
-    init(
-        iterator: Iterator,
-        decryptor: ResponseDecryptor,
-        onComplete: @escaping @Sendable () -> Void = {},
-        onFailure: @escaping @Sendable () -> Void = {},
-        onCancel: @escaping @Sendable () -> Void = {}
-    ) {
-        self.iterator = iterator
-        self.decryptor = decryptor
-        self.onComplete = onComplete
-        self.onFailure = onFailure
-        self.onCancel = onCancel
-    }
-
-    func next() async throws -> Data? {
-        guard !isFinished else { return nil }
-        guard !isReading else {
-            throw EHBPError(.invalidInput, "concurrent stream iteration is unsupported")
-        }
-        isReading = true
-        defer { isReading = false }
-
-        do {
-            let cancel = onCancel
-            return try await withTaskCancellationHandler {
-                var iterator = self.iterator
-                var decryptor = self.decryptor
-                while let byte = try await iterator.next() {
-                    if let plaintext = try decryptor.push(byte) {
-                        self.iterator = iterator
-                        self.decryptor = decryptor
-                        return plaintext
-                    }
-                }
-                try decryptor.finish()
-                self.iterator = iterator
-                self.decryptor = decryptor
-                self.isFinished = true
-                self.onComplete()
-                return nil
-            } onCancel: {
-                cancel()
-            }
-        } catch {
-            if !Task.isCancelled {
-                onFailure()
-            }
-            throw error
-        }
-    }
-}
-
-private final class StreamCancellation: @unchecked Sendable {
-    private let cancel: @Sendable () -> Void
-
-    init(_ cancel: @escaping @Sendable () -> Void) {
-        self.cancel = cancel
-    }
-
-    deinit {
-        cancel()
-    }
-}
-
-// MARK: - Data Extensions
-
-public extension Data {
-    /// Creates Data from a hex string
-    init?(hexString: String) {
-        let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
-        guard hex.count % 2 == 0 else { return nil }
-
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
-            data.append(byte)
-            index = nextIndex
-        }
-        self = data
-    }
-
-    /// Returns hex string representation
-    var hexString: String {
-        map { String(format: "%02x", $0) }.joined()
-    }
-}
-
-/// Decodes the `Ehbp-Response-Nonce` header value; both request paths share it.
-func parseResponseNonce(_ hex: String) throws -> Data {
-    guard let nonce = Data(hexString: hex) else {
-        throw EHBPError(.invalidResponseNonce, "invalid response nonce hex")
-    }
-    guard nonce.count == EHBPConstants.responseNonceLength else {
-        throw EHBPError(.invalidResponseNonce, "response nonce must be \(EHBPConstants.responseNonceLength) bytes, got \(nonce.count)")
-    }
-    return nonce
-}
-
-/// Stops URLSession from following a redirect, so the redirect itself is the
-/// response and is refused where the response is classified.
-private final class RedirectRefusal: NSObject, URLSessionTaskDelegate {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        completionHandler(nil)
+    /// A buffered body as a one-shot source.
+    private static func once(_ body: Data) -> RequestBodySource {
+        var pending: Data? = body
+        return { defer { pending = nil }; return pending }
     }
 }

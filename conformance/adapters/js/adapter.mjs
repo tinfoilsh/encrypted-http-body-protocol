@@ -3,20 +3,17 @@
 // Reads one fixture on stdin, runs it through the public ehbp API, prints one
 // normalized result. All native-error translation lives in mapError.
 
-import {
-  Identity,
-  createTransport,
-  deriveResponseKeys,
-  computeNonce,
-  decryptResponseWithToken,
-  deserializeSessionRecoveryToken,
-  hexToBytes,
-  bytesToHex,
-  codeOf,
-} from '../../../js/dist/esm/index.js';
+import { Transport, core, discover, codeOf, selfCheck } from '../../../js/dist/esm/index.js';
+import { spawnSync } from 'node:child_process';
+
+// Node caps response headers at 16 KiB; the oracle sends larger ones to probe
+// nonce validation. Re-run under a higher cap so the library, not the parser, decides.
+if (!process.execArgv.some((a) => a.startsWith('--max-http-header-size'))) {
+  const { status } = spawnSync(process.execPath, ['--max-http-header-size=1048576', ...process.argv.slice(1)], { stdio: 'inherit' });
+  process.exit(status ?? 1);
+}
 
 const HEADER_SUBSET = ['ehbp-response-nonce', 'content-length', 'transfer-encoding', 'content-type'];
-const RESPONSE_NONCE_HEADER = 'Ehbp-Response-Nonce';
 
 async function main() {
   const fx = JSON.parse(await readStdin());
@@ -29,174 +26,176 @@ async function main() {
     await run(fx, res);
   } catch (err) {
     res.outcome = 'error';
-    res.error_code = mapError(fx.operation, err);
+    res.error_code = mapError(err);
     res.body_hex = null;
     res.native_error = String(err?.message ?? err);
   }
   process.stdout.write(JSON.stringify(res));
 }
 
+// The canonical code the library attached (codeOf); anything uncoded is a caller/adapter input error.
+function mapError(err) {
+  return codeOf(err) ?? 'INVALID_INPUT';
+}
+
 async function run(fx, res) {
-  const ins = fx.inputs || {};
   switch (fx.operation) {
     case 'derive_keys': {
-      const km = await deriveResponseKeys(hb(ins.exportedSecret), hb(ins.requestEnc), hb(ins.responseNonce));
-      res.body_hex = bytesToHex(km.keyBytes) + bytesToHex(km.nonceBase);
+      const km = await core.deriveKeys(hexIn(fx, 'exportedSecret'), hexIn(fx, 'requestEnc'), hexIn(fx, 'responseNonce'));
+      res.body_hex = bytesToHex(km.key) + bytesToHex(km.nonceBase);
       return;
+    }
+    case 'decrypt_response': {
+      return decrypt(fx, res, false);
+    }
+    case 'decrypt_response_streaming': {
+      return decrypt(fx, res, true);
     }
     case 'compute_nonce': {
-      const seq = BigInt(`0x${ins.seqHex}`);
-      res.body_hex = bytesToHex(computeNonce(hb(ins.nonceBase), seq));
+      res.body_hex = bytesToHex(core.nonceFor(hexIn(fx, 'nonceBase'), BigInt(`0x${strIn(fx, 'seqHex')}`)));
       return;
     }
-    case 'decrypt_response':
-    case 'decrypt_response_streaming':
-      return decrypt(fx, res);
     case 'token_roundtrip': {
-      const t = deserializeSessionRecoveryToken(ins.json);
+      const t = core.parseToken(strIn(fx, 'json'));
       res.body_hex = bytesToHex(t.exportedSecret) + bytesToHex(t.requestEnc);
       return;
     }
     case 'parse_config': {
-      const id = await Identity.unmarshalPublicConfig(hb(ins.config));
-      res.body_hex = await id.getPublicKeyHex();
+      res.body_hex = bytesToHex(core.parseConfig(hexIn(fx, 'config')));
       return;
     }
     case 'marshal_config': {
-      const id = await Identity.fromPublicKeyHex(ins.publicKey);
-      res.body_hex = bytesToHex(await id.marshalConfig());
+      res.body_hex = bytesToHex(core.marshalConfig(hexIn(fx, 'publicKey'))); // keyId is opaque: always 0
       return;
     }
-    case 'large_body':
-      return largeBody(fx, res);
-    case 'token_before_response':
-      return tokenBeforeResponse(fx, res);
-    case 'request_stream':
-    case 'request':
-      return doRequest(fx, res);
-    case 'discover':
-      await createTransport(discoverTarget(ins));  // throws on bad content type / status
+    case 'request': {
+      return exchange(fx, res, 'bytes', false, false, false, false);
+    }
+    case 'discover': {
+      await discover(discoverTarget(fx)); // throws on a bad key configuration
       return;
-    case 'reject_reserved_header':
-    case 'reject_cross_origin':
-    case 'reject_url_credentials':
-      return hardening(fx.operation);
+    }
+    case 'reject_reserved_header': {
+      return hardening(fx, 'header');
+    }
+    case 'reject_cross_origin': {
+      return hardening(fx, 'cross');
+    }
+    case 'residue_selfcheck': {
+      const lines = await selfCheck(); // the core's shared vectors through this language's bindings
+      res.body_hex = bytesToHex(new TextEncoder().encode(lines.join('\n')));
+      if (lines.length > 0) res.native_error = lines.join('; ');
+      return;
+    }
+    case 'reject_url_credentials': {
+      return hardening(fx, 'credentials');
+    }
+    case 'large_body': {
+      return exchange(fx, res, 'pattern', false, false, false, true);
+    }
+    case 'request_stream': {
+      return exchange(fx, res, 'stream', false, false, false, false);
+    }
+    case 'close_response_early': {
+      return exchange(fx, res, 'bytes', false, true, false, false);
+    }
+    case 'token_before_response': {
+      return exchange(fx, res, 'bytes', true, false, false, false);
+    }
+    case 'token_after_exchange': {
+      return exchange(fx, res, 'bytes', false, false, true, false);
+    }
     default:
       throw new Error(`unknown operation ${fx.operation}`);
   }
 }
 
-// The alternate origin is another loopback oracle port, so this remains
-// network-safe even if host-rewrite behavior changes.
-async function hardening(op) {
-  const base = oracleBase();
-  const transport = await createTransport(base);
-  let target = `${base}/s/echo`;
-  const init = { method: 'POST', body: 'x', headers: {} };
-  if (op === 'reject_cross_origin') target = `${process.env.ORACLE_BAD_CT_URL}/s/echo`;
-  if (op === 'reject_url_credentials') {
-    target = base.replace('://', '://user:pass@') + '/s/echo';
-  }
-  if (op === 'reject_reserved_header') {
-    init.headers[RESPONSE_NONCE_HEADER] = '00'.repeat(32);
-  }
-  await transport.request(target, init);
+/** A Transport over the oracle, discovering its key through the library. */
+async function oracle() {
+  const base = process.env.ORACLE_URL;
+  return [base, await Transport.create(base, { discover: true })];
 }
 
-function discoverTarget(ins) {
-  if (ins.target === 'bad_ct') return process.env.ORACLE_BAD_CT_URL;
-  if (ins.target === 'non200') return process.env.ORACLE_NON200_URL;
-  return process.env.ORACLE_URL;
-}
-
-async function decrypt(fx, res) {
-  const ins = fx.inputs;
-  const token = { exportedSecret: hb(ins.exportedSecret), requestEnc: hb(ins.requestEnc) };
-  const framed = hb(ins.encryptedResponse);
-  const segments = fx.operation.endsWith('streaming') ? splitAt(framed, fx.chunking) : [framed];
-
-  const source = new ReadableStream({
-    start(controller) {
-      for (const s of segments) controller.enqueue(s);
-      controller.close();
-    },
-  });
-  const response = new Response(source, { headers: { [RESPONSE_NONCE_HEADER]: bytesToHex(hb(ins.responseNonce)) } });
-  const decrypted = await decryptResponseWithToken(response, token);
+/** The token-only response path over the framed body, fed whole or split at the fixture's byte offsets; reports the plaintext delivered. */
+async function decrypt(fx, res, streaming) {
+  const token = { exportedSecret: hexIn(fx, 'exportedSecret'), requestEnc: hexIn(fx, 'requestEnc') };
+  const framed = hexIn(fx, 'encryptedResponse');
+  const segments = streaming ? splitAt(framed, fx.chunking) : [framed];
+  const response = new Response(streamOf(segments), { headers: { 'Ehbp-Response-Nonce': bytesToHex(hexIn(fx, 'responseNonce')) } });
+  const decrypted = await core.decryptWithToken(response, token);
   res.body_hex = await drain(decrypted.body, res);
 }
 
-// Reads the session recovery token while the oracle is still holding its
-// reply, then completes the exchange (SPEC 6: token before send).
-async function tokenBeforeResponse(fx, res) {
-  const base = oracleBase();
-  const transport = await createTransport(base);
-  const req = fx.request;
-  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
-  await new Promise((r) => setTimeout(r, 500)); // oracle holds 5 s
-  // The getter throws when no token is published; either way, no translation.
-  try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
-  const response = await pending;
-  res.status = response.status;
-  res.body_hex = await drain(response.body, res);
-}
-
-function oracleBase() {
-  return process.env.ORACLE_URL.replace(/\/$/, '');
-}
-
-async function doRequest(fx, res) {
-  const base = oracleBase();
-  const transport = await createTransport(base);
+/**
+ * Sends the fixture request to the oracle and reads the reply. body is how the
+ * fixture body is supplied (bytes, stream: unknown length, pattern: the lazy
+ * large body); hold reads the token while the oracle holds its reply; early
+ * reads one byte and closes; after reads the token once the exchange ended,
+ * also on error; rss reports peak RSS.
+ */
+async function exchange(fx, res, body, hold, early, after, rss) {
+  const [base, transport] = await oracle();
   const req = fx.request;
   const init = { method: req.method, headers: req.headers || {} };
-  if (fx.operation === 'request_stream') {
-    init.body = new ReadableStream({ start(controller) {
-      controller.enqueue(hb(req.body_hex));
-      controller.close();
-    } });
+  if (body === 'pattern') {
+    init.body = patternStream(intIn(fx, 'size_bytes'), intIn(fx, 'block_seed'));
     init.duplex = 'half';
-  } else if (req.body_hex) init.body = hb(req.body_hex);
-  const response = await transport.request(base + req.path, init);
-
-  res.status = response.status;
-  res.response_headers = subsetHeaders(response.headers);
-  const noNonce = !(res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()];
-  res.body_hex = await drain(response.body, res);
-  res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);
+  } else if (req.body_hex != null) { // '' is a zero-length body, not absent
+    init.body = body === 'stream' ? streamOf([hb(req.body_hex)]) : hb(req.body_hex);
+    if (body === 'stream') init.duplex = 'half';
+  }
+  try {
+    const pending = transport.request(base + req.path, init);
+    pending.catch(() => {}); // awaited below; a rejection while holding must not be unhandled
+    if (hold) {
+      await new Promise((r) => setTimeout(r, 500)); // the oracle holds 5 s
+      res.token_before_response = transport.sessionRecoveryToken() !== undefined;
+    }
+    const response = await pending;
+    res.status = response.status;
+    res.response_headers = subsetHeaders(response.headers);
+    if (early) {
+      const reader = response.body.getReader();
+      const { value } = await reader.read();
+      res.body_hex = bytesToHex((value ?? new Uint8Array()).subarray(0, 1));
+      res.token_before_close = transport.sessionRecoveryToken() !== undefined;
+      await reader.cancel();
+      res.token_after_close = transport.sessionRecoveryToken() !== undefined;
+    } else {
+      res.body_hex = await drain(response.body, res);
+      // No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+      res.passthrough = !('Ehbp-Response-Nonce'.toLowerCase() in res.response_headers) && !(response.status >= 200 && response.status < 300);
+    }
+    if (rss) res.peak_rss_bytes = process.resourceUsage().maxRSS * 1024;
+  } finally {
+    if (after) res.token_after_exchange = transport.sessionRecoveryToken() !== undefined;
+  }
 }
 
-// Streams a multi-GiB patterned body (1 MiB block, block[i] = (i + seed) & 0xff)
-// through the transport to the oracle's digest route; peak RSS shows buffering.
-async function largeBody(fx, res) {
-  const base = oracleBase();
-  const transport = await createTransport(base);
-  const { size_bytes: size, block_seed: seed } = fx.inputs;
-  const block = new Uint8Array(1 << 20);
-  for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
-  let remaining = size;
-  const body = new ReadableStream({
-    pull(controller) {
-      if (remaining <= 0) { controller.close(); return; }
-      const n = Math.min(remaining, block.length);
-      controller.enqueue(block.subarray(0, n));
-      remaining -= n;
-    },
-  });
-  const response = await transport.request(base + fx.request.path, { method: fx.request.method, body, duplex: 'half' });
-  res.status = response.status;
-  res.body_hex = await drain(response.body, res);
-  res.peak_rss_bytes = process.resourceUsage().maxRSS * 1024;
+/** Sends a request the library must refuse before it reaches the wire; a reply from the oracle is the divergent result. */
+async function hardening(fx, target) {
+  const [base, transport] = await oracle();
+  let url = base + '/probe';
+  if (target === 'cross') url = 'http://other.invalid/probe';
+  if (target === 'credentials') url = base.replace('://', '://user:pass@') + '/probe';
+  const headers = {};
+  if (target === 'header') {
+    const name = strIn(fx, 'header');
+    headers[name] = name.toLowerCase() === 'host' ? 'attacker.invalid' : '0000000000000000000000000000000000000000000000000000000000000000';
+  }
+  const response = await transport.request(url, { method: 'POST', headers, body: 'x' });
+  await response.arrayBuffer();
 }
 
-function mapError(op, err) {
-  // Reads the canonical code the library attached (codeOf); anything uncoded is
-  // a caller/adapter input error.
-  return codeOf(err) ?? 'INVALID_INPUT';
+/** The oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else). */
+function discoverTarget(fx) {
+  const t = strIn(fx, 'target');
+  return (t !== 'ORACLE_URL' && process.env[`ORACLE_${t.toUpperCase()}_URL`]) || process.env.ORACLE_URL;
 }
 
 // --- helpers ---
 
+/** Reads to the end; on error records the bytes delivered before it. */
 async function drain(body, res) {
   if (!body) return '';
   const reader = body.getReader();
@@ -220,15 +219,38 @@ async function drain(body, res) {
   return bytesToHex(out);
 }
 
+function streamOf(segments) {
+  return new ReadableStream({
+    start(controller) {
+      for (const s of segments) controller.enqueue(s);
+      controller.close();
+    },
+  });
+}
+
 function splitAt(data, offsets) {
-  if (!offsets || offsets.length === 0) return [data];
   const segs = [];
   let prev = 0;
-  for (const o of offsets) {
+  for (const o of offsets || []) {
     if (o > prev && o < data.length) { segs.push(data.slice(prev, o)); prev = o; }
   }
   segs.push(data.slice(prev));
   return segs;
+}
+
+/** size bytes of a 1 MiB block with block[i] = (i + seed) & 0xff, repeated, never materialised. */
+function patternStream(size, seed) {
+  const block = new Uint8Array(1 << 20);
+  for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
+  let remaining = size;
+  return new ReadableStream({
+    pull(controller) {
+      if (remaining <= 0) { controller.close(); return; }
+      const n = Math.min(remaining, block.length);
+      controller.enqueue(block.subarray(0, n));
+      remaining -= n;
+    },
+  });
 }
 
 function subsetHeaders(headers) {
@@ -240,7 +262,17 @@ function subsetHeaders(headers) {
   return out;
 }
 
-function hb(hex) { return hexToBytes(hex); }
+function hb(hex) { return new Uint8Array(Buffer.from(hex, 'hex')); }
+function bytesToHex(bytes) { return Buffer.from(bytes).toString('hex'); }
+
+// Fixture inputs are repository-controlled; a missing field is a broken fixture, so fail loudly (ADAPTER_CRASH).
+function hexIn(fx, key) { return hb(strIn(fx, key)); }
+function strIn(fx, key) {
+  const v = fx.inputs?.[key];
+  if (typeof v !== 'string') { console.error(`fixture ${fx.id}: input ${key} missing or not a string`); process.exit(2); }
+  return v;
+}
+function intIn(fx, key) { return Number(fx.inputs[key]); }
 
 function readStdin() {
   return new Promise((resolve, reject) => {

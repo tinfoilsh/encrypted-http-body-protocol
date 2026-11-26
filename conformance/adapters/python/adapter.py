@@ -9,21 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import resource
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
-from ehbp import (
-    Client,
-    EHBPTransport,
-    ServerIdentity,
-    SessionRecoveryToken,
-    code_of,
-    compute_nonce,
-    derive_response_keys,
-)
-from ehbp.errors import EHBPError, InvalidInputError
-from ehbp.protocol import ENCAPSULATED_KEY_HEADER, KEYS_PATH, RESPONSE_NONCE_HEADER
+from ehbp import Client, Discover, code_of, core, discover, self_check
+from ehbp.errors import InvalidInputError
 
 HEADER_SUBSET = ("ehbp-response-nonce", "content-length", "transfer-encoding", "content-type")
 
@@ -35,48 +29,158 @@ def main() -> None:
            "bytes_emitted_before_error": 0, "native_error": None, "runner": "python"}
     try:
         run(fx, res)
-    except EHBPError as err:
+    except Exception as err:  # a non-EHBP failure is still the adapter reporting honestly
         res["outcome"] = "error"
-        res["error_code"] = map_error(fx["operation"], err)
+        res["error_code"] = map_error(err)
         res["body_hex"] = None
-        res["native_error"] = str(err)
-    except Exception as err:  # non-EHBP failure is still the adapter reporting honestly
-        res["outcome"] = "error"
-        res["error_code"] = map_error(fx["operation"], err)
         res["native_error"] = str(err)
     json.dump(res, sys.stdout)
 
 
+def map_error(err: Exception) -> str:
+    """The canonical code the library attached (code_of); anything uncoded is a caller/adapter input error."""
+    code = code_of(err)
+    return code.value if code else "INVALID_INPUT"
+
+
 def run(fx: dict, res: dict) -> None:
     op = fx["operation"]
-    ins = fx.get("inputs", {})
     if op == "derive_keys":
-        km = derive_response_keys(b(ins, "exportedSecret"), b(ins, "requestEnc"), b(ins, "responseNonce"))
-        res["body_hex"] = (km.key + km.nonce_base).hex()
+        key, nonce_base = core.derive_keys(hex_in(fx, "exportedSecret"), hex_in(fx, "requestEnc"), hex_in(fx, "responseNonce"))
+        res["body_hex"] = (key + nonce_base).hex()
+    elif op == "decrypt_response":
+        decrypt(fx, res, False)
+    elif op == "decrypt_response_streaming":
+        decrypt(fx, res, True)
     elif op == "compute_nonce":
-        res["body_hex"] = compute_nonce(b(ins, "nonceBase"), int(ins["seqHex"], 16)).hex()
-    elif op in ("decrypt_response", "decrypt_response_streaming"):
-        decrypt(fx, res)
+        res["body_hex"] = core.nonce_for(hex_in(fx, "nonceBase"), int(str_in(fx, "seqHex"), 16)).hex()
     elif op == "token_roundtrip":
-        tok = SessionRecoveryToken.from_json(ins["json"])
+        tok = core.parse_token(str_in(fx, "json"))
         res["body_hex"] = (tok.exported_secret + tok.request_enc).hex()
     elif op == "parse_config":
-        res["body_hex"] = ServerIdentity.unmarshal_public_config(b(ins, "config")).public_key_bytes().hex()
+        res["body_hex"] = core.parse_config(hex_in(fx, "config")).hex()
     elif op == "marshal_config":
-        res["body_hex"] = ServerIdentity(b(ins, "publicKey"), int(ins.get("keyId", 0))).marshal_public_config().hex()
-    elif op in ("request", "request_stream"):
-        request(fx, res)
-    elif op == "large_body":
-        large_body(fx, res)
-    elif op == "token_before_response":
-        token_before_response(fx, res)
+        res["body_hex"] = core.marshal_config(hex_in(fx, "publicKey")).hex()  # keyId is opaque: always 0
+    elif op == "request":
+        exchange(fx, res, "bytes", False, False, False, False)
     elif op == "discover":
-        Client.discover(discover_target(ins))  # raises on bad content type / status
-    elif op in ("reject_reserved_header", "reject_cross_origin", "reject_url_credentials"):
-        hardening(op)
+        discover(discover_target(fx))  # raises on a bad key configuration
+    elif op == "reject_reserved_header":
+        hardening(fx, "header")
+    elif op == "reject_cross_origin":
+        hardening(fx, "cross")
+    elif op == "residue_selfcheck":
+        lines = self_check()  # the core's shared vectors through this language's bindings
+        res["body_hex"] = "\n".join(lines).encode().hex()
+        res["native_error"] = "; ".join(lines) or None
+    elif op == "reject_url_credentials":
+        hardening(fx, "credentials")
+    elif op == "large_body":
+        exchange(fx, res, "pattern", False, False, False, True)
+    elif op == "request_stream":
+        exchange(fx, res, "stream", False, False, False, False)
+    elif op == "close_response_early":
+        exchange(fx, res, "bytes", False, True, False, False)
+    elif op == "token_before_response":
+        exchange(fx, res, "bytes", True, False, False, False)
+    elif op == "token_after_exchange":
+        exchange(fx, res, "bytes", False, False, True, False)
     else:
         raise InvalidInputError(f"unknown operation {op}")
 
+
+def oracle() -> tuple[str, Client]:
+    """A Client over the oracle, discovering its key through the library."""
+    base = os.environ["ORACLE_URL"]
+    return base, Client(base, Discover, http_client=httpx.Client(follow_redirects=False, timeout=600))
+
+
+def decrypt(fx: dict, res: dict, streaming: bool) -> None:
+    """The token-only response path over the framed body, fed whole or split at
+    the fixture's byte offsets; reports the plaintext delivered."""
+    framed = hex_in(fx, "encryptedResponse")
+    segments = split_at(framed, fx.get("chunking")) if streaming else [framed]
+    out = bytearray()
+    try:
+        for chunk in core.decrypt(hex_in(fx, "exportedSecret"), hex_in(fx, "requestEnc"), hex_in(fx, "responseNonce"), segments):
+            out += chunk
+    except Exception:
+        record_partial(res, out)
+        raise
+    res["body_hex"] = bytes(out).hex()
+
+
+def exchange(fx: dict, res: dict, body: str, hold: bool, early: bool, after: bool, rss: bool) -> None:
+    """Sends the fixture request to the oracle and reads the reply. body is how
+    the fixture body is supplied (bytes, stream: unknown length, pattern: the
+    lazy large body); hold reads the token while the oracle holds its reply;
+    early reads one byte and closes; after reads the token once the exchange
+    ended, also on error; rss reports peak RSS."""
+    base, client = oracle()
+    req = fx["request"]
+    if body == "pattern":
+        content = pattern(int_in(fx, "size_bytes"), int_in(fx, "block_seed"))
+    elif req.get("body_hex") is None:
+        content = None
+    elif body == "stream":
+        content = iter([bytes.fromhex(req["body_hex"])])
+    else:
+        content = bytes.fromhex(req["body_hex"])  # "" is a zero-length body, not absent
+    out = bytearray()
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(client.request, req["method"], req["path"], headers=req.get("headers") or {}, body=content)
+            if hold:
+                time.sleep(500 / 1000)  # the oracle holds 5 s
+                res["token_before_response"] = client.session_recovery_token() is not None
+            r = pending.result()
+        res["status"] = r.status_code
+        res["response_headers"] = subset_headers(r.headers)
+        chunks = iter(r)
+        if early:
+            out += next(chunks)[:1]
+            res["token_before_close"] = client.session_recovery_token() is not None
+            r.close()
+            res["token_after_close"] = client.session_recovery_token() is not None
+        else:
+            for chunk in chunks:
+                out += chunk
+            # No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+            res["passthrough"] = "Ehbp-Response-Nonce".lower() not in res["response_headers"] and not 200 <= r.status_code < 300
+        if rss:
+            res["peak_rss_bytes"] = peak_rss_bytes()
+        res["body_hex"] = bytes(out).hex()
+    except Exception:
+        record_partial(res, out)
+        raise
+    finally:
+        if after:
+            res["token_after_exchange"] = client.session_recovery_token() is not None
+        client.close()
+
+
+def hardening(fx: dict, target: str) -> None:
+    """Sends a request the library must refuse before it reaches the wire; a reply from the oracle is the divergent result."""
+    base, client = oracle()
+    url = base + "/probe"
+    if target == "cross":
+        url = "http://other.invalid/probe"
+    elif target == "credentials":
+        url = base.replace("://", "://user:pass@", 1) + "/probe"
+    headers = {}
+    if target == "header":
+        name = str_in(fx, "header")
+        headers[name] = "attacker.invalid" if name.lower() == "host" else "0000000000000000000000000000000000000000000000000000000000000000"
+    client.request("POST", url, headers=headers, body=b"x").read()
+
+
+def discover_target(fx: dict) -> str:
+    """The oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else)."""
+    target = str_in(fx, "target")
+    return (target != "ORACLE_URL" and os.environ.get(f"ORACLE_{target.upper()}_URL")) or os.environ["ORACLE_URL"]
+
+
+# --- helpers ---
 
 def record_partial(res: dict, out: bytes) -> None:
     """Fail-closed bookkeeping: plaintext delivered before the error, if any."""
@@ -84,100 +188,13 @@ def record_partial(res: dict, out: bytes) -> None:
     res["plaintext_emitted_before_error"] = len(out) > 0
 
 
-def discover_target(ins: dict) -> str:
-    return {"bad_ct": os.environ.get("ORACLE_BAD_CT_URL", ""),
-            "non200": os.environ.get("ORACLE_NON200_URL", "")}.get(
-        ins.get("target"), os.environ["ORACLE_URL"])
-
-
-def hardening(op: str) -> None:
-    base = os.environ["ORACLE_URL"]
-    client = Client.discover(base)
-    if op == "reject_reserved_header":
-        client.request("POST", "/s/echo", body=b"x", headers={ENCAPSULATED_KEY_HEADER: "x"})
-    elif op == "reject_cross_origin":
-        client.request("GET", "http://other.example/x")
-    else:  # reject_url_credentials
-        client.request("GET", base.replace("http://", "http://user:pass@") + "/x")
-
-
-def decrypt(fx: dict, res: dict) -> None:
-    ins = fx["inputs"]
-    token = SessionRecoveryToken(b(ins, "exportedSecret"), b(ins, "requestEnc"))
-    decryptor = token.create_response_decryptor(b(ins, "responseNonce"))
-    framed = b(ins, "encryptedResponse")
-    segments = split_at(framed, fx.get("chunking")) if fx["operation"].endswith("streaming") else [framed]
-
-    out = bytearray()
-    try:
-        for seg in segments:
-            for chunk in decryptor.push(seg):
-                out += chunk
-        decryptor.finish()
-    except EHBPError:
-        record_partial(res, out)
-        raise
-    res["body_hex"] = bytes(out).hex()
-
-
-def oracle() -> tuple[str, ServerIdentity]:
-    """(base URL, discovered identity): the one bootstrap for every oracle-bound op."""
-    base = os.environ["ORACLE_URL"].rstrip("/")
-    return base, ServerIdentity.unmarshal_public_config(httpx.get(base + KEYS_PATH).content)
-
-
-def request(fx: dict, res: dict) -> None:
-    base, identity = oracle()
-    req = fx["request"]
-    content = bytes.fromhex(req["body_hex"]) if req.get("body_hex") else None
-
-    if fx["operation"] == "request_stream":
-        content = iter([bytes.fromhex(req["body_hex"])])
-    client = httpx.Client(transport=EHBPTransport(identity), base_url=base)
-    out = bytearray()
-    try:
-        with client.stream(req["method"], req["path"], content=content,
-                           headers=req.get("headers") or {}) as r:
-            res["status"] = r.status_code
-            res["response_headers"] = subset_headers(r.headers)
-            for chunk in r.iter_bytes():
-                out += chunk
-        res["body_hex"] = bytes(out).hex()
-        no_nonce = RESPONSE_NONCE_HEADER.lower() not in {k.lower() for k in (res.get("response_headers") or {})}
-        res["passthrough"] = no_nonce and not (200 <= (res["status"] or 0) < 300)
-    except EHBPError:
-        record_partial(res, out)
-        raise
-    finally:
-        client.close()
-
-
-def token_before_response(fx: dict, res: dict) -> None:
-    """Read the session recovery token while the oracle still holds its reply (SPEC 6)."""
-    import threading
-    import time
-
-    base, identity = oracle()
-    client = Client(base, identity)
-    req = fx["request"]
-    done: list = []  # [Response] or [BaseException]
-
-    def send() -> None:
-        try:
-            done.append(client.post(req["path"], body=bytes.fromhex(req["body_hex"])))
-        except BaseException as err:  # noqa: BLE001 - re-raised on the main thread below
-            done.append(err)
-
-    worker = threading.Thread(target=send)
-    worker.start()
-    time.sleep(0.5)  # oracle holds 5 s: 10x margin
-    res["token_before_response"] = client.get_session_recovery_token() is not None
-    worker.join()
-    r = done[0]
-    if isinstance(r, BaseException):
-        raise r
-    res["status"] = r.status_code
-    res["body_hex"] = r.content.hex()
+def split_at(data: bytes, offsets) -> list[bytes]:
+    segs, prev = [], 0
+    for o in offsets or []:
+        if prev < o < len(data):
+            segs.append(data[prev:o])
+            prev = o
+    return segs + [data[prev:]]
 
 
 def pattern(size: int, seed: int):
@@ -189,54 +206,26 @@ def pattern(size: int, seed: int):
         size -= n
 
 
-def large_body(fx: dict, res: dict) -> None:
-    import resource
-    import sys as _sys
-
-    base, identity = oracle()
-    ins = fx["inputs"]
-    client = httpx.Client(transport=EHBPTransport(identity), base_url=base, timeout=600)
-    try:
-        r = client.post(fx["request"]["path"], content=pattern(int(ins["size_bytes"]), int(ins["block_seed"])))
-        res["status"] = r.status_code
-        res["body_hex"] = r.content.hex()
-    finally:
-        client.close()
+def peak_rss_bytes() -> int:
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    res["peak_rss_bytes"] = rss if _sys.platform == "darwin" else rss * 1024
-
-
-# map_error reads the canonical code the library attached (code_of). Anything
-# uncoded is a caller/adapter input error.
-def map_error(op: str, err: Exception) -> str:
-    code = code_of(err)
-    return code.value if code else "INVALID_INPUT"
-
-
-# --- helpers ---
-
-def b(ins: dict, key: str) -> bytes:
-    return bytes.fromhex(ins[key])
-
-
-def split_at(data: bytes, offsets):
-    if not offsets:
-        return [data]
-    segs, prev = [], 0
-    for o in offsets:
-        if prev < o < len(data):
-            segs.append(data[prev:o])
-            prev = o
-    segs.append(data[prev:])
-    return segs
+    return rss if sys.platform == "darwin" else rss * 1024
 
 
 def subset_headers(headers) -> dict:
-    out = {}
-    for name in HEADER_SUBSET:
-        if name in headers:
-            out[name] = headers[name]
-    return out
+    return {name: headers[name] for name in HEADER_SUBSET if name in headers}
+
+
+# Fixture inputs are repository-controlled; a missing field is a broken fixture, so fail loudly (ADAPTER_CRASH).
+def hex_in(fx: dict, key: str) -> bytes:
+    return bytes.fromhex(str_in(fx, key))
+
+
+def str_in(fx: dict, key: str) -> str:
+    return fx["inputs"][key]
+
+
+def int_in(fx: dict, key: str) -> int:
+    return int(fx["inputs"][key])
 
 
 if __name__ == "__main__":

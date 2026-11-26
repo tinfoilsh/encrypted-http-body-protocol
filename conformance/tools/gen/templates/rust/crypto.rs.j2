@@ -1,0 +1,28 @@
+// crypto: one native call each, bytes in, bytes out. A failure is an empty
+// result (or ok false for aead_open), which the core rejects by length.
+// x25519-dalek (an all-zero output is a low-order point), hmac with sha2, aes-gcm, rand's OsRng.
+
+#[rustfmt::skip]
+fn gcm(key: &[u8], nonce: &[u8]) -> Option<Aes256Gcm> {
+    (nonce.len() == 12).then(|| Aes256Gcm::new_from_slice(key).ok()).flatten()
+}
+{% for p in primitives %}
+
+{% if p.open %}
+#[rustfmt::skip]
+pub(crate) fn {{ p.name }}({{ p.params }}) -> (bool, Vec<u8>) {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    match {{ p.expr }} { Some(v) => (true, v), None => (false, Vec::new()) }
+}
+{% else %}
+#[rustfmt::skip]
+pub(crate) fn {{ p.name }}({{ p.params }}) -> Vec<u8> {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    {{ p.expr }}.unwrap_or_default()
+}
+{% endif %}
+{% endfor %}

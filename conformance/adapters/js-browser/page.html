@@ -8,15 +8,12 @@
 // one normalized result object.
 import * as EHBP from '/browser.js';
 
-const {
-  Identity, createTransport, deriveResponseKeys, computeNonce,
-  decryptResponseWithToken, deserializeSessionRecoveryToken,
-  hexToBytes, bytesToHex, codeOf,
-} = EHBP;
+const { Transport, core, codeOf } = EHBP;
 
 const HEADER_SUBSET = ['ehbp-response-nonce', 'content-length', 'transfer-encoding', 'content-type'];
 const RESPONSE_NONCE_HEADER = 'Ehbp-Response-Nonce';
-const hb = (h) => hexToBytes(h);
+const hb = (h) => { const b = core.decodeHex(h); if (b === undefined) throw new Error(`invalid hex: ${h}`); return b; };
+const bytesToHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 
 window.runFixture = async (fx, oracleUrl) => {
   const res = {
@@ -39,35 +36,34 @@ async function run(fx, res, oracleUrl) {
   const ins = fx.inputs || {};
   switch (fx.operation) {
     case 'derive_keys': {
-      const km = await deriveResponseKeys(hb(ins.exportedSecret), hb(ins.requestEnc), hb(ins.responseNonce));
-      res.body_hex = bytesToHex(km.keyBytes) + bytesToHex(km.nonceBase);
+      const km = await core.deriveKeys(hb(ins.exportedSecret), hb(ins.requestEnc), hb(ins.responseNonce));
+      res.body_hex = bytesToHex(km.key) + bytesToHex(km.nonceBase);
       return;
     }
     case 'compute_nonce':
-      res.body_hex = bytesToHex(computeNonce(hb(ins.nonceBase), BigInt(`0x${ins.seqHex}`)));
+      res.body_hex = bytesToHex(core.nonceFor(hb(ins.nonceBase), BigInt(`0x${ins.seqHex}`)));
       return;
     case 'decrypt_response':
     case 'decrypt_response_streaming':
       return decrypt(fx, res);
     case 'token_roundtrip': {
-      const t = deserializeSessionRecoveryToken(ins.json);
+      const t = core.parseToken(ins.json);
       res.body_hex = bytesToHex(t.exportedSecret) + bytesToHex(t.requestEnc);
       return;
     }
     case 'parse_config': {
-      const id = await Identity.unmarshalPublicConfig(hb(ins.config));
-      res.body_hex = await id.getPublicKeyHex();
+      res.body_hex = bytesToHex(core.parseConfig(hb(ins.config)));
       return;
     }
     case 'marshal_config': {
-      const id = await Identity.fromPublicKeyHex(ins.publicKey);
-      res.body_hex = bytesToHex(await id.marshalConfig());
+      res.body_hex = bytesToHex(core.marshalConfig(hb(ins.publicKey)));
       return;
     }
     case 'token_before_response':
       return tokenBeforeResponse(fx, res, oracleUrl);
     case 'large_body':
       return largeBody(fx, res, oracleUrl);
+    case 'close_response_early':
     case 'request_stream':
     case 'request':
       return doRequest(fx, res, oracleUrl);
@@ -85,18 +81,17 @@ async function decrypt(fx, res) {
     start(c) { for (const s of segments) c.enqueue(s); c.close(); },
   });
   const response = new Response(source, { headers: { [RESPONSE_NONCE_HEADER]: bytesToHex(hb(ins.responseNonce)) } });
-  const decrypted = await decryptResponseWithToken(response, token);
+  const decrypted = await core.decryptWithToken(response, token);
   res.body_hex = await drain(decrypted.body, res);
 }
 
 async function tokenBeforeResponse(fx, res, oracleUrl) {
   const base = oracleUrl.replace(/\/$/, '');
-  const transport = await createTransport(base);
+  const transport = await Transport.create(base, { discover: true });
   const req = fx.request;
-  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: hb(req.body_hex) });
+  const pending = transport.request(base + req.path, { method: req.method, headers: req.headers || {}, body: req.body_hex != null ? hb(req.body_hex) : undefined });
   await new Promise((r) => setTimeout(r, 500)); // oracle holds 5 s
-  // The getter throws when no token is published; either way, no translation.
-  try { res.token_before_response = transport.getSessionRecoveryToken() !== undefined; } catch { res.token_before_response = false; }
+  res.token_before_response = transport.sessionRecoveryToken() !== undefined;
   const response = await pending;
   res.status = response.status;
   res.body_hex = await drain(response.body, res);
@@ -117,7 +112,7 @@ async function largeBody(fx, res, oracleUrl) {
     return;
   }
   const base = oracleUrl.replace(/\/$/, '');
-  const transport = await createTransport(base);
+  const transport = await Transport.create(base, { discover: true });
   const block = new Uint8Array(1 << 20);
   for (let i = 0; i < block.length; i++) block[i] = (i + seed) & 0xff;
   let remaining = size;
@@ -136,7 +131,7 @@ async function largeBody(fx, res, oracleUrl) {
 
 async function doRequest(fx, res, oracleUrl) {
   const base = oracleUrl.replace(/\/$/, '');
-  const transport = await createTransport(base);
+  const transport = await Transport.create(base, { discover: true });
   const req = fx.request;
   const init = { method: req.method, headers: req.headers || {} };
   if (fx.operation === 'request_stream') {
@@ -145,10 +140,20 @@ async function doRequest(fx, res, oracleUrl) {
       controller.close();
     } });
     init.duplex = 'half';
-  } else if (req.body_hex) init.body = hb(req.body_hex);
+  } else if (req.body_hex != null) init.body = hb(req.body_hex); // '' is a zero-length body, not absent
   const response = await transport.request(base + req.path, init);
   res.status = response.status;
   res.response_headers = subsetHeaders(response.headers);
+  if (fx.operation === 'close_response_early') {
+    // One byte, then cancel: closing a live body consumes the recovery token.
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    res.body_hex = bytesToHex((value ?? new Uint8Array()).subarray(0, 1));
+    res.token_before_close = transport.sessionRecoveryToken() !== undefined;
+    await reader.cancel();
+    res.token_after_close = transport.sessionRecoveryToken() !== undefined;
+    return;
+  }
   const noNonce = !(res.response_headers || {})[RESPONSE_NONCE_HEADER.toLowerCase()];
   res.body_hex = await drain(response.body, res);
   res.passthrough = noNonce && !(response.status >= 200 && response.status < 300);

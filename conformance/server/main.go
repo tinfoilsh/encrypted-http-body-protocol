@@ -2,7 +2,7 @@
 //
 // It serves the reference HPKE key config and a set of scenario routes under
 // /s/{scenario}. Every scenario first derives a CORRECT bound response through
-// the reference identity API, then applies one deterministic transform (drop a
+// the reference middleware, then applies one deterministic transform (drop a
 // header, flip a tag byte, truncate a frame). No route depends on timing, so a
 // client's observed result is fully determined by the scenario. See
 // conformance/spec and conformance/README.md.
@@ -105,26 +105,49 @@ func main() {
 	if err != nil {
 		log.Fatalf("oracle: main listener %s: %v", *addr, err)
 	}
-	badCT := serveBadConfig(net.JoinHostPort(host, "0"), id, "bad-ct")
-	non200 := serveBadConfig(net.JoinHostPort(host, "0"), id, "non200")
-	fmt.Printf("listening main=%s bad_ct=%s non200=%s\n", mainLn.Addr(), badCT, non200)
+	mainKeys := "http://" + mainLn.Addr().String() + protocol.KeysPath
+	aux := []string{"bad_ct", "non200", "ct_params", "status203", "redirect", "trailing"}
+	var line strings.Builder
+	line.WriteString("listening main=" + mainLn.Addr().String())
+	for _, mode := range aux {
+		line.WriteString(fmt.Sprintf(" %s=%s", mode, serveBadConfig(net.JoinHostPort(host, "0"), id, mode, mainKeys)))
+	}
+	fmt.Println(line.String())
 	log.Printf("oracle: public key %s", id.MarshalPublicKeyHex())
 	log.Fatal(http.Serve(mainLn, mux))
 }
 
-// serveBadConfig answers /.well-known/hpke-keys with a malformed discovery
-// response: "bad-ct" returns the valid config bytes under the wrong content type;
-// "non200" returns a 500.
-func serveBadConfig(addr string, id *identity.Identity, mode string) string {
+// serveBadConfig answers /.well-known/hpke-keys with a discovery variant
+// (SPEC 3.1): "bad_ct" serves the valid config under the wrong media type;
+// "non200" returns a 500; "ct_params" serves it under a mixed-case media type
+// with parameters (valid); "status203" serves it correctly but with status 203
+// (invalid: only 200 is accepted); "redirect" answers 302 to the main listener
+// (invalid: discovery never follows redirects); "trailing" appends 1 MiB of
+// junk after the config (valid: only the first key_config is read).
+func serveBadConfig(addr string, id *identity.Identity, mode string, mainKeys string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc(protocol.KeysPath, cors(func(w http.ResponseWriter, r *http.Request) {
-		if mode == "non200" {
-			http.Error(w, "unavailable", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain") // wrong media type
 		cfg, _ := id.MarshalConfig()
-		_, _ = w.Write(cfg)
+		switch mode {
+		case "non200":
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+		case "bad_ct":
+			w.Header().Set("Content-Type", "text/plain") // wrong media type
+			_, _ = w.Write(cfg)
+		case "ct_params":
+			w.Header().Set("Content-Type", "Application/OHTTP-Keys; charset=utf-8")
+			_, _ = w.Write(cfg)
+		case "status203":
+			w.Header().Set("Content-Type", protocol.KeysMediaType)
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			_, _ = w.Write(cfg)
+		case "redirect":
+			w.Header().Set("Location", mainKeys)
+			w.WriteHeader(http.StatusFound)
+		case "trailing":
+			w.Header().Set("Content-Type", protocol.KeysMediaType)
+			_, _ = w.Write(append(cfg, make([]byte, 1<<20)...))
+		}
 	}))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -140,7 +163,9 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key")
+		// X-Caller is the caller-supplied header the request_meta scenario echoes
+		// (SPEC 5.1: caller headers are preserved); browsers preflight it.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Ehbp-Encapsulated-Key, X-Caller")
 		w.Header().Set("Access-Control-Expose-Headers", "Ehbp-Response-Nonce, Ehbp-Encapsulated-Key, Content-Type, X-Oracle-Public-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -199,6 +224,80 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, "plaintext for bodyless request")
 			return
+		case "drop_nonce_204":
+			// A 2xx with no nonce and no body: still MISSING_RESPONSE_NONCE (SPEC 5.1).
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "invalid_nonce_204":
+			// A 204 with a 16-byte nonce: header validation precedes the
+			// bodyless-status rule (SPEC 5.1), so INVALID_RESPONSE_NONCE.
+			w.Header().Set(protocol.ResponseNonceHeader, hex.EncodeToString(make([]byte, 16)))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		case "problem_422_other_type":
+			// An application-level problem document: not a key-config problem.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"urn:example:validation","title":"bad field"}`)
+			return
+		case "problem_422_text_plain":
+			// The right type under the wrong media type is not a problem document.
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"stale"}`)
+			return
+		case "problem_422_numeric_title":
+			// type decides; a non-string title only loses its text (SPEC 5.4.2).
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":7}`)
+			return
+		case "problem_422_case_keys":
+			// JSON member names are case-sensitive: "Type" is not "type".
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"Type":"`+protocol.KeyConfigProblemType+`","Title":"stale"}`)
+			return
+		case "problem_422_oversized":
+			// A key-config type inside a document above 64 KiB is not parsed.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"`+strings.Repeat("x", 70_000)+`"}`)
+			return
+		case "problem_422_deep_array":
+			// 50 000 nested arrays: a recursive JSON parser must not take the
+			// client down; this is simply not a problem document.
+			w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			io.WriteString(w, `{"type":`+strings.Repeat("[", 50_000))
+			return
+		}
+
+		// Observation route for request headers (SPEC 4.1, 5.1, 7.4): reports
+		// what arrived, encrypted when the request was, so the harness can
+		// assert the key header is present iff a body is, lowercase, and that
+		// caller headers survive. The format is fixed: enc=<count>:<len>:<case>.
+		if name == "request_meta" {
+			keys := r.Header.Values(protocol.EncapsulatedKeyHeader)
+			first, kase := "", "none"
+			if len(keys) > 0 {
+				first = keys[0]
+				switch {
+				case first == strings.ToLower(first):
+					kase = "lower"
+				case first == strings.ToUpper(first):
+					kase = "upper"
+				default:
+					kase = "mixed"
+				}
+			}
+			line := fmt.Sprintf("enc=%d:%d:%s x-caller=%s", len(keys), len(first), kase, r.Header.Get("X-Caller"))
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.ReadAll(r.Body); err == nil {
+					io.WriteString(w, line)
+				}
+			})).ServeHTTP(w, r)
+			return
 		}
 
 		// Observation route: record the received wire shape, then echo normally
@@ -221,53 +320,57 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 				obsMu.Unlock()
 			}
 			r.Body = io.NopCloser(bytes.NewReader(raw))
-			respCtx, err := id.DecryptRequestWithContext(r)
-			if err != nil || respCtx == nil {
-				http.Error(w, "shape route requires an encrypted request body", http.StatusBadRequest)
-				return
-			}
-			plaintext, _ := io.ReadAll(r.Body)
-			sealAndWrite(w, id, respCtx, plaintext)
+			id.Middleware()(http.HandlerFunc(echo)).ServeHTTP(w, r)
 			return
 		}
 
-		// Remaining routes bind a response to the request. Decrypt it first.
-		respCtx, err := id.DecryptRequestWithContext(r)
-		if err != nil {
-			http.Error(w, "bad encrypted request", http.StatusBadRequest)
-			return
-		}
-		if respCtx == nil {
-			http.Error(w, "scenario requires an encrypted request body", http.StatusBadRequest)
-			return
-		}
-		if name == "digest" {
+		// The scenarios whose reply is the middleware's own, unmodified.
+		switch name {
+		case "digest":
 			// Stream the decrypted body straight into a hash so a multi-GiB
 			// request never lands in memory; reply with the raw 32-byte digest.
-			h := sha256.New()
-			if _, err := io.Copy(h, r.Body); err != nil {
-				http.Error(w, "request decryption failed", http.StatusBadRequest)
-				return
-			}
-			sealAndWrite(w, id, respCtx, h.Sum(nil))
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h := sha256.New()
+				if _, err := io.Copy(h, r.Body); err == nil {
+					_, _ = w.Write(h.Sum(nil))
+				}
+			})).ServeHTTP(w, r)
 			return
-		}
-		plaintext, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "request decryption failed", http.StatusBadRequest)
+		case "empty_frame":
+			// An empty response as a conforming server sends it: one frame
+			// sealing an empty plaintext, which the client authenticates.
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.ReadAll(r.Body) })).ServeHTTP(w, r)
+			return
+		case "encrypted_422_problem":
+			// A 422 that carries a nonce is ciphertext like any other response
+			// (SPEC 5.1); it is never a key-config problem.
+			id.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.ReadAll(r.Body); err != nil {
+					return
+				}
+				w.Header().Set("Content-Type", protocol.ProblemJSONMediaType)
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				io.WriteString(w, `{"type":"`+protocol.KeyConfigProblemType+`","title":"encrypted"}`)
+			})).ServeHTTP(w, r)
 			return
 		}
 
 		// Produce a correct bound response into a recorder, then transform it.
-		nonce, framed, err := sealResponse(id, respCtx, plaintext)
-		if err != nil {
-			http.Error(w, "response setup failed", http.StatusInternalServerError)
+		rec := httptest.NewRecorder()
+		id.Middleware()(http.HandlerFunc(echo)).ServeHTTP(rec, r)
+		nonce, framed := rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes()
+		if nonce == "" {
+			http.Error(w, "scenario requires an encrypted request body", http.StatusBadRequest)
 			return
 		}
 
 		switch name {
 		case "echo":
 			writeEncrypted(w, nonce, framed, http.StatusOK)
+		case "empty_encrypted":
+			// A nonce but zero frames: nothing authenticates the success, so
+			// the client must fail it (SPEC 5.3).
+			writeEncrypted(w, nonce, nil, http.StatusOK)
 		case "hold":
 			// The whole request has been read; keep the response pending long
 			// enough for the client to be observed mid-flight (SPEC 6: the
@@ -275,30 +378,23 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			// probe at 500 ms, so this is a 10x timing margin, not a handshake.
 			time.Sleep(5 * time.Second)
 			writeEncrypted(w, nonce, framed, http.StatusOK)
-		case "empty_frame":
-			// An empty response as a conforming server sends it: one frame
-			// sealing an empty plaintext, which the client authenticates.
-			rec := httptest.NewRecorder()
-			dw, e := id.SetupDerivedResponseEncryption(rec, respCtx)
-			if e == nil {
-				e = dw.Finish()
-			}
-			if e != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes(), http.StatusOK)
-		case "empty_encrypted":
-			// A nonce but zero frames: nothing authenticates the success, so
-			// the client must fail it (SPEC 5.3).
-			emptyNonce, emptyFramed, e := sealResponse(id, respCtx, nil)
-			if e != nil {
-				http.Error(w, "response setup failed", http.StatusInternalServerError)
-				return
-			}
-			writeEncrypted(w, emptyNonce, emptyFramed, http.StatusOK)
 		case "drop_nonce_200":
 			writeEncrypted(w, "", framed, http.StatusOK)
+		case "empty_nonce_200", "empty_nonce_502":
+			// The header is present with an empty value: malformed, not absent
+			// (SPEC 4.2), whatever the status.
+			w.Header().Set(protocol.ResponseNonceHeader, "")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if name == "empty_nonce_200" {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+			_, _ = w.Write(framed)
+		case "invalid_nonce_0x":
+			writeEncrypted(w, "0x"+nonce[:62], framed, http.StatusOK)
+		case "invalid_nonce_space":
+			writeEncrypted(w, nonce[:10]+" "+nonce[11:], framed, http.StatusOK)
 		case "invalid_nonce_len":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 16)), framed, http.StatusOK)
 		case "invalid_nonce_hex":
@@ -307,17 +403,16 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 			writeEncrypted(w, strings.Repeat("0", 63), framed, http.StatusOK)
 		case "invalid_nonce_too_long":
 			writeEncrypted(w, hex.EncodeToString(make([]byte, 33)), framed, http.StatusOK)
+		case "invalid_nonce_huge":
+			// 64 KiB of valid hex digits: a nonce check that recurses per byte
+			// would exhaust a stack before rejecting it (SPEC 4.1).
+			writeEncrypted(w, strings.Repeat("ab", 32*1024), framed, http.StatusOK)
 		case "duplicate_nonce":
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.Header().Add(protocol.ResponseNonceHeader, nonce)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(framed)
 		case "truncate_final_frame", "tamper_tag":
-			if len(framed) == 0 {
-				// An empty plaintext seals to zero frames; nothing to mutate.
-				http.Error(w, "scenario needs a non-empty request body", http.StatusBadRequest)
-				return
-			}
 			bad := append([]byte(nil), framed...)
 			if name == "truncate_final_frame" {
 				bad = bad[:len(bad)-1]
@@ -352,32 +447,12 @@ func scenario(id *identity.Identity) http.HandlerFunc {
 	}
 }
 
-// sealAndWrite seals body under the request's response context and writes it
-// as an encrypted 200. Used by every scenario that answers with an unmodified
-// encrypted reply (echo, shape, digest); mutating scenarios call sealResponse
-// and writeEncrypted themselves.
-func sealAndWrite(w http.ResponseWriter, id *identity.Identity, respCtx *identity.ResponseContext, body []byte) {
-	nonce, framed, err := sealResponse(id, respCtx, body)
-	if err != nil {
-		http.Error(w, "response setup failed", http.StatusInternalServerError)
-		return
+// echo returns the decrypted request as one write; a request that stops
+// decrypting returns without writing, so the middleware answers with its status.
+func echo(w http.ResponseWriter, r *http.Request) {
+	if plaintext, err := io.ReadAll(r.Body); err == nil {
+		_, _ = w.Write(plaintext)
 	}
-	writeEncrypted(w, nonce, framed, http.StatusOK)
-}
-
-// sealResponse derives a correct EHBP response for the request context and
-// returns its nonce header value and framed ciphertext, using only the public
-// identity API via an in-memory recorder.
-func sealResponse(id *identity.Identity, respCtx *identity.ResponseContext, body []byte) (string, []byte, error) {
-	rec := httptest.NewRecorder()
-	dw, err := id.SetupDerivedResponseEncryption(rec, respCtx)
-	if err != nil {
-		return "", nil, err
-	}
-	if _, err := dw.Write(body); err != nil {
-		return "", nil, err
-	}
-	return rec.Header().Get(protocol.ResponseNonceHeader), rec.Body.Bytes(), nil
 }
 
 func writeEncrypted(w http.ResponseWriter, nonce string, body []byte, status int) {

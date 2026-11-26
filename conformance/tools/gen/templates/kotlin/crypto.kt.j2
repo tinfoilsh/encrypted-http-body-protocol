@@ -1,0 +1,35 @@
+// crypto: one native call each, bytes in, bytes out. A failure is an empty
+// result (or ok false for aeadOpen), which the core rejects by length.
+// X25519 (false on a low-order point) and HMAC are BouncyCastle's: the JDK's X25519 needs
+// Android 33 and its HMAC rejects the empty key HPKE extracts with; AES-GCM and randomness are the JDK's.
+
+// One Cipher per mode and thread, re-initialised per call: Cipher.getInstance is
+// a provider lookup that costs more than sealing a frame until the JIT has warmed up.
+private val ciphers = ThreadLocal.withInitial { arrayOfNulls<Cipher>(Cipher.DECRYPT_MODE + 1) }
+
+private fun gcm(mode: Int, key: ByteArray, nonce: ByteArray): Cipher {
+    require(nonce.size == 12)
+    val slot = ciphers.get()
+    val cipher = slot[mode] ?: Cipher.getInstance("AES/GCM/NoPadding").also { slot[mode] = it }
+    return cipher.also { it.init(mode, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce)) }
+}
+
+private val random = SecureRandom()
+{% for p in primitives %}
+
+{% if p.open %}
+internal fun {{ p.name }}({{ p.params }}): Pair<Boolean, ByteArray> {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return try { true to {{ p.expr }} } catch (e: Exception) { false to ByteArray(0) }
+}
+{% else %}
+internal fun {{ p.name }}({{ p.params }}): ByteArray {
+{% if p.pre %}
+    {{ p.pre|indent(4) }}
+{% endif %}
+    return try { {{ p.expr }} } catch (e: Exception) { null } ?: ByteArray(0)
+}
+{% endif %}
+{% endfor %}

@@ -1,0 +1,21 @@
+// ffi:begin ({{ gen }})
+// Every type the ABI crosses, in declaration order: a constructor is its index,
+// then its fields in order; a datatype with one constructor carries no tag;
+// Option<T> is T?, Result<T> decodes to T or throws the core's error.
+
+{% for c in coders if c.decl %}
+{{ c.decl }}
+
+{% endfor %}
+extension Writer {
+{% for c in coders if c.writer %}
+    {{ c.writer|indent(4) }}
+{% endfor %}
+}
+
+extension Reader {
+{% for c in coders %}
+    {{ c.reader|indent(4) }}
+{% endfor %}
+}
+// ffi:end

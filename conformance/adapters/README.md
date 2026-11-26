@@ -1,8 +1,16 @@
 # Adapters
 
-Every adapter is the same program in a different language. Keeping them
-structurally identical is what makes the results comparable and the suite
-extensible: to add a language you copy this shape and fill in the public-API calls.
+The Go, Python, JavaScript, Rust, Kotlin and Swift adapters are the same
+program in a different language, written by hand and following the operation
+table of `../spec/operations.md` (`handler.md` section 9); the browser adapter
+(`js-browser/`, `runner.mjs` + `page.html`) likewise. `python3
+conformance/tools/check.py operations` fails when an adapter's dispatch does
+not name every operation of the table. To add a language, write the adapter
+(the dispatch over the operation name, one expression per pure operation over
+the SDK's `core` accessor, a single `map_error`), list it in `ADAPTERS` of
+`../tools/check.py` and register it in `../harness/run.py`
+(`build_adapters`). Go adds the server-side operations (`server.go`) and its
+RSS probe (`rss_*.go`), which have no client in the other SDKs.
 
 ## Interface
 
@@ -10,8 +18,11 @@ extensible: to add a language you copy this shape and fill in the public-API cal
 - **Output:** one normalized result JSON object on stdout (see
   `../schema/result.schema.json`). Exit 0 even for `outcome: error`; reserve a
   non-zero exit and stderr for an adapter crash (a bug in the adapter itself).
-- **Environment:** `ORACLE_URL` and the two loopback discovery endpoints
-  `ORACLE_BAD_CT_URL` / `ORACLE_NON200_URL`.
+- **Environment:** `ORACLE_URL`, plus one `ORACLE_<TARGET>_URL` per auxiliary
+  oracle listener (`bad_ct`, `non200`, `ct_params`, `status203`, `redirect`,
+  `trailing`, and any future target). A fixture's `inputs.target` names the
+  listener; the adapter upper-cases it to look up `ORACLE_<TARGET>_URL` and
+  falls back to `ORACLE_URL` when unset.
 
 ## Required shape
 

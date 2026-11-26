@@ -9,20 +9,18 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/client"
-	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
 	"github.com/tinfoilsh/encrypted-http-body-protocol/protocol"
 )
 
@@ -51,12 +49,12 @@ type result struct {
 	Emitted          bool              `json:"plaintext_emitted_before_error"`
 	EmittedN         int               `json:"bytes_emitted_before_error"`
 	Native           *string           `json:"native_error"`
-	SkipReason       *string           `json:"skip_reason,omitempty"`
 	Runner           string            `json:"runner"`
 	PeakRSS          *int64            `json:"peak_rss_bytes,omitempty"`
 	TokenBeforeClose *bool             `json:"token_before_close,omitempty"`
 	TokenAfterClose  *bool             `json:"token_after_close,omitempty"`
 	TokenEarly       *bool             `json:"token_before_response,omitempty"`
+	TokenAfter       *bool             `json:"token_after_exchange,omitempty"`
 }
 
 func main() {
@@ -76,252 +74,162 @@ func main() {
 	_ = json.NewEncoder(os.Stdout).Encode(r)
 }
 
+// mapErr reads the canonical code the library attached (protocol.CodeOf); it
+// never matches message text. Uncoded errors are adapter/transport input errors.
+func mapErr(err error) string {
+	if c := protocol.CodeOf(err); c != "" {
+		return string(c)
+	}
+	return "INVALID_INPUT"
+}
+
 func run(fx *fixture, r *result) error {
 	switch fx.Operation {
 	case "derive_keys":
-		km, err := identity.DeriveResponseKeys(hexIn(fx, "exportedSecret"), hexIn(fx, "requestEnc"), hexIn(fx, "responseNonce"))
+		key, nonceBase, err := client.Core().DeriveKeys(hexIn(fx, "exportedSecret"), hexIn(fx, "requestEnc"), hexIn(fx, "responseNonce"))
 		if err != nil {
 			return err
 		}
-		setBody(r, append(append([]byte{}, km.Key...), km.NonceBase...))
+		setBody(r, append(key, nonceBase...))
 		return nil
+	case "decrypt_response":
+		return decrypt(fx, r, false)
+	case "decrypt_response_streaming":
+		return decrypt(fx, r, true)
 	case "compute_nonce":
 		seq, err := strconv.ParseUint(strIn(fx, "seqHex"), 16, 64)
 		if err != nil {
 			return err
 		}
-		km := &identity.ResponseKeyMaterial{Key: make([]byte, 32), NonceBase: hexIn(fx, "nonceBase")}
-		aead, err := km.NewResponseAEAD()
+		nonce, err := client.Core().NonceFor(hexIn(fx, "nonceBase"), seq)
 		if err != nil {
 			return err
 		}
-		setBody(r, aead.NonceForSeq(seq))
+		setBody(r, nonce)
 		return nil
-	case "decrypt_response", "decrypt_response_streaming":
-		return decryptResponse(fx, r)
 	case "token_roundtrip":
-		var tok identity.SessionRecoveryToken
+		var tok client.SessionRecoveryToken
 		if err := json.Unmarshal([]byte(strIn(fx, "json")), &tok); err != nil {
 			return err
 		}
 		setBody(r, append(append([]byte{}, tok.ExportedSecret...), tok.RequestEnc...))
 		return nil
 	case "parse_config":
-		id, err := identity.UnmarshalPublicConfig(hexIn(fx, "config"))
+		pk, err := client.Core().ParseConfig(hexIn(fx, "config"))
 		if err != nil {
 			return err
 		}
-		setBody(r, id.MarshalPublicKey())
+		setBody(r, pk)
 		return nil
 	case "marshal_config":
-		id, err := identity.FromPublicKeyBytes(hexIn(fx, "publicKey"))
-		if err != nil {
-			return err
-		}
-		cfg, err := id.MarshalConfig()
+		cfg, err := client.Core().MarshalConfig(hexIn(fx, "publicKey")) // keyId is opaque: always 0
 		if err != nil {
 			return err
 		}
 		setBody(r, cfg)
 		return nil
-	case "request", "request_stream", "close_response_early":
-		return doRequest(fx, r)
-	case "discover":
-		// Go's client constructor performs discovery with content-type/status checks.
-		_, err := client.NewTransport(discoverTarget(fx))
-		return err
-	case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
-		return hardening(fx.Operation)
 	case "decrypt_request":
 		return decryptRequest(fx, r)
 	case "middleware_request":
 		return middlewareRequest(fx, r)
+	case "request":
+		return exchange(fx, r, "bytes", false, false, false, false)
+	case "discover":
+		_, err := client.Discover(context.Background(), discoverTarget(fx))
+		return err
+	case "reject_reserved_header":
+		return hardening(fx, "header")
+	case "reject_cross_origin":
+		return hardening(fx, "cross")
+	case "residue_selfcheck":
+		lines := client.SelfCheck() // the core's shared vectors through this language's bindings
+		setBody(r, []byte(strings.Join(lines, "\n")))
+		if len(lines) > 0 {
+			native := strings.Join(lines, "; ")
+			r.Native = &native
+		}
+		return nil
+	case "reject_url_credentials":
+		return hardening(fx, "credentials")
 	case "large_body":
-		return largeBody(fx, r)
+		return exchange(fx, r, "pattern", false, false, false, true)
+	case "request_stream":
+		return exchange(fx, r, "stream", false, false, false, false)
+	case "close_response_early":
+		return exchange(fx, r, "bytes", false, true, false, false)
 	case "token_before_response":
-		return tokenBeforeResponse(fx, r)
+		return exchange(fx, r, "bytes", true, false, false, false)
+	case "token_after_exchange":
+		return exchange(fx, r, "bytes", false, false, true, false)
 	default:
 		return fmt.Errorf("unknown operation %q", fx.Operation)
 	}
 }
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
-
-// hardening exercises request-boundary validation without contacting the URL
-// under test. A recording RoundTripper returns a plaintext 502 if the request
-// escapes validation; that successful pass-through is the divergent result.
-func hardening(op string) error {
-	serverID, err := identity.NewIdentity()
-	if err != nil {
-		return err
-	}
-	cfg, err := serverID.MarshalConfig()
-	if err != nil {
-		return err
-	}
-	recorder := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusBadGateway,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader("probe")),
-			Request:    req,
-		}, nil
-	})
-	base := "http://configured.example"
-	tr, err := client.NewTransportWithConfig(base, cfg,
-		client.WithHTTPClient(&http.Client{Transport: recorder}))
-	if err != nil {
-		return err
-	}
-	target := base + "/probe"
-	if op == "reject_cross_origin" {
-		target = "http://attacker.invalid/probe"
-	} else if op == "reject_url_credentials" {
-		target = "http://user:pass@configured.example/probe"
-	}
-	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader("x"))
-	if err != nil {
-		return err
-	}
-	if op == "reject_reserved_header" {
-		req.Header.Set(protocol.ResponseNonceHeader, strings.Repeat("0", 64))
-	}
-	resp, err := tr.RoundTrip(req)
-	if resp != nil {
-		_ = resp.Body.Close()
-	}
-	return err
+// noFollow is the documented http.Client configuration for an EHBP transport:
+// a 3xx is returned to the caller instead of being followed (SPEC 5.1).
+func noFollow(tr http.RoundTripper) *http.Client {
+	return &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
-func encryptedRequest(id *identity.Identity, plaintext []byte) (*http.Request, []byte, error) {
-	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(plaintext))
-	if _, err := id.EncryptRequestWithContext(req); err != nil {
-		return nil, nil, err
-	}
-	// Read in fixed 8 KiB steps so the encryptor emits deterministic 8 KiB
-	// plaintext frames; io.ReadAll's growing buffers would make frame sizes,
-	// and therefore the authenticated prefix, depend on allocator behaviour.
-	var framed []byte
-	buf := make([]byte, 8192)
-	for {
-		n, err := req.Body.Read(buf)
-		framed = append(framed, buf[:n]...)
-		if err == io.EOF {
-			return req, framed, nil
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-	}
+// oracle is a Transport over the oracle, discovering its key through the library.
+func oracle() (string, *client.Transport, error) {
+	serverURL := os.Getenv("ORACLE_URL")
+	tr, err := client.New(serverURL, client.Discovered())
+	return serverURL, tr, err
 }
 
-// decryptRequest drives the public server-side request API with structural
-// mutations. The 64 MiB+1 case runs in this disposable adapter process so a
-// vulnerable allocation cannot take down the harness itself.
-func decryptRequest(fx *fixture, r *result) error {
-	id, err := identity.NewIdentity()
-	if err != nil {
+// decrypt runs the token-only response path over the framed body, fed whole
+// or split at the fixture's byte offsets, and reports the plaintext delivered.
+func decrypt(fx *fixture, r *result, streaming bool) error {
+	token := &client.SessionRecoveryToken{ExportedSecret: hexIn(fx, "exportedSecret"), RequestEnc: hexIn(fx, "requestEnc")}
+	framed := hexIn(fx, "encryptedResponse")
+	var body io.Reader = bytes.NewReader(framed)
+	if streaming {
+		body = &fragmentReader{segments: splitAt(framed, fx.Chunking)}
+	}
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(body)}
+	resp.Header.Set("Ehbp-Response-Nonce", hex.EncodeToString(hexIn(fx, "responseNonce")))
+	if err := client.Core().DecryptResponse(resp, token); err != nil {
 		return err
 	}
-	plaintext := []byte("after-zero-frames")
-	template, framed, err := encryptedRequest(id, plaintext)
+	plain, err := readTracked(resp.Body, r)
 	if err != nil {
-		return err
-	}
-
-	mutation := strIn(fx, "mutation")
-	body := framed
-	if mutation == "oversized_frame" {
-		body = make([]byte, 4)
-		binary.BigEndian.PutUint32(body, (64<<20)+1)
-	} else if mutation == "partial_prefix" {
-		body = []byte{0, 0, 0}
-	} else if mutation == "zero_frame_burst" {
-		count := 10000
-		if v, ok := fx.Inputs["zeroFrameCount"].(float64); ok {
-			count = int(v)
-		}
-		if count < 0 || count > 1_000_000 {
-			return fmt.Errorf("zeroFrameCount out of range: %d", count)
-		}
-		body = append(make([]byte, count*4), framed...)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(body))
-	copyEncapsulatedKey(req, template)
-	if mutation == "duplicate_encapsulated_key" {
-		req.Header.Add(protocol.EncapsulatedKeyHeader, strings.Repeat("0", 64))
-	}
-	if _, err := id.DecryptRequestWithContext(req); err != nil {
-		return err
-	}
-	plain, n, err := readTracked(req.Body)
-	if err != nil {
-		r.EmittedN = n
-		r.Emitted = n > 0
 		return err
 	}
 	setBody(r, plain)
 	return nil
 }
 
-// middlewareRequest verifies the server releases request plaintext one
-// authenticated frame at a time (SPEC 4.3): the handler reads the body to EOF,
-// the tampered trailing frame fails that read, and only the authenticated
-// prefix was delivered before the error.
-func middlewareRequest(fx *fixture, r *result) error {
-	if strIn(fx, "mutation") != "trailing_tamper" {
-		return fmt.Errorf("unknown middleware mutation")
-	}
-	id, err := identity.NewIdentity()
+// exchange sends the fixture request to the oracle and reads the reply. body
+// is how the fixture body is supplied (bytes, stream: unknown length, pattern:
+// the lazy large body); hold reads the token while the oracle holds its reply;
+// early reads one byte and closes; after reads the token once the exchange
+// ended, also on error; rss reports peak RSS.
+func exchange(fx *fixture, r *result, body string, hold, early, after, rss bool) error {
+	serverURL, tr, err := oracle()
 	if err != nil {
 		return err
 	}
-	template, framed, err := encryptedRequest(id, bytes.Repeat([]byte("x"), 20<<10))
-	if err != nil {
-		return err
+	if after {
+		defer func() { has := tr.SessionRecoveryToken() != nil; r.TokenAfter = &has }()
 	}
-	framed[len(framed)-1] ^= 1
-	req := httptest.NewRequest(http.MethodPost, "/probe", bytes.NewReader(framed))
-	copyEncapsulatedKey(req, template)
-
-	var readErr error
-	var delivered int
-	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		_, delivered, readErr = readTracked(req.Body)
-		if readErr != nil {
-			// Return without writing: the middleware then answers with the
-			// protocol status (SPEC 5.2) instead of aborting a started response.
-			return
+	var reqBody io.Reader
+	switch {
+	case body == "pattern":
+		reqBody = newPatternReader(intIn(fx, "size_bytes"), int(intIn(fx, "block_seed")))
+	case fx.Request.BodyHex != nil:
+		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex"))
+		if body == "stream" {
+			reqBody = struct{ io.Reader }{reqBody} // hide the length as a streaming caller would
 		}
-		w.WriteHeader(http.StatusOK)
-	})
-	rec := httptest.NewRecorder()
-	id.Middleware()(handler).ServeHTTP(rec, req)
-	if readErr != nil {
-		r.EmittedN = delivered
-		r.Emitted = delivered > 0
-		return readErr
 	}
-	if rec.Code != http.StatusOK {
-		return identity.NewClientError(fmt.Errorf("request rejected with status %d", rec.Code))
-	}
-	return nil
-}
-
-// tokenBeforeResponse sends the fixture request to the holding oracle route
-// and reads the session recovery token while the response is still pending.
-func tokenBeforeResponse(fx *fixture, r *result) error {
-	serverURL := os.Getenv("ORACLE_URL")
-	tr, err := client.NewTransport(serverURL)
+	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, reqBody)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex")))
-	if err != nil {
-		return err
+	for k, v := range fx.Request.Headers {
+		req.Header.Set(k, v)
 	}
 	type outcome struct {
 		resp *http.Response
@@ -329,33 +237,123 @@ func tokenBeforeResponse(fx *fixture, r *result) error {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		resp, err := (&http.Client{Transport: tr}).Do(req)
+		resp, err := noFollow(tr).Do(req)
 		done <- outcome{resp, err}
 	}()
-	time.Sleep(500 * time.Millisecond) // oracle holds 5 s: 10x margin
-	early := tr.GetSessionRecoveryToken() != nil
-	r.TokenEarly = &early
+	if hold {
+		time.Sleep(500 * time.Millisecond) // the oracle holds 5 s
+		has := tr.SessionRecoveryToken() != nil
+		r.TokenEarly = &has
+	}
 	out := <-done
 	if out.err != nil {
 		return out.err
 	}
-	status := out.resp.StatusCode
+	resp := out.resp
+	status := resp.StatusCode
 	r.Status = &status
-	plain, _, rerr := readTracked(out.resp.Body)
-	_ = out.resp.Body.Close()
+	r.Headers = subsetHeaders(resp.Header)
+	if early {
+		var prefix [1]byte
+		_, readErr := io.ReadFull(resp.Body, prefix[:])
+		before := tr.SessionRecoveryToken() != nil
+		closeErr := resp.Body.Close()
+		afterClose := tr.SessionRecoveryToken() != nil
+		r.TokenBeforeClose, r.TokenAfterClose = &before, &afterClose
+		setBody(r, prefix[:])
+		if readErr != nil {
+			return readErr
+		}
+		return closeErr
+	}
+	plain, rerr := readTracked(resp.Body, r)
+	_ = resp.Body.Close()
+	if rss {
+		if v, ok := peakRSSBytes(); ok {
+			r.PeakRSS = &v
+		}
+	}
 	if rerr != nil {
 		return rerr
 	}
+	// No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+	r.Passthrough = len(resp.Header.Values("Ehbp-Response-Nonce")) == 0 && (status < 200 || status >= 300)
 	setBody(r, plain)
 	return nil
 }
 
-// copyEncapsulatedKey carries the encrypted template's key header onto the
-// probe request, preserving repeats so duplicate-header probes stay exact.
-func copyEncapsulatedKey(dst, src *http.Request) {
-	for _, value := range src.Header.Values(protocol.EncapsulatedKeyHeader) {
-		dst.Header.Add(protocol.EncapsulatedKeyHeader, value)
+// hardening sends a request the library must refuse before it reaches the
+// wire; a reply from the oracle is the divergent result.
+func hardening(fx *fixture, target string) error {
+	base, tr, err := oracle()
+	if err != nil {
+		return err
 	}
+	url := base + "/probe"
+	switch target {
+	case "cross":
+		url = "http://other.invalid/probe"
+	case "credentials":
+		url = strings.Replace(base, "://", "://user:pass@", 1) + "/probe"
+	}
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("x"))
+	if err != nil {
+		return err
+	}
+	if target == "header" {
+		name, value := strIn(fx, "header"), "0000000000000000000000000000000000000000000000000000000000000000"
+		if strings.EqualFold(name, "Host") {
+			value = "attacker.invalid"
+		}
+		req.Header.Set(name, value)
+	}
+	resp, err := noFollow(tr).Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	return err
+}
+
+// discoverTarget maps a fixture target to the oracle listener the harness
+// exposes as ORACLE_<TARGET>_URL (the main oracle for anything else).
+func discoverTarget(fx *fixture) string {
+	if t := strIn(fx, "target"); t != "ORACLE_URL" {
+		if u := os.Getenv("ORACLE_" + strings.ToUpper(t) + "_URL"); u != "" {
+			return u
+		}
+	}
+	return os.Getenv("ORACLE_URL")
+}
+
+// --- helpers ---
+
+type fragmentReader struct {
+	segments [][]byte
+	i        int
+}
+
+func (f *fragmentReader) Read(p []byte) (int, error) {
+	for f.i < len(f.segments) && len(f.segments[f.i]) == 0 {
+		f.i++
+	}
+	if f.i >= len(f.segments) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.segments[f.i])
+	f.segments[f.i] = f.segments[f.i][n:]
+	return n, nil
+}
+
+func splitAt(b []byte, offsets []int) [][]byte {
+	var segs [][]byte
+	prev := 0
+	for _, o := range offsets {
+		if o > prev && o < len(b) {
+			segs = append(segs, b[prev:o])
+			prev = o
+		}
+	}
+	return append(segs, b[prev:])
 }
 
 // patternReader yields size bytes of a 1 MiB block with block[i] = (i+seed)&0xff,
@@ -387,192 +385,28 @@ func (p *patternReader) Read(buf []byte) (int, error) {
 	return n, nil
 }
 
-// largeBody streams a multi-GiB body through the client transport to the
-// oracle's digest route and reports peak RSS so buffering is visible.
-func largeBody(fx *fixture, r *result) error {
-	size, _ := fx.Inputs["size_bytes"].(float64)
-	seed, _ := fx.Inputs["block_seed"].(float64)
-	serverURL := os.Getenv("ORACLE_URL")
-	tr, err := client.NewTransport(serverURL)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, newPatternReader(int64(size), int(seed)))
-	if err != nil {
-		return err
-	}
-	req.ContentLength = -1
-	resp, err := (&http.Client{Transport: tr}).Do(req)
-	if err != nil {
-		return err
-	}
-	status := resp.StatusCode
-	r.Status = &status
-	plain, _, rerr := readTracked(resp.Body)
-	_ = resp.Body.Close()
-	if rss, ok := peakRSSBytes(); ok {
-		r.PeakRSS = &rss
-	}
-	if rerr != nil {
-		return rerr
-	}
-	setBody(r, plain)
-	return nil
-}
-
-func discoverTarget(fx *fixture) string {
-	switch strIn(fx, "target") {
-	case "bad_ct":
-		return os.Getenv("ORACLE_BAD_CT_URL")
-	case "non200":
-		return os.Getenv("ORACLE_NON200_URL")
-	default:
-		return os.Getenv("ORACLE_URL")
-	}
-}
-
-func decryptResponse(fx *fixture, r *result) error {
-	token := &identity.SessionRecoveryToken{ExportedSecret: hexIn(fx, "exportedSecret"), RequestEnc: hexIn(fx, "requestEnc")}
-	framed := hexIn(fx, "encryptedResponse")
-
-	var body io.Reader = bytes.NewReader(framed)
-	if fx.Operation == "decrypt_response_streaming" {
-		body = &fragmentReader{segments: splitAt(framed, fx.Chunking)}
-	}
-	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(body)}
-	resp.Header.Set(protocol.ResponseNonceHeader, hex.EncodeToString(hexIn(fx, "responseNonce")))
-
-	if err := identity.DecryptResponseWithToken(resp, token); err != nil {
-		return err
-	}
-	plain, n, err := readTracked(resp.Body)
-	if err != nil {
-		r.EmittedN = n
-		r.Emitted = n > 0
-		return err
-	}
-	setBody(r, plain)
-	return nil
-}
-
-func doRequest(fx *fixture, r *result) error {
-	serverURL := os.Getenv("ORACLE_URL")
-	tr, err := client.NewTransport(serverURL)
-	if err != nil {
-		return err
-	}
-	var reqBody io.Reader
-	if fx.Request.BodyHex != nil {
-		reqBody = bytes.NewReader(mustHex(*fx.Request.BodyHex, "body_hex"))
-	}
-	if fx.Operation == "request_stream" {
-		// Hide the byte reader's length as a streaming caller would.
-		reqBody = struct{ io.Reader }{reqBody}
-	}
-	req, err := http.NewRequest(fx.Request.Method, serverURL+fx.Request.Path, reqBody)
-	if err != nil {
-		return err
-	}
-	for k, v := range fx.Request.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Transport: tr}).Do(req)
-	if err != nil {
-		return err
-	}
-	status := resp.StatusCode
-	r.Status = &status
-	r.Headers = subsetHeaders(resp.Header)
-	if fx.Operation == "close_response_early" {
-		var prefix [1]byte
-		_, readErr := io.ReadFull(resp.Body, prefix[:])
-		before := tr.GetSessionRecoveryToken() != nil
-		closeErr := resp.Body.Close()
-		after := tr.GetSessionRecoveryToken() != nil
-		r.TokenBeforeClose, r.TokenAfterClose = &before, &after
-		setBody(r, prefix[:])
-		if readErr != nil {
-			return readErr
-		}
-		return closeErr
-	}
-
-	plain, n, rerr := readTracked(resp.Body)
-	_ = resp.Body.Close()
-	if rerr != nil {
-		r.EmittedN = n
-		r.Emitted = n > 0
-		return rerr
-	}
-	// No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
-	if resp.Header.Get(protocol.ResponseNonceHeader) == "" && (status < 200 || status >= 300) {
-		r.Passthrough = true
-	}
-	setBody(r, plain)
-	return nil
-}
-
-// mapErr reads the canonical code the library attached (protocol.CodeOf); it
-// never matches message text. Uncoded errors are adapter/transport input errors.
-func mapErr(err error) string {
-	if c := protocol.CodeOf(err); c != "" {
-		return string(c)
-	}
-	return "INVALID_INPUT"
-}
-
-// --- helpers ---
-
-type fragmentReader struct {
-	segments [][]byte
-	i        int
-}
-
-func (f *fragmentReader) Read(p []byte) (int, error) {
-	for f.i < len(f.segments) && len(f.segments[f.i]) == 0 {
-		f.i++
-	}
-	if f.i >= len(f.segments) {
-		return 0, io.EOF
-	}
-	n := copy(p, f.segments[f.i])
-	f.segments[f.i] = f.segments[f.i][n:]
-	return n, nil
-}
-
-func splitAt(b []byte, offsets []int) [][]byte {
-	var segs [][]byte
-	prev := 0
-	for _, o := range offsets {
-		if o > prev && o < len(b) {
-			segs = append(segs, b[prev:o])
-			prev = o
-		}
-	}
-	segs = append(segs, b[prev:])
-	return segs
-}
-
-func readTracked(r io.Reader) ([]byte, int, error) {
+// readTracked reads to EOF; on error it records the bytes delivered before it.
+func readTracked(src io.Reader, r *result) ([]byte, error) {
 	var out []byte
 	buf := make([]byte, 4096)
 	for {
-		n, err := r.Read(buf)
+		n, err := src.Read(buf)
 		out = append(out, buf[:n]...)
 		if err == io.EOF {
-			return out, len(out), nil
+			return out, nil
 		}
 		if err != nil {
-			return out, len(out), err
+			r.EmittedN, r.Emitted = len(out), len(out) > 0
+			return out, err
 		}
 	}
 }
 
 func subsetHeaders(h http.Header) map[string]string {
 	out := map[string]string{}
-	for _, k := range []string{protocol.ResponseNonceHeader, "Content-Length", "Transfer-Encoding", "Content-Type"} {
+	for _, k := range []string{"ehbp-response-nonce", "content-length", "transfer-encoding", "content-type"} {
 		if v := h.Get(k); v != "" {
-			out[strings.ToLower(k)] = v
+			out[k] = v
 		}
 	}
 	return out
@@ -593,6 +427,13 @@ func strIn(fx *fixture, key string) string {
 		fatal(fmt.Errorf("fixture %s: input %q missing or not a string", fx.ID, key))
 	}
 	return s
+}
+func intIn(fx *fixture, key string) int64 {
+	v, ok := fx.Inputs[key].(float64)
+	if !ok {
+		fatal(fmt.Errorf("fixture %s: input %q missing or not a number", fx.ID, key))
+	}
+	return int64(v)
 }
 func mustHex(s, field string) []byte {
 	b, err := hex.DecodeString(s)

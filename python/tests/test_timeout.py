@@ -1,4 +1,4 @@
-"""Per-request timeouts against a real local server.
+"""The http_client's timeout against a real local server.
 
 ``httpx.MockTransport`` cannot model idle time on the wire, so these tests use
 a socket server that pauses mid-response. Encrypted requests get a nonce-less
@@ -13,11 +13,11 @@ from collections.abc import Iterator
 import httpx
 import pytest
 
-from ehbp import Client, ServerIdentity
+from ehbp import Client, PublicKey
 from ehbp.protocol import ENCAPSULATED_KEY_HEADER
 
 GAP_SECONDS = 1.0
-PUBLIC_KEY_HEX = "09" + "00" * 31
+PUBLIC_KEY = bytes([9]) + bytes(31)
 
 
 def _read_request(conn: socket.socket) -> bytes:
@@ -28,13 +28,8 @@ def _read_request(conn: socket.socket) -> bytes:
             return data
         data += chunk
     head, body = data.split(b"\r\n\r\n", 1)
-    lowered = head.lower()
-    if b"transfer-encoding: chunked" in lowered:
+    if b"transfer-encoding: chunked" in head.lower():
         while not body.endswith(b"0\r\n\r\n"):
-            body += conn.recv(65536)
-    elif b"content-length:" in lowered:
-        length = int(lowered.split(b"content-length:", 1)[1].split(b"\r\n", 1)[0])
-        while len(body) < length:
             body += conn.recv(65536)
     return head
 
@@ -72,61 +67,21 @@ def slow_base_url(request) -> Iterator[str]:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
-    thread = threading.Thread(
+    threading.Thread(
         target=_serve, args=(listener, request.param == "before_headers"), daemon=True
-    )
-    thread.start()
+    ).start()
     yield f"http://127.0.0.1:{listener.getsockname()[1]}"
     listener.close()
 
 
-def _client(base_url: str, client_timeout: float) -> Client:
-    return Client(
-        base_url,
-        ServerIdentity.from_public_key_hex(PUBLIC_KEY_HEX),
-        http_client=httpx.Client(timeout=client_timeout),
-    )
+def _client(base_url: str, timeout: float) -> Client:
+    return Client(base_url, PublicKey(PUBLIC_KEY), http_client=httpx.Client(timeout=timeout))
 
 
-def _request(client: Client, body, **kwargs) -> bytes:
-    return client.request("POST", "/", body=body, **kwargs).content
-
-
-def _stream(client: Client, body, **kwargs) -> bytes:
-    with client.stream("POST", "/", body=body, **kwargs) as response:
-        return b"".join(response)
-
-
-SEND = pytest.mark.parametrize("send", [_request, _stream], ids=["request", "stream"])
-BODY = pytest.mark.parametrize("body", [None, b"hi"], ids=["bodyless", "encrypted"])
-
-
-@SEND
-@BODY
-def test_shorter_request_timeout_overrides_client(slow_base_url, send, body):
-    with _client(slow_base_url, client_timeout=2) as client:
+@pytest.mark.parametrize("body", [None, b"hi"], ids=["bodyless", "encrypted"])
+def test_client_read_timeout_bounds_each_gap(slow_base_url, body):
+    with _client(slow_base_url, timeout=0.5) as client:
         with pytest.raises(httpx.ReadTimeout):
-            send(client, body, timeout=0.5)
-
-
-@SEND
-@BODY
-def test_longer_request_timeout_overrides_client(slow_base_url, send, body):
-    with _client(slow_base_url, client_timeout=0.5) as client:
-        assert send(client, body, timeout=2) == b"ab"
-
-
-@SEND
-@BODY
-def test_default_keeps_client_timeout(slow_base_url, send, body):
-    with _client(slow_base_url, client_timeout=0.5) as client:
-        with pytest.raises(httpx.ReadTimeout):
-            send(client, body)
-
-
-def test_convenience_methods_forward_timeout(slow_base_url):
-    with _client(slow_base_url, client_timeout=0.5) as client:
-        assert client.get("/", timeout=2).content == b"ab"
-        assert client.delete("/", timeout=2).content == b"ab"
-        assert client.post("/", body=b"hi", timeout=2).content == b"ab"
-        assert client.put("/", body=b"hi", timeout=2).content == b"ab"
+            client.request("POST", "/", body=body).read()
+    with _client(slow_base_url, timeout=2) as client:
+        assert client.request("POST", "/", body=body).read() == b"ab"

@@ -1,39 +1,21 @@
 // EHBP conformance adapter (Swift). See conformance/adapters/README.md.
 //
-// Reads one fixture on stdin, runs it through the public EHBP API, prints one
-// normalized result. parse_config/marshal_config are reported skipped: the Swift
-// library is client-only and exposes no accessor for the parsed public key.
-// All native-error translation lives in mapError.
+// Reads one fixture on stdin, runs it through the public EHBP API (the pure
+// helpers through EHBPClient.core), prints one normalized result. All
+// native-error translation lives in mapError.
 
 import Foundation
 import EHBP
 
 let headerSubset = ["ehbp-response-nonce", "content-length", "transfer-encoding", "content-type"]
 
-// A local URLProtocol sink makes origin/header probes deterministic and ensures
-// an unguarded request never reaches the network.
-final class GuardProbeURLProtocol: URLProtocol {
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let response = HTTPURLResponse(
-            url: request.url!, statusCode: 502, httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "text/plain"]
-        )!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data("probe".utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-}
-
 let inputData = FileHandle.standardInput.readDataToEndOfFile()
-let fx = (try? JSONSerialization.jsonObject(with: inputData)) as? [String: Any] ?? [:]
+nonisolated(unsafe) let fx = (try? JSONSerialization.jsonObject(with: inputData)) as? [String: Any] ?? [:]
 let op = fx["operation"] as? String ?? ""
+nonisolated(unsafe) let ins: [String: Any] = fx["inputs"] as? [String: Any] ?? [:]
+let env = ProcessInfo.processInfo.environment
 
-var res: [String: Any] = [
+nonisolated(unsafe) var res: [String: Any] = [
     "fixture_id": fx["id"] as? String ?? "",
     "outcome": "ok", "error_code": NSNull(), "status": NSNull(), "body_hex": NSNull(),
     "passthrough": false, "plaintext_emitted_before_error": false,
@@ -44,42 +26,40 @@ func hexToData(_ s: Any?) -> Data { Data(hexString: (s as? String) ?? "") ?? Dat
 func setBody(_ d: Data) { res["body_hex"] = d.hexString }
 
 func run() async throws {
-    let ins = fx["inputs"] as? [String: Any] ?? [:]
     switch op {
     case "derive_keys":
-        let km = try deriveResponseKeys(
+        let km = try await EHBPClient.core.deriveResponseKeys(
             exportedSecret: hexToData(ins["exportedSecret"]),
             requestEnc: hexToData(ins["requestEnc"]),
             responseNonce: hexToData(ins["responseNonce"]))
-        let keyData = km.key.withUnsafeBytes { Data($0) }
-        setBody(keyData + km.nonceBase)
+        setBody(km.key + km.nonceBase)
     case "compute_nonce":
-        let nonceBase = hexToData(ins["nonceBase"])
-        guard nonceBase.count == EHBPConstants.aesGCMNonceLength else {
-            throw EHBPError(.invalidInput, "nonce base must be \(EHBPConstants.aesGCMNonceLength) bytes")
-        }
         guard let seq = UInt64((ins["seqHex"] as? String) ?? "", radix: 16) else {
             throw EHBPError(.invalidInput, "seqHex is not a hex sequence number")
         }
-        setBody(computeNonce(nonceBase: nonceBase, seq: seq))
+        setBody(try EHBPClient.core.computeNonce(nonceBase: hexToData(ins["nonceBase"]), seq: seq))
     case "decrypt_response", "decrypt_response_streaming":
-        try decryptOp(ins)
+        try await decryptOp()
     case "token_roundtrip":
-        let json = Data(((ins["json"] as? String) ?? "").utf8)
-        let token = try SessionRecoveryToken(json: json)
+        let token = try SessionRecoveryToken(json: Data(((ins["json"] as? String) ?? "").utf8))
         setBody(token.exportedSecret + token.requestEnc)
-    case "parse_config", "marshal_config":
-        res["outcome"] = "skipped"
-        res["skip_reason"] = "swift-client-has-no-public-key-accessor-or-config-marshal"
+    case "parse_config":
+        setBody(try EHBPClient.core.parseConfig(hexToData(ins["config"])))
+    case "marshal_config":
+        setBody(try EHBPClient.core.marshalConfig(publicKey: hexToData(ins["publicKey"])))
     case "discover":
-        res["outcome"] = "skipped"
-        res["skip_reason"] = "swift-client-has-no-discovery-or-request-guards"
+        _ = try await EHBPClient.discover(discoverTarget())
+    case "residue_selfcheck":
+        // The core's shared vectors through this language's crypto bindings.
+        let lines = await EHBPClient.selfCheck()
+        setBody(Data(lines.joined(separator: "\n").utf8))
+        if !lines.isEmpty { res["native_error"] = lines.joined(separator: "; ") }
     case "reject_reserved_header", "reject_cross_origin", "reject_url_credentials":
-        try await hardeningOp(op)
-    case "request", "request_stream":
-        try await requestOp(streaming: op == "request_stream")
+        try await hardeningOp()
+    case "request", "request_stream", "token_after_exchange", "close_response_early":
+        try await exchangeOp()
     case "large_body":
-        try await largeBodyOp(ins)
+        try await largeBodyOp()
     case "token_before_response":
         try await tokenBeforeResponseOp()
     default:
@@ -87,45 +67,44 @@ func run() async throws {
     }
 }
 
-func hardeningOp(_ operation: String) async throws {
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.protocolClasses = [GuardProbeURLProtocol.self]
-    let session = URLSession(configuration: configuration)
-    let publicKey = Data(repeating: 7, count: EHBPConstants.requestEncLength)
-
-    var base = "http://configured.example"
-    var path = "/probe"
-    var headers = [String: String]()
-    if operation == "reject_cross_origin" {
-        // Same absolute cross-origin target the Python and Rust adapters use.
-        path = "http://other.example/probe"
-    } else if operation == "reject_url_credentials" {
-        base = "http://user:pass@configured.example"
-    } else {
-        headers[EHBPProtocol.responseNonceHeader] = String(repeating: "0", count: EHBPConstants.responseNonceLength * 2)
-    }
-
-    let client = try EHBPClient(baseURL: base, publicKey: publicKey, session: session)
-    _ = try await client.request(
-        method: "POST", path: path, headers: headers, body: Data([1]))
+/// Discovery variants are exposed as ORACLE_<TARGET>_URL (operations.md).
+func discoverTarget() -> String {
+    let target = ((ins["target"] as? String) ?? "").uppercased()
+    if !target.isEmpty, target != "ORACLE_URL", let url = env["ORACLE_\(target)_URL"] { return url }
+    return env["ORACLE_URL"] ?? ""
 }
 
-func decryptOp(_ ins: [String: Any]) throws {
-    let token = SessionRecoveryToken(
-        exportedSecret: hexToData(ins["exportedSecret"]),
-        requestEnc: hexToData(ins["requestEnc"]))
-    var decryptor = try token.makeResponseDecryptor(responseNonce: hexToData(ins["responseNonce"]))
-    let framed = hexToData(ins["encryptedResponse"])
-    let segments = op.hasSuffix("streaming")
-        ? splitAt(framed, (fx["chunking"] as? [NSNumber])?.map { $0.intValue })
-        : [framed]
+/// A client for the oracle, discovering its keys: the one bootstrap shared by
+/// every oracle-bound operation.
+func oracleClient(_ base: String = env["ORACLE_URL"] ?? "") async throws -> EHBPClient {
+    try await EHBPClient(server: base, keys: .discover)
+}
 
+func hardeningOp() async throws {
+    var base = env["ORACLE_URL"] ?? ""
+    var path = "/s/echo"
+    var headers = [String: String]()
+    switch op {
+    case "reject_cross_origin":
+        path = "http://other.example/x"
+    case "reject_url_credentials":
+        base = base.replacingOccurrences(of: "http://", with: "http://user:pass@")
+    default:
+        let name = ins["header"] as? String ?? EHBPProtocol.responseNonceHeader
+        headers[name] = name.lowercased() == "host" ? "attacker.invalid" : String(repeating: "0", count: 64)
+    }
+    let client = try await oracleClient(base)
+    _ = try await client.request(method: "POST", path: path, headers: headers, body: Data([1]))
+}
+
+func decryptOp() async throws {
+    let token = SessionRecoveryToken(exportedSecret: hexToData(ins["exportedSecret"]), requestEnc: hexToData(ins["requestEnc"]))
+    let framed = hexToData(ins["encryptedResponse"])
+    let segments = op.hasSuffix("streaming") ? splitAt(framed, (fx["chunking"] as? [NSNumber])?.map { $0.intValue }) : [framed]
+    let stream = try await EHBPClient.core.decryptWithToken(token, responseNonce: hexToData(ins["responseNonce"]), chunks: segments)
     var acc = Data()
     do {
-        for seg in segments {
-            for chunk in try decryptor.push(seg) { acc.append(chunk) }
-        }
-        try decryptor.finish()
+        for try await chunk in stream { acc.append(chunk) }
     } catch {
         res["bytes_emitted_before_error"] = acc.count
         res["plaintext_emitted_before_error"] = acc.count > 0
@@ -134,90 +113,84 @@ func decryptOp(_ ins: [String: Any]) throws {
     setBody(acc)
 }
 
-/// Discovers the oracle's key config and binds a client to its origin: the one
-/// bootstrap shared by every oracle-bound operation.
-func oracleClient() async throws -> EHBPClient {
-    let base = ProcessInfo.processInfo.environment["ORACLE_URL"] ?? ""
-    let (config, _) = try await URLSession.shared.data(from: URL(string: base + "/.well-known/hpke-keys")!)
-    return try EHBPClient(baseURL: base, config: config)
+func fixtureRequest() -> (method: String, path: String, headers: [String: String], body: Data?) {
+    let req = fx["request"] as? [String: Any] ?? [:]
+    let headers = (req["headers"] as? [String: Any] ?? [:]).compactMapValues { $0 as? String }
+    return ((req["method"] as? String) ?? "POST", (req["path"] as? String) ?? "/", headers,
+            (req["body_hex"] as? String).flatMap { Data(hexString: $0) })
 }
 
-func requestOp(streaming: Bool) async throws {
-    let client = try await oracleClient()
-
-    let req = fx["request"] as? [String: Any] ?? [:]
-    var headers = [String: String]()
-    if let h = req["headers"] as? [String: Any] {
-        for (k, v) in h { if let s = v as? String { headers[k] = s } }
-    }
-    var body: Data?
-    if let bh = req["body_hex"] as? String { body = Data(hexString: bh) }
-
-    let method = (req["method"] as? String) ?? "POST"
-    let path = (req["path"] as? String) ?? "/"
-    let (data, response): (Data, HTTPURLResponse)
-    if streaming {
-        (data, response) = try await client.request(method: method, path: path, headers: headers, bodySource: {
-            defer { body = nil }
-            return body
-        })
-    } else {
-        (data, response) = try await client.request(method: method, path: path, headers: headers, body: body)
-    }
-
+func report(_ response: HTTPURLResponse) {
     res["status"] = response.statusCode
     var hdrs = [String: String]()
     for name in headerSubset {
         if let v = response.value(forHTTPHeaderField: name) { hdrs[name] = v }
     }
     res["response_headers"] = hdrs
-    let noNonce = hdrs["ehbp-response-nonce"] == nil
-    setBody(data)
-    res["passthrough"] = noNonce && !(200..<300).contains(response.statusCode)
+    res["passthrough"] = hdrs["ehbp-response-nonce"] == nil && !(200..<300).contains(response.statusCode)
+}
+
+/// request, request_stream (the body from an unknown-length producer),
+/// close_response_early (one byte, then the stream is dropped) and
+/// token_after_exchange (the public accessor read after the exchange ended).
+func exchangeOp() async throws {
+    let client = try await oracleClient()
+    let req = fixtureRequest()
+    func exchange() async throws {
+        var pending = req.body // one pull, then end: the unknown-length producer of request_stream
+        let (stream, response) = try await client.requestStream(
+            method: req.method, path: req.path, headers: req.headers,
+            bodySource: req.body == nil ? nil : { defer { pending = nil }; return pending })
+        report(response)
+        var acc = Data()
+        if op == "close_response_early" {
+            for try await chunk in stream { acc.append(chunk.prefix(1)); break }
+            res["token_before_close"] = client.sessionRecoveryToken() != nil
+        } else {
+            for try await chunk in stream { acc.append(chunk) }
+        }
+        setBody(acc)
+    }
+    var failure: Error?
+    do { try await exchange() } catch { failure = error }
+    // The stream was dropped inside exchange(); the token is cleared on drop.
+    try? await Task.sleep(nanoseconds: 100_000_000)
+    if op == "close_response_early" { res["token_after_close"] = client.sessionRecoveryToken() != nil }
+    if op == "token_after_exchange" { res["token_after_exchange"] = client.sessionRecoveryToken() != nil }
+    if let failure { throw failure }
 }
 
 // tokenBeforeResponseOp sends the fixture request to the holding oracle route
 // and reads the session recovery token while the response is still pending.
 func tokenBeforeResponseOp() async throws {
     let client = try await oracleClient()
-    let req = fx["request"] as? [String: Any] ?? [:]
-    let body = Data(hexString: (req["body_hex"] as? String) ?? "")
-
-    let pending = Task {
-        try await client.request(
-            method: (req["method"] as? String) ?? "POST",
-            path: (req["path"] as? String) ?? "/",
-            body: body)
-    }
+    let req = fixtureRequest()
+    let pending = Task { try await client.request(method: req.method, path: req.path, body: req.body) }
     try await Task.sleep(nanoseconds: 500_000_000) // oracle holds 5 s
-    res["token_before_response"] = (try? client.getSessionRecoveryToken()) != nil
+    res["token_before_response"] = client.sessionRecoveryToken() != nil
     let (data, response) = try await pending.value
-    res["status"] = response.statusCode
+    report(response)
     setBody(data)
 }
 
 // largeBodyOp streams a multi-GiB patterned body through the client's
 // bodySource path to the oracle's digest route and reports peak RSS so any
-// buffering is visible. Mirrors the Go adapter's op.
-func largeBodyOp(_ ins: [String: Any]) async throws {
+// buffering is visible.
+func largeBodyOp() async throws {
     let size = Int64((ins["size_bytes"] as? NSNumber)?.int64Value ?? 0)
     let seed = Int((ins["block_seed"] as? NSNumber)?.intValue ?? 0)
     let client = try await oracleClient()
-    let req = fx["request"] as? [String: Any] ?? [:]
+    let req = fixtureRequest()
 
     // 1 MiB block with block[i] = (i + seed) & 0xff, repeated; never materialised.
     let block = Data((0..<(1 << 20)).map { UInt8(truncatingIfNeeded: $0 + seed) })
     var remaining = size
-    let (data, response) = try await client.request(
-        method: (req["method"] as? String) ?? "POST",
-        path: (req["path"] as? String) ?? "/",
-        bodySource: {
-            if remaining <= 0 { return nil }
-            let n = Int(min(remaining, Int64(block.count)))
-            remaining -= Int64(n)
-            return n == block.count ? block : block.prefix(n)
-        })
-
+    let (data, response) = try await client.request(method: req.method, path: req.path, bodySource: {
+        if remaining <= 0 { return nil }
+        let n = Int(min(remaining, Int64(block.count)))
+        remaining -= Int64(n)
+        return n == block.count ? block : block.prefix(n)
+    })
     res["status"] = response.statusCode
     setBody(data)
     var usage = rusage()
@@ -227,12 +200,12 @@ func largeBodyOp(_ ins: [String: Any]) async throws {
 
 // mapError reads the canonical code the library attached; anything uncoded is
 // a caller/adapter input error.
-func mapError(_ op: String, _ error: Error) -> String {
+func mapError(_ error: Error) -> String {
     (error as? EHBPError)?.code?.rawValue ?? "INVALID_INPUT"
 }
 
 func splitAt(_ data: Data, _ offsets: [Int]?) -> [Data] {
-    guard let offsets = offsets, !offsets.isEmpty else { return [data] }
+    guard let offsets, !offsets.isEmpty else { return [data] }
     var segs = [Data]()
     var prev = 0
     for o in offsets where o > prev && o < data.count {
@@ -247,10 +220,9 @@ do {
     try await run()
 } catch {
     res["outcome"] = "error"
-    res["error_code"] = mapError(op, error)
+    res["error_code"] = mapError(error)
     res["body_hex"] = NSNull()
     res["native_error"] = (error as? EHBPError)?.errorDescription ?? String(describing: error)
 }
 
-let outData = try JSONSerialization.data(withJSONObject: res)
-FileHandle.standardOutput.write(outData)
+FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: res))

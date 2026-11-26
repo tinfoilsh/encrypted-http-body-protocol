@@ -11,11 +11,11 @@ requires-python = ">=3.9"
 dependencies = [
     "cryptography>=42",
     "httpx>=0.27",
-    "pyhpke>=0.6",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pyhpke>=0.6",  # the test mock server's HPKE recipient
     "pytest>=8",
     "ruff>=0.6",
     "mypy>=1.8",
@@ -24,11 +24,19 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/ehbp"]
 
+# The Dafny bundle is not duplicated in the tree; wheels and sdists carry it.
+[tool.hatch.build.targets.wheel.force-include]
+"../dafny/gen-events/py" = "ehbp/_gen"
+
+[tool.hatch.build.targets.sdist.force-include]
+"../dafny/gen-events/py" = "src/ehbp/_gen"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["src/ehbp/_gen"]
 src = ["src", "tests"]
 target-version = "py39"
 
@@ -41,4 +49,5 @@ ignore = ["UP007", "UP045"]
 [tool.mypy]
 python_version = "3.9"
 packages = ["ehbp"]
+exclude = ["src/ehbp/_gen"]
 ignore_missing_imports = true

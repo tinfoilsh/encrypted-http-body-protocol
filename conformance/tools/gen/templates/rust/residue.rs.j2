@@ -1,0 +1,114 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.rs.j2. #}
+
+{% macro session() %}
+// session: a mutex around one SessionStore value; every rule is SessionApply.
+
+#[rustfmt::skip]
+pub(crate) struct Session {
+    {{ lock_field }},
+}
+
+#[rustfmt::skip]
+impl Default for Session {
+    fn default() -> Self {
+        Session { store: Mutex::new(ev::_default::NewSession()) }
+    }
+}
+
+#[rustfmt::skip]
+impl Session {
+    fn apply(&self, a: ev::SessionAction) -> Arc<ev::SessionStore> {
+        let mut store = {{ lock }};
+        *store = ev::_default::SessionApply(&store, &Arc::new(a));
+        store.clone()
+    }
+
+    pub fn begin_session(&self) -> u64 {
+        *self.apply(ev::SessionAction::Begin {}).generation()
+    }
+
+    pub fn publish_token(&self, generation: u64, exported_secret: &[u8], request_enc: &[u8]) {
+        let token = core_token(exported_secret, request_enc);
+        self.apply(ev::SessionAction::Publish { generation, token });
+    }
+
+    pub fn clear_token(&self, generation: u64) {
+        self.apply(ev::SessionAction::Clear { generation });
+    }
+
+    /// The stored token, or none; never computes anything.
+    pub fn token(&self) -> Option<Arc<core::Token>> {
+        match {{ lock }}.token().as_ref() {
+            core::Option::Some { value } => Some(value.clone()),
+            core::Option::None {} => None,
+        }
+    }
+}
+{%- endmacro %}
+
+{% macro conversions() %}
+// conversions: the runtime boundary only.
+
+#[rustfmt::skip]
+pub(crate) fn seq(b: {{ bytes }}) -> Sequence<u8> {
+    Sequence::from_array_owned(b.to_vec())
+}
+
+#[rustfmt::skip]
+pub(crate) fn bytes(s: &Sequence<u8>) -> Vec<u8> {
+    s.to_array().to_vec()
+}
+
+#[rustfmt::skip]
+pub(crate) fn str(s: &str) -> Sequence<DafnyChar> {
+    string_of(s)
+}
+
+#[rustfmt::skip]
+pub(crate) fn string(s: &Sequence<DafnyChar>) -> String {
+    s.iter().map(|c| c.0).collect()
+}
+
+/// The core's header list, one entry per value.
+#[rustfmt::skip]
+pub(crate) fn header_seq(headers: &HeaderMap) -> Headers {
+    headers.iter().map(|(name, value)| (str(name.as_str()), str(&String::from_utf8_lossy(value.as_bytes())))).collect()
+}
+
+/// The core's header list back as native name/value pairs; a name or value
+/// the native stack cannot hold is dropped.
+#[rustfmt::skip]
+pub(crate) fn header_pairs(headers: &Headers) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        let (name, value) = (string(&name), string(&value));
+        if let (Ok(name), Ok(value)) = (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(&value)) {
+            map.append(name, value);
+        }
+    }
+    map
+}
+{%- endmacro %}
+
+{% macro mapping() %}
+// mapping: from the core's CodeString; no table of strings.
+
+/// The canonical code of a core code; Transport has none.
+#[rustfmt::skip]
+pub(crate) fn code(c: &Arc<core::Code>) -> Option<Code> {
+    let name = string(&core::_default::CodeString(c));
+    Code::ALL.into_iter().find(|k| k.as_str() == name)
+}
+
+/// A core failure as a Rust error: a coded protocol error, or the native
+/// cause of a Transport failure.
+#[rustfmt::skip]
+pub(crate) fn error(c: &Arc<core::Code>, message: &str, cause: Option<Error>) -> Error {
+    match (code(c), cause) {
+        (Some(code), Some(cause)) => Error::Coded(code, format!("{message}: {cause}")),
+        (Some(code), None) => Error::Coded(code, message.to_owned()),
+        (None, Some(cause)) => cause,
+        (None, None) => Error::Protocol(message.to_owned()),
+    }
+}
+{%- endmacro %}

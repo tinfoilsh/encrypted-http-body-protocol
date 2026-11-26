@@ -1,0 +1,53 @@
+"""Exception hierarchy for the EHBP client. {{ header }}.
+
+One subclass per canonical, cross-SDK error class (SPEC Section 5.5), named after
+its code. ``str(err)`` is ``"<CODE>: <detail>"``. Codes are for the in-process
+caller only and are never sent on the wire (SPEC 5.4.4).
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import ClassVar, Optional
+
+
+class Code(str, Enum):
+{% for c in codes %}
+    {{ c.value }} = '{{ c.value }}'
+{% endfor %}
+
+
+class EHBPError(Exception):
+    """Base class; catch this for any EHBP failure. Raise only a subclass."""
+
+    code: ClassVar[Code]
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+    def __str__(self) -> str:
+        code = getattr(self, "code", None)
+        return f"{code.value}: {self.message}" if code else self.message
+
+
+{% for c in codes %}
+{% if not loop.first %}
+
+{% endif %}
+class {{ c.native }}Error(EHBPError):
+    code = Code.{{ c.value }}
+{% endfor %}
+
+
+def code_of(err: BaseException) -> Optional[Code]:
+    """The canonical code of any raised value, or None for a non-EHBP error."""
+    return err.code if isinstance(err, EHBPError) else None
+
+
+def error_for(code: str, message: str) -> EHBPError:
+    """The exception class for a canonical code string."""
+    for cls in EHBPError.__subclasses__():
+        if cls.code.value == code:
+            return cls(message)
+    raise ValueError(f"unknown code {code}")

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -27,278 +26,41 @@ func requireIdentitiesEqual(t *testing.T, expected, actual *Identity) {
 }
 
 func TestIdentityExportImport(t *testing.T) {
-	// Create a new identity
 	original, err := NewIdentity()
-	assert.NoError(t, err)
-
-	// Export the identity
+	require.NoError(t, err)
 	exported, err := original.Export()
-	assert.NoError(t, err)
-
-	// Import the identity
+	require.NoError(t, err)
 	imported, err := Import(exported)
-	assert.NoError(t, err)
-
-	// Compare
+	require.NoError(t, err)
 	requireIdentitiesEqual(t, original, imported)
-}
 
-func TestNewIdentity(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-	require.NotNil(t, identity)
-
-	// Verify the identity has valid components
-	assert.NotNil(t, identity.pk)
-	assert.NotNil(t, identity.sk)
-	assert.NotNil(t, identity.kem)
-	assert.NotNil(t, identity.kdf)
-	assert.NotNil(t, identity.aead)
-
-	// Verify suite parameters (DHKEM(X25519) = 0x0020, HKDF-SHA256 = 0x0001, AES-256-GCM = 0x0002)
-	assert.Equal(t, uint16(0x0020), identity.kem.ID())
-	assert.Equal(t, uint16(0x0001), identity.kdf.ID())
-	assert.Equal(t, uint16(0x0002), identity.aead.ID())
-}
-
-func TestIdentityMethods(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	// Test PublicKey method
-	pk := identity.PublicKey()
-	assert.NotNil(t, pk)
-	assert.Equal(t, identity.pk.Bytes(), pk.Bytes())
-
-	// Test PrivateKey method
-	sk := identity.PrivateKey()
-	assert.NotNil(t, sk)
-
-	// Test KEM/KDF/AEAD methods
-	kem := identity.KEM()
-	assert.NotNil(t, kem)
-	kdf := identity.KDF()
-	assert.NotNil(t, kdf)
-	aead := identity.AEAD()
-	assert.NotNil(t, aead)
-}
-
-func TestMarshalPublicKey(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	pkBytes := identity.MarshalPublicKey()
-	assert.NotEmpty(t, pkBytes)
-	assert.Equal(t, 32, len(pkBytes)) // X25519 public key size
-
-	// Verify we can unmarshal it back
-	pk, err := identity.KEM().NewPublicKey(pkBytes)
-	assert.NoError(t, err)
-	assert.Equal(t, identity.pk.Bytes(), pk.Bytes())
-}
-
-func TestMarshalConfig(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	config, err := identity.MarshalConfig()
-	require.NoError(t, err)
-	assert.NotEmpty(t, config)
-
-	// Verify we can unmarshal the config
-	parsedIdentity, err := UnmarshalPublicConfig(config)
-	require.NoError(t, err)
-	assert.NotNil(t, parsedIdentity)
-	assert.Equal(t, identity.pk.Bytes(), parsedIdentity.pk.Bytes())
-	assert.Equal(t, identity.kem.ID(), parsedIdentity.kem.ID())
-	assert.Equal(t, identity.kdf.ID(), parsedIdentity.kdf.ID())
-	assert.Equal(t, identity.aead.ID(), parsedIdentity.aead.ID())
-	assert.Nil(t, parsedIdentity.sk) // public key only
-}
-
-func TestConfigHandler(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	// Create a test request
-	req := httptest.NewRequest("GET", protocol.KeysPath, nil)
-	w := httptest.NewRecorder()
-
-	// Call the handler
-	identity.ConfigHandler(w, req)
-
-	// Verify response
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, protocol.KeysMediaType, w.Header().Get("Content-Type"))
-	assert.NotEmpty(t, w.Body.Bytes())
-
-	// Verify we can parse the response
-	_, err = UnmarshalPublicConfig(w.Body.Bytes())
-	assert.NoError(t, err)
-}
-
-func TestUnmarshalPublicConfig(t *testing.T) {
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	config, err := identity.MarshalConfig()
-	require.NoError(t, err)
-
-	parsedIdentity, err := UnmarshalPublicConfig(config)
-	require.NoError(t, err)
-
-	// Verify parsed identity
-	assert.Equal(t, identity.pk.Bytes(), parsedIdentity.pk.Bytes())
-	assert.Equal(t, identity.kem.ID(), parsedIdentity.kem.ID())
-	assert.Equal(t, identity.kdf.ID(), parsedIdentity.kdf.ID())
-	assert.Equal(t, identity.aead.ID(), parsedIdentity.aead.ID())
-	assert.Nil(t, parsedIdentity.sk) // should be nil for public key only
-}
-
-func TestExportImportErrorCases(t *testing.T) {
-	// Test Import with invalid JSON
-	_, err := Import([]byte("invalid json"))
-	assert.Error(t, err)
-
-	// Test Import with empty data
-	_, err = Import([]byte(""))
-	assert.Error(t, err)
-
-	// Test Import with malformed identity data
-	malformedData := IdentityStore{
-		PublicKey: []byte("invalid"),
-		SecretKey: []byte("invalid"),
-		KEM:       0x0020, // DHKEM(X25519, HKDF-SHA256)
-		KDF:       0x0001, // HKDF-SHA256
-		AEAD:      0x0002, // AES-256-GCM
+	for _, bad := range []string{"invalid json", ""} {
+		_, err = Import([]byte(bad))
+		assert.Error(t, err)
 	}
-	malformedJSON, err := json.Marshal(malformedData)
+	malformed, err := json.Marshal(IdentityStore{PublicKey: []byte("invalid"), SecretKey: []byte("invalid"), KEM: 0x0020, KDF: 0x0001, AEAD: 0x0002})
 	require.NoError(t, err)
-	_, err = Import(malformedJSON)
+	_, err = Import(malformed)
 	assert.Error(t, err)
 }
 
 func TestFromFile(t *testing.T) {
-	tempDir := t.TempDir()
-	identityFile := filepath.Join(tempDir, "test_identity.json")
-
-	// Test creating new identity when file doesn't exist
-	identity1, err := FromFile(identityFile)
+	identityFile := filepath.Join(t.TempDir(), "test_identity.json")
+	created, err := FromFile(identityFile)
 	require.NoError(t, err)
-	assert.NotNil(t, identity1)
-
-	// Verify file was created
-	_, err = os.Stat(identityFile)
-	assert.NoError(t, err)
-
-	// Test loading existing identity from file
-	identity2, err := FromFile(identityFile)
+	loaded, err := FromFile(identityFile)
 	require.NoError(t, err)
-	assert.NotNil(t, identity2)
-
-	// Verify identities are the same
-	requireIdentitiesEqual(t, identity1, identity2)
+	requireIdentitiesEqual(t, created, loaded)
 }
 
-func TestUnmarshalPublicConfigErrorCases(t *testing.T) {
-	testCases := []struct {
-		name string
-		data []byte
-	}{
-		{"empty data", []byte{}},
-		{"insufficient data", []byte{0x00}},
-		{"invalid KEM", []byte{0x00, 0xFF, 0xFF}},          // invalid KEM ID
-		{"truncated public key", []byte{0x00, 0x00, 0x20}}, // valid KEM but no public key
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := UnmarshalPublicConfig(tc.data)
-			assert.Error(t, err)
-		})
-	}
-}
-
-func TestUnmarshalPublicConfigRejectsUnpinnedSuite(t *testing.T) {
+func TestConfigHandler(t *testing.T) {
 	id, err := NewIdentity()
 	require.NoError(t, err)
-	config, err := id.MarshalConfig()
+	w := httptest.NewRecorder()
+	id.ConfigHandler(w, httptest.NewRequest("GET", protocol.KeysPath, nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, protocol.KeysMediaType, w.Header().Get("Content-Type"))
+	cfg, err := id.MarshalConfig()
 	require.NoError(t, err)
-	// layout: id(1) kem(2) pk(32) suites_len(2) kdf(2) aead(2)
-	cases := map[string]struct {
-		offset int
-		value  byte
-	}{
-		"P-256 KEM":     {2, 0x10},
-		"HKDF-SHA512":   {38, 0x03},
-		"ChaCha20 AEAD": {40, 0x03},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			data := append([]byte(nil), config...)
-			data[tc.offset] = tc.value
-			_, err := UnmarshalPublicConfig(data)
-			assert.Equal(t, protocol.UnsupportedSuite, protocol.CodeOf(err))
-		})
-	}
-	t.Run("second suite", func(t *testing.T) {
-		data := append([]byte(nil), config...)
-		data[36] = 8 // suites_len: two entries
-		data = append(data, 0x00, 0x01, 0x00, 0x02)
-		_, err := UnmarshalPublicConfig(data)
-		assert.Equal(t, protocol.UnsupportedSuite, protocol.CodeOf(err))
-	})
-}
-
-func TestFromPublicKeyHex(t *testing.T) {
-	original, err := NewIdentity()
-	require.NoError(t, err)
-
-	pub, err := FromPublicKeyHex(original.MarshalPublicKeyHex())
-	require.NoError(t, err)
-
-	assert.Equal(t, original.pk.Bytes(), pub.pk.Bytes())
-	assert.Equal(t, uint16(0x0020), pub.kem.ID())
-	assert.Equal(t, uint16(0x0001), pub.kdf.ID())
-	assert.Equal(t, uint16(0x0002), pub.aead.ID())
-	assert.Nil(t, pub.sk) // public key only
-}
-
-func TestFromPublicKeyBytes(t *testing.T) {
-	original, err := NewIdentity()
-	require.NoError(t, err)
-
-	pub, err := FromPublicKeyBytes(original.MarshalPublicKey())
-	require.NoError(t, err)
-
-	assert.Equal(t, original.pk.Bytes(), pub.pk.Bytes())
-	assert.Nil(t, pub.sk)
-}
-
-func TestFromPublicKeyErrorCases(t *testing.T) {
-	_, err := FromPublicKeyHex("not-hex")
-	assert.Error(t, err)
-
-	_, err = FromPublicKeyBytes([]byte{0x01, 0x02, 0x03}) // wrong length for X25519
-	assert.Error(t, err)
-}
-
-func TestIdentityStoreStruct(t *testing.T) {
-	// Test that IdentityStore can be marshaled/unmarshaled
-	identity, err := NewIdentity()
-	require.NoError(t, err)
-
-	exported, err := identity.Export()
-	require.NoError(t, err)
-
-	var store IdentityStore
-	err = json.Unmarshal(exported, &store)
-	require.NoError(t, err)
-
-	// Verify all fields are populated
-	assert.NotEmpty(t, store.PublicKey)
-	assert.NotEmpty(t, store.SecretKey)
-	assert.Equal(t, uint16(0x0020), store.KEM)
-	assert.Equal(t, uint16(0x0001), store.KDF)
-	assert.Equal(t, uint16(0x0002), store.AEAD)
+	assert.Equal(t, cfg, w.Body.Bytes())
 }

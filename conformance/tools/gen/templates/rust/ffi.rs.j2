@@ -1,0 +1,66 @@
+// ffi:begin ({{ gen }})
+// Every type the ABI crosses, in declaration order: a constructor is its index,
+// then its fields in order; a datatype with one constructor carries no tag.
+
+{% for a in aliases %}
+type {{ a.name }} = {{ a.ty }};
+{% endfor %}
+
+#[allow(non_snake_case, dead_code)]
+impl Writer {
+{% for c in coders %}
+    {{ c.writer|indent(4) }}
+{% endfor %}
+}
+
+#[allow(non_snake_case, dead_code)]
+impl<'a> Reader<'a> {
+{% for c in coders %}
+    {{ c.reader|indent(4) }}
+{% endfor %}
+}
+
+/// The pure helpers by op number (swift-ffi.md): decoded arguments in, encoded result out;
+/// None for an unknown op.
+pub fn call(op: u32, input: &[u8]) -> Result<Option<Vec<u8>>, Bad> {
+    let mut r = Reader(input);
+    let mut w = Writer(Vec::new());
+    match op {
+{% for op in ops %}
+        {{ op.index }} => {
+            {{ op.body|indent(12) }}
+        }
+{% endfor %}
+        _ => return Ok(None),
+    }
+    r.done()?;
+    Ok(Some(w.0))
+}
+
+#[cfg(test)]
+mod generated {
+    use super::*;
+
+{% for c in coders if c.sample %}
+    {{ c.sample|indent(4) }}
+{% endfor %}
+
+    /// Every constructor of every type survives encode then decode, with its
+    /// declaration index as the tag.
+    #[test]
+    fn round_trips_every_constructor() {
+{% for t in named %}
+        for {{ "v" if t.single else "(i, v)" }} in sample_{{ t.name }}().iter(){{ "" if t.single else ".enumerate()" }} {
+            let mut w = Writer(Vec::new());
+            w.{{ t.name }}(v);
+{% if not t.single %}
+            assert_eq!(w.0[0], i as u8);
+{% endif %}
+            let mut r = Reader(&w.0);
+            assert_eq!(&r.{{ t.name }}().unwrap(), v);
+            r.done().unwrap();
+        }
+{% endfor %}
+    }
+}
+// ffi:end

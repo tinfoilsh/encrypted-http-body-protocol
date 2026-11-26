@@ -1,0 +1,8 @@
+# core: the pure helpers over the core, bytes and strings in and out (handler.md section 7).
+{% for m in members %}
+
+
+def {{ m.name }}({{ m.params }}) -> {{ m.returns }}:
+    """{{ m.doc }}"""
+    {{ m.body|indent(4) }}
+{% endfor %}

@@ -17,10 +17,11 @@ Built in steps:
 
 ## Running
 
-Regenerate fixtures (needs the ehbp Python package for multi-frame bodies):
+Regenerate fixtures (`dafny/fixtures.dfy` for every family but crypto, which
+`conformance/tools/gen_fixtures.py` seals with the ehbp Python package):
 
 ```
-conformance/.venv/bin/python conformance/tools/gen_fixtures.py
+dafny/gen-fixtures.sh
 ```
 
 Run the matrix (each `--adapter` is optional; omit to reduce toolchains):
@@ -110,7 +111,7 @@ Normative. A change that weakens one MUST be rejected.
   Request fixtures assert round-trip plaintext, not golden request bytes.
 - Browsers coalesce duplicate headers. The duplicate-nonce fixture is `skipped` in
   browser mode and covered by native adapters.
-- Only Go has a server. The suite tests five clients against one reference server.
+- Only Go has a server. The suite tests six clients against one reference server.
 - Because framing has no authenticated end marker, truncation exactly on a
   valid frame boundary is indistinguishable from a complete shorter message.
   This protocol-level limitation is documented in `SECURITY-AUDIT.md` rather

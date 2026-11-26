@@ -5,19 +5,15 @@
 
 use std::io::Read;
 
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tinfoil_ehbp::{
-    compute_nonce, derive_response_keys, Client, Code, Error, ServerIdentity, SessionRecoveryToken,
-    RESPONSE_NONCE_HEADER,
+    core::{derive_response_keys, marshal_config, nonce_for, parse_config, parse_token, SessionRecoveryToken},
+    Body, Client, Code, Error, KeySource,
 };
 
-const HEADER_SUBSET: [&str; 4] = [
-    "ehbp-response-nonce",
-    "content-length",
-    "transfer-encoding",
-    "content-type",
-];
+const HEADER_SUBSET: [&str; 4] = ["ehbp-response-nonce", "content-length", "transfer-encoding", "content-type"];
 
 #[derive(Serialize, Default)]
 struct Out {
@@ -36,7 +32,13 @@ struct Out {
     #[serde(skip_serializing_if = "Option::is_none")]
     peak_rss_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    token_before_close: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_after_close: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     token_before_response: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_after_exchange: Option<bool>,
 }
 
 #[tokio::main]
@@ -44,138 +46,119 @@ async fn main() {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).unwrap();
     let fx: Value = serde_json::from_str(&input).unwrap();
-
-    let op = fx["operation"].as_str().unwrap_or("").to_string();
     let mut out = Out {
         fixture_id: fx["id"].as_str().unwrap_or("").to_string(),
         outcome: "ok".into(),
         runner: "rust".into(),
         ..Default::default()
     };
-
-    if let Err(err) = run(&fx, &op, &mut out).await {
+    if let Err(err) = run(&fx, &mut out).await {
         out.outcome = "error".into();
-        out.error_code = Some(map_error(&op, &err));
+        out.error_code = Some(map_error(&err));
         out.body_hex = None;
         out.native_error = Some(format!("{err}"));
     }
     println!("{}", serde_json::to_string(&out).unwrap());
 }
 
-async fn run(fx: &Value, op: &str, out: &mut Out) -> Result<(), Error> {
-    let ins = &fx["inputs"];
-    match op {
+/// The canonical code the library attached (Error::code()); anything uncoded is a caller/adapter input error.
+fn map_error(err: &Error) -> String {
+    err.code()
+        .map(|c| c.as_str().to_string())
+        .unwrap_or_else(|| "INVALID_INPUT".to_string())
+}
+
+async fn run(fx: &Value, out: &mut Out) -> Result<(), Error> {
+    match fx["operation"].as_str().unwrap_or("") {
         "derive_keys" => {
-            let km = derive_response_keys(
-                &h(ins, "exportedSecret")?,
-                &h(ins, "requestEnc")?,
-                &h(ins, "responseNonce")?,
-            )?;
-            out.body_hex = Some(hex::encode(
-                [km.key.as_slice(), km.nonce_base.as_slice()].concat(),
-            ));
+            let km = derive_response_keys(&hex_in(fx, "exportedSecret")?, &hex_in(fx, "requestEnc")?, &hex_in(fx, "responseNonce")?)?;
+            out.body_hex = Some(hex::encode([km.key.as_slice(), km.nonce_base.as_slice()].concat()));
+        }
+        "decrypt_response" => {
+            decrypt(fx, out, false)?;
+        }
+        "decrypt_response_streaming" => {
+            decrypt(fx, out, true)?;
         }
         "compute_nonce" => {
-            let base: [u8; 12] = h(ins, "nonceBase")?.try_into().map_err(|_| {
-                Error::Coded(Code::InvalidInput, "nonce base must be 12 bytes".into())
-            })?;
-            let seq = u64::from_str_radix(ins["seqHex"].as_str().unwrap_or(""), 16)
-                .map_err(|e| Error::Coded(Code::InvalidInput, e.to_string()))?;
-            out.body_hex = Some(hex::encode(compute_nonce(&base, seq)));
+            let seq = u64::from_str_radix(str_in(fx, "seqHex"), 16).map_err(|e| Error::Coded(Code::InvalidInput, e.to_string()))?;
+            out.body_hex = Some(hex::encode(nonce_for(&hex_in(fx, "nonceBase")?, seq)?));
         }
-        "decrypt_response" | "decrypt_response_streaming" => decrypt(fx, out)?,
         "token_roundtrip" => {
-            let t = SessionRecoveryToken::from_json(ins["json"].as_str().unwrap_or(""))?;
-            out.body_hex = Some(hex::encode(
-                [t.exported_secret.as_slice(), t.request_enc.as_slice()].concat(),
-            ));
+            let t = parse_token(str_in(fx, "json"))?;
+            out.body_hex = Some(hex::encode([t.exported_secret.as_slice(), t.request_enc.as_slice()].concat()));
         }
         "parse_config" => {
-            let id = ServerIdentity::unmarshal_public_config(&h(ins, "config")?)?;
-            out.body_hex = Some(hex::encode(id.public_key_bytes()));
+            out.body_hex = Some(hex::encode(parse_config(&hex_in(fx, "config")?)?));
         }
         "marshal_config" => {
-            let id = ServerIdentity::from_public_key_bytes(&h(ins, "publicKey")?)?;
-            out.body_hex = Some(hex::encode(id.marshal_public_config()));
+            out.body_hex = Some(hex::encode(marshal_config(&hex_in(fx, "publicKey")?)?)); // keyId is opaque: always 0
         }
-        "request" | "request_stream" => request(fx, out).await?,
-        "large_body" => large_body(fx, out).await?,
-        "token_before_response" => token_before_response(fx, out).await?,
+        "request" => {
+            exchange(fx, out, "bytes", false, false, false, false).await?;
+        }
         "discover" => {
-            Client::new(&discover_target(fx)).await?;
+            Client::discover(discover_target(fx), None).await?; // fails on a bad key configuration
         }
-        "reject_reserved_header" | "reject_cross_origin" | "reject_url_credentials" => {
-            harden(op).await?;
-        }
-        other => {
-            return Err(Error::Coded(
-                Code::InvalidInput,
-                format!("unknown operation {other}"),
-            ))
-        }
-    }
-    Ok(())
-}
-
-fn discover_target(fx: &Value) -> String {
-    let var = match fx["inputs"]["target"].as_str().unwrap_or("") {
-        "bad_ct" => "ORACLE_BAD_CT_URL",
-        "non200" => "ORACLE_NON200_URL",
-        _ => "ORACLE_URL",
-    };
-    std::env::var(var).unwrap_or_default()
-}
-
-async fn harden(op: &str) -> Result<(), Error> {
-    let base = std::env::var("ORACLE_URL").unwrap_or_default();
-    let client = Client::new(&base).await?;
-    match op {
         "reject_reserved_header" => {
-            client
-                .post("/s/echo")?
-                .header("ehbp-encapsulated-key", "x")?;
+            hardening(fx, "header").await?;
         }
         "reject_cross_origin" => {
-            client.get("http://other.example/x")?;
+            hardening(fx, "cross").await?;
         }
-        _ => {
-            client.get(&base.replace("http://", "http://user:pass@"))?;
+        "residue_selfcheck" => {
+            let lines = tinfoil_ehbp::self_check().await; // the core's shared vectors through this language's bindings
+            out.body_hex = Some(hex::encode(lines.join("\n")));
+            if !lines.is_empty() {
+                out.native_error = Some(lines.join("; "));
+            }
         }
+        "reject_url_credentials" => {
+            hardening(fx, "credentials").await?;
+        }
+        "large_body" => {
+            exchange(fx, out, "pattern", false, false, false, true).await?;
+        }
+        "request_stream" => {
+            exchange(fx, out, "stream", false, false, false, false).await?;
+        }
+        "close_response_early" => {
+            exchange(fx, out, "bytes", false, true, false, false).await?;
+        }
+        "token_before_response" => {
+            exchange(fx, out, "bytes", true, false, false, false).await?;
+        }
+        "token_after_exchange" => {
+            exchange(fx, out, "bytes", false, false, true, false).await?;
+        }
+        other => return Err(Error::Coded(Code::InvalidInput, format!("unknown operation {other}"))),
     }
     Ok(())
 }
 
-fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
-    let ins = &fx["inputs"];
-    let token = SessionRecoveryToken::new(h(ins, "exportedSecret")?, h(ins, "requestEnc")?)?;
-    let mut dec = token.response_decryptor(&h(ins, "responseNonce")?)?;
-    let framed = h(ins, "encryptedResponse")?;
-    let segments = if fx["operation"].as_str() == Some("decrypt_response_streaming") {
-        split_at(&framed, fx.get("chunking"))
-    } else {
-        vec![framed.clone()]
-    };
+/// A client over the oracle, discovering its key through the library.
+async fn oracle() -> Result<(String, Client), Error> {
+    let base = std::env::var("ORACLE_URL").unwrap_or_default();
+    Ok((base.clone(), Client::new(base, KeySource::Discover, None).await?))
+}
 
+/// The token-only response path over the framed body, fed whole or split at
+/// the fixture's byte offsets; reports the plaintext delivered.
+fn decrypt(fx: &Value, out: &mut Out, streaming: bool) -> Result<(), Error> {
+    let token = SessionRecoveryToken::new(hex_in(fx, "exportedSecret")?, hex_in(fx, "requestEnc")?)?;
+    let mut dec = token.response_decryptor(&hex_in(fx, "responseNonce")?)?;
+    let framed = hex_in(fx, "encryptedResponse")?;
+    let segments = if streaming { split_at(&framed, fx.get("chunking")) } else { vec![framed] };
     let mut acc: Vec<u8> = Vec::new();
-    // Fail-closed bookkeeping: whatever plaintext was delivered before the error.
-    let record_partial = |out: &mut Out, acc: &[u8]| {
-        out.bytes_emitted_before_error = acc.len();
-        out.plaintext_emitted_before_error = !acc.is_empty();
-    };
-    for seg in segments {
-        match dec.push(&seg) {
-            Ok(chunks) => {
-                for c in chunks {
-                    acc.extend_from_slice(&c);
-                }
-            }
-            Err(e) => {
-                record_partial(out, &acc);
-                return Err(e);
+    let result = (|| {
+        for seg in segments {
+            for c in dec.push(&seg)? {
+                acc.extend_from_slice(&c);
             }
         }
-    }
-    if let Err(e) = dec.finish() {
+        dec.finish()
+    })();
+    if let Err(e) = result {
         record_partial(out, &acc);
         return Err(e);
     }
@@ -183,146 +166,120 @@ fn decrypt(fx: &Value, out: &mut Out) -> Result<(), Error> {
     Ok(())
 }
 
-async fn request(fx: &Value, out: &mut Out) -> Result<(), Error> {
-    let base = std::env::var("ORACLE_URL").unwrap_or_default();
-    let client = Client::new(&base).await?;
-    let req = &fx["request"];
-    let path = req["path"].as_str().unwrap_or("/");
-
-    // Reject rather than silently downgrade an unexpected method to POST.
-    let mut builder = match req["method"].as_str().unwrap_or("POST") {
-        "GET" => client.get(path)?,
-        "PUT" => client.put(path)?,
-        "DELETE" => client.delete(path)?,
-        "POST" => client.post(path)?,
-        other => {
-            return Err(Error::Coded(
-                Code::InvalidInput,
-                format!("unsupported fixture method {other}"),
-            ))
+/// Sends the fixture request to the oracle and reads the reply. body is how
+/// the fixture body is supplied (bytes, stream: unknown length, pattern: the
+/// lazy large body); hold reads the token while the oracle holds its reply;
+/// early reads one byte and closes; after reads the token once the exchange
+/// ended, also on error; rss reports peak RSS.
+async fn exchange(fx: &Value, out: &mut Out, body: &str, hold: bool, early: bool, after: bool, rss: bool) -> Result<(), Error> {
+    let (_, client) = oracle().await?;
+    let result: Result<(), Error> = async {
+        let req = &fx["request"];
+        let headers: Vec<(&str, &str)> = req["headers"].as_object().map(|h| h.iter().map(|(k, v)| (k.as_str(), v.as_str().unwrap_or(""))).collect()).unwrap_or_default();
+        let payload = if body == "pattern" {
+            Some(Body::stream(pattern(int_in(fx, "size_bytes"), int_in(fx, "block_seed") as usize)))
+        } else if let Some(b) = req["body_hex"].as_str() {
+            let b = hex::decode(b).map_err(|e| Error::Coded(Code::InvalidInput, e.to_string()))?;
+            Some(if body == "stream" {
+                let chunk = bytes::Bytes::from(b);
+                Body::stream(futures_util::stream::once(async move { Ok::<_, std::io::Error>(chunk) }))
+            } else {
+                Body::from(b)
+            })
+        } else {
+            None
+        };
+        let send = client.request(req["method"].as_str().unwrap_or("GET"), req["path"].as_str().unwrap_or("/"), &headers, payload);
+        let (resp, token_early) = tokio::join!(send, async {
+            if !hold {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await; // the oracle holds 5 s
+            Some(client.session_recovery_token().is_some())
+        });
+        out.token_before_response = token_early;
+        let mut resp = resp?;
+        let status = resp.status();
+        out.status = Some(status.as_u16());
+        let headers = subset_headers(|n| resp.headers().get(n).and_then(|v| v.to_str().ok()));
+        let no_nonce = !headers.contains_key(&"Ehbp-Response-Nonce".to_ascii_lowercase());
+        out.response_headers = Some(headers);
+        if early {
+            let first = resp.next().await.transpose()?.unwrap_or_default();
+            out.body_hex = Some(hex::encode(&first[..first.len().min(1)]));
+            out.token_before_close = Some(client.session_recovery_token().is_some());
+            drop(resp);
+            out.token_after_close = Some(client.session_recovery_token().is_some());
+        } else {
+            let mut acc: Vec<u8> = Vec::new();
+            while let Some(chunk) = resp.next().await {
+                match chunk {
+                    Ok(c) => acc.extend_from_slice(&c),
+                    Err(e) => {
+                        record_partial(out, &acc);
+                        return Err(e);
+                    }
+                }
+            }
+            out.body_hex = Some(hex::encode(acc));
+            // No nonce on a non-2xx is a sanctioned unauthenticated pass-through.
+            out.passthrough = no_nonce && !status.is_success();
         }
+        if rss {
+            out.peak_rss_bytes = Some(peak_rss_bytes());
+        }
+        Ok(())
+    }
+    .await;
+    if after {
+        out.token_after_exchange = Some(client.session_recovery_token().is_some());
+    }
+    result
+}
+
+/// Sends a request the library must refuse before it reaches the wire; a
+/// reply from the oracle is the divergent result.
+async fn hardening(fx: &Value, target: &str) -> Result<(), Error> {
+    let (base, client) = oracle().await?;
+    let url = match target {
+        "cross" => "http://other.invalid/probe".to_string(),
+        "credentials" => base.replacen("://", "://user:pass@", 1) + "/probe",
+        _ => base + "/probe",
     };
-    if let Some(headers) = req["headers"].as_object() {
-        for (k, v) in headers {
-            builder = builder.header(k.as_str(), v.as_str().unwrap_or(""))?;
-        }
+    let mut headers = Vec::new();
+    if target == "header" {
+        let name = str_in(fx, "header");
+        let value = if name.eq_ignore_ascii_case("host") { "attacker.invalid" } else { "0000000000000000000000000000000000000000000000000000000000000000" };
+        headers.push((name, value));
     }
-    if fx["operation"] == "request_stream" {
-        let chunk = bytes::Bytes::from(h(req, "body_hex")?);
-        builder = builder.body_stream(futures_util::stream::once(async move {
-            Ok::<_, std::io::Error>(chunk)
-        }));
-    } else if req["body_hex"].is_string() {
-        builder = builder.body(h(req, "body_hex")?);
-    }
-
-    let resp = builder.send().await?;
-    out.status = Some(resp.status().as_u16());
-
-    let mut headers = Map::new();
-    for name in HEADER_SUBSET {
-        if let Some(v) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
-            headers.insert(name.to_string(), Value::String(v.to_string()));
-        }
-    }
-    let no_nonce = !headers.contains_key(&RESPONSE_NONCE_HEADER.to_ascii_lowercase());
-    out.response_headers = Some(headers);
-    let status = resp.status();
-    out.body_hex = Some(hex::encode(resp.bytes()));
-    out.passthrough = no_nonce && !status.is_success();
+    client.request("POST", url, &headers, Some("x".into())).await?.bytes().await?;
     Ok(())
 }
 
-/// large_body streams a multi-GiB patterned body (1 MiB block, block[i] =
-/// (i + seed) & 0xff, repeated) to the oracle's digest route without ever
-/// materialising it, and reports peak RSS so buffering would be visible.
-async fn large_body(fx: &Value, out: &mut Out) -> Result<(), Error> {
-    let size = fx["inputs"]["size_bytes"].as_u64().unwrap_or(0);
-    let seed = fx["inputs"]["block_seed"].as_u64().unwrap_or(0) as usize;
-    let block: bytes::Bytes = (0..1usize << 20)
-        .map(|i| (i + seed) as u8)
-        .collect::<Vec<u8>>()
-        .into();
-    let source = futures_util::stream::unfold((block, size), |(block, remaining)| async move {
-        if remaining == 0 {
-            return None;
+/// The oracle listener the harness exposes as ORACLE_<TARGET>_URL (the main oracle for anything else).
+fn discover_target(fx: &Value) -> String {
+    let target = str_in(fx, "target").to_ascii_uppercase();
+    if target != "ORACLE_URL" {
+        if let Ok(url) = std::env::var(format!("ORACLE_{target}_URL")) {
+            return url;
         }
-        let n = remaining.min(block.len() as u64) as usize;
-        Some((
-            Ok::<_, std::io::Error>(block.slice(..n)),
-            (block, remaining - n as u64),
-        ))
-    });
-
-    let base = std::env::var("ORACLE_URL").unwrap_or_default();
-    let client = Client::new(&base).await?;
-    let path = fx["request"]["path"].as_str().unwrap_or("/s/digest");
-    let resp = client.post(path)?.body_stream(source).send().await?;
-    out.status = Some(resp.status().as_u16());
-    out.body_hex = Some(hex::encode(resp.bytes()));
-    out.peak_rss_bytes = Some(peak_rss_bytes());
-    Ok(())
-}
-
-/// Reads the session recovery token while the oracle still holds its reply (SPEC 6).
-async fn token_before_response(fx: &Value, out: &mut Out) -> Result<(), Error> {
-    let base = std::env::var("ORACLE_URL").unwrap_or_default();
-    let client = Client::new(&base).await?;
-    let req = &fx["request"];
-    let body = h(req, "body_hex")?;
-    let pending = client
-        .post(req["path"].as_str().unwrap_or("/"))?
-        .body(body)
-        .send();
-    let observer = client.clone();
-    let (resp, early) = tokio::join!(pending, async move {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await; // oracle holds 5 s
-        observer.get_session_recovery_token().is_some()
-    });
-    out.token_before_response = Some(early);
-    let resp = resp?;
-    out.status = Some(resp.status().as_u16());
-    out.body_hex = Some(hex::encode(resp.bytes()));
-    Ok(())
-}
-
-fn peak_rss_bytes() -> u64 {
-    // SAFETY: getrusage only writes into the zeroed struct we hand it.
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let max = usage.ru_maxrss as u64;
-    if cfg!(target_os = "macos") {
-        max
-    } else {
-        max << 10
     }
+    std::env::var("ORACLE_URL").unwrap_or_default()
 }
 
-/// map_error reads the canonical code the library attached (Error::code()).
-/// Anything uncoded is a caller/adapter input error.
-fn map_error(_op: &str, err: &Error) -> String {
-    err.code()
-        .map(|c| c.as_str().to_string())
-        .unwrap_or_else(|| "INVALID_INPUT".to_string())
-}
+// --- helpers ---
 
-fn h(ins: &Value, key: &str) -> Result<Vec<u8>, Error> {
-    hex::decode(ins[key].as_str().unwrap_or(""))
-        .map_err(|e| Error::Coded(Code::InvalidInput, format!("fixture field {key}: {e}")))
+/// Fail-closed bookkeeping: whatever plaintext was delivered before the error.
+fn record_partial(out: &mut Out, acc: &[u8]) {
+    out.bytes_emitted_before_error = acc.len();
+    out.plaintext_emitted_before_error = !acc.is_empty();
 }
 
 fn split_at(data: &[u8], offsets: Option<&Value>) -> Vec<Vec<u8>> {
     let offsets: Vec<usize> = offsets
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_u64().map(|n| n as usize))
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect())
         .unwrap_or_default();
-    if offsets.is_empty() {
-        return vec![data.to_vec()];
-    }
     let mut segs = Vec::new();
     let mut prev = 0;
     for o in offsets {
@@ -333,4 +290,47 @@ fn split_at(data: &[u8], offsets: Option<&Value>) -> Vec<Vec<u8>> {
     }
     segs.push(data[prev..].to_vec());
     segs
+}
+
+/// size bytes of a 1 MiB block with block[i] = (i + seed) & 0xff, repeated, never materialised.
+fn pattern(size: u64, seed: usize) -> impl futures_util::Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>> {
+    let block: bytes::Bytes = (0..1usize << 20).map(|i| (i + seed) as u8).collect::<Vec<u8>>().into();
+    futures_util::stream::unfold((block, size), |(block, remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+        let n = remaining.min(block.len() as u64) as usize;
+        Some((Ok(block.slice(..n)), (block, remaining - n as u64)))
+    })
+}
+
+fn peak_rss_bytes() -> u64 {
+    // SAFETY: getrusage only writes into the zeroed struct we hand it.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    let max = usage.ru_maxrss as u64;
+    if cfg!(target_os = "macos") { max } else { max << 10 }
+}
+
+fn subset_headers<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Map<String, Value> {
+    HEADER_SUBSET
+        .iter()
+        .filter_map(|name| get(name).map(|v| (name.to_string(), Value::String(v.to_string()))))
+        .collect()
+}
+
+// Fixture inputs are repository-controlled; a missing field is a broken fixture, so fail loudly (ADAPTER_CRASH).
+fn hex_in(fx: &Value, key: &str) -> Result<Vec<u8>, Error> {
+    hex::decode(str_in(fx, key)).map_err(|e| Error::Coded(Code::InvalidInput, format!("fixture field {key}: {e}")))
+}
+
+fn str_in<'a>(fx: &'a Value, key: &str) -> &'a str {
+    fx["inputs"][key].as_str().unwrap_or_else(|| {
+        eprintln!("fixture: input {key} missing or not a string");
+        std::process::exit(2)
+    })
+}
+
+fn int_in(fx: &Value, key: &str) -> u64 {
+    fx["inputs"][key].as_u64().unwrap_or(0)
 }

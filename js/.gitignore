@@ -70,3 +70,6 @@ jspm_packages/
 
 # Identity files
 *_identity.json
+
+# Dafny-generated core copied in by the build
+src/gen/

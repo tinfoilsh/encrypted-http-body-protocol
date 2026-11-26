@@ -39,6 +39,62 @@ jobs:
     - name: Run interop test vector tests
       run: go test -race -v -run 'InteropVector|Interop' ./...
 
+  check-generated:
+    # The committed Dafny bundles, the rendered regions and the fixtures must be
+    # exactly what the sources produce; the hand-written ports keep their shape.
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4.3.0
+      with:
+        go-version-file: go.mod
+
+    - name: Set up .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Install Dafny and goimports
+      run: |
+        dotnet tool install --global dafny --version 4.11.0
+        go install golang.org/x/tools/cmd/goimports@latest
+        echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Verify the core
+      run: dafny verify --verification-time-limit 120 ehbp.dfy ehbp_events.dfy ehbp_server.dfy ehbp_tests.dfy fixtures.dfy spec_rules.dfy && dafny test ehbp_tests.dfy
+      working-directory: dafny
+
+    - name: Regenerate the bundles
+      run: ./generate.sh --no-verify && ./generate-events.sh --no-verify
+      working-directory: dafny
+
+    - name: Install the generators' dependencies
+      run: python3 -m pip install jinja2 pytest
+
+    - name: Test the generators
+      run: python3 -m pytest conformance/tools/tests -q
+
+    - name: Check the ports and the fixtures
+      run: |
+        python3 conformance/tools/check.py
+        python3 conformance/tools/fixture_check.py
+
+    - name: Fail on drift
+      run: |
+        git add -N .
+        if [ -n "$(git status --porcelain)" ]; then
+          git status --porcelain
+          git diff | head -200
+          echo "::error::generated output differs from the sources; run dafny/generate.sh, dafny/generate-events.sh and conformance/tools/gen.py and commit the result."
+          exit 1
+        fi
+
   test-js:
     runs-on: ubuntu-latest
     
@@ -83,17 +139,17 @@ jobs:
       with:
         xcode-version: latest-stable
 
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build the core xcframework
+      run: ./swift/build-core.sh
+
     - name: Build Swift package
       run: swift build
-      working-directory: swift
 
     - name: Run Swift tests
       run: swift test
-      working-directory: swift
-
-    - name: Run interop test vector tests
-      run: swift test --filter 'InteropVector|Interop'
-      working-directory: swift
 
   test-kotlin:
     runs-on: ubuntu-latest

@@ -1,0 +1,20 @@
+# dafny test / build artefacts
+/ehbp
+/ehbp.*
+!/ehbp.dfy
+/obj
+/gen-events/js/node_modules
+/ehbp_events
+/ehbp_events.*
+!/ehbp_events.dfy
+/ehbp_server
+/ehbp_server.*
+!/ehbp_server.dfy
+/ehbp_tests
+/ehbp_tests.*
+!/ehbp_tests.dfy
+/fixtures
+/fixtures.*
+!/fixtures.dfy
+/fixtures-go
+/fixtures-py

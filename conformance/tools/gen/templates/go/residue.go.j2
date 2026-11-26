@@ -1,0 +1,116 @@
+{# The session store, the conversions and the error mapping of the residue (handler.md section 4); the crypto section is crypto.go.j2. #}
+
+{% macro session() %}
+// session: a mutex around one SessionStore value; every rule is SessionApply.
+
+type Session struct {
+	{{ lock_field }}
+	once  sync.Once // NewSession on first use
+	store ev.SessionStore
+}
+
+func (s *Session) apply(a ev.SessionAction) ev.SessionStore {
+	{{ lock|indent("\t") }}
+	s.once.Do(func() { s.store = ev.Companion_Default___.NewSession() })
+	s.store = ev.Companion_Default___.SessionApply(s.store, a)
+	return s.store
+}
+
+func (s *Session) BeginSession() uint64 {
+	return s.apply(ev.Companion_SessionAction_.Create_Begin_()).Dtor_generation()
+}
+
+func (s *Session) PublishToken(generation uint64, exportedSecret, requestEnc []byte) {
+	s.apply(ev.Companion_SessionAction_.Create_Publish_(generation, core.Companion_Token_.Create_Token_(Seq(exportedSecret), Seq(requestEnc))))
+}
+
+func (s *Session) ClearToken(generation uint64) {
+	s.apply(ev.Companion_SessionAction_.Create_Clear_(generation))
+}
+
+// Token returns the stored token, or nil.
+func (s *Session) Token() *core.Token {
+	{{ lock|indent("\t") }}
+	s.once.Do(func() { s.store = ev.Companion_Default___.NewSession() })
+	if !s.store.Dtor_token().Is_Some() {
+		return nil
+	}
+	tok := s.store.Dtor_token().Dtor_value().(core.Token)
+	return &tok
+}
+{%- endmacro %}
+
+{% macro conversions() %}
+// conversions: the runtime boundary only.
+
+func Seq(b {{ bytes }}) _dafny.Sequence    { return _dafny.SeqOfBytes(b) }
+func Bytes(s _dafny.Sequence) {{ bytes }}  { return appendBytes(make({{ bytes }}, 0, s.Cardinality()), s) }
+func Str(s string) _dafny.Sequence    { return _dafny.UnicodeSeqOfUtf8Bytes(s) }
+func String(s _dafny.Sequence) string { return s.VerbatimString(false) }
+
+// appendBytes copies a sequence leaf by leaf: the runtime's ToByteArray would
+// first flatten a lazy concatenation of a boxed leaf (a frame header) and a
+// byte-backed one (ciphertext) into a boxed []interface{} Vector, 16 bytes
+// per byte. A byte-backed leaf (patch-runtime.py) is one append.
+func appendBytes(out {{ bytes }}, s _dafny.Sequence) {{ bytes }} {
+	switch v := s.(type) {
+	case *_dafny.LazySequence:
+		return appendBytes(out, v.Box().Get().(_dafny.Sequence))
+	case *_dafny.ConcatSequence:
+		return appendBytes(appendBytes(out, v.Left()), v.Right())
+	}
+	arr := s.ToArray()
+	if b, ok := arr.(_dafny.GoByteArray); ok {
+		return append(out, b.Bytes()...)
+	}
+	for i, n := uint32(0), arr.Length(); i < n; i++ {
+		out = append(out, arr.Select(i).(byte))
+	}
+	return out
+}
+
+// HeaderSeq converts headers to the core's seq<(string, string)>, one entry
+// per value.
+func HeaderSeq(h http.Header) _dafny.Sequence {
+	var pairs []interface{}
+	for name, values := range h {
+		for _, v := range values {
+			pairs = append(pairs, _dafny.TupleOf(Str(name), Str(v)))
+		}
+	}
+	return _dafny.SeqOf(pairs...)
+}
+
+// HeaderPairs converts the core's header list to a native Header, one Add per entry.
+func HeaderPairs(s _dafny.Sequence) http.Header {
+	out := make(http.Header)
+	for i := uint32(0); i < s.Cardinality(); i++ {
+		t := s.Select(i).(_dafny.Tuple)
+		out.Add(String((*t.IndexInt(0)).(_dafny.Sequence)), String((*t.IndexInt(1)).(_dafny.Sequence)))
+	}
+	return out
+}
+{%- endmacro %}
+
+{% macro mapping() %}
+// mapping: from the core's CodeString; no table of strings.
+
+// Code maps a core code to the canonical protocol code; Transport has none.
+func Code(c core.Code) protocol.Code {
+	return protocol.Code(String(core.Companion_Default___.CodeString(c)))
+}
+
+// Error turns a core failure into a Go error: a coded protocol error, or the
+// native cause for a Transport failure.
+func Error(c core.Code, message string, native error) error {
+	switch code := Code(c); {
+	case code != "" && native != nil:
+		return protocol.Errorf(code, "%s: %w", message, native)
+	case code != "":
+		return protocol.Errorf(code, "%s", message)
+	case native != nil:
+		return native
+	}
+	return errors.New(message)
+}
+{%- endmacro %}

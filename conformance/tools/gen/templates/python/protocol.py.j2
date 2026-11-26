@@ -1,0 +1,24 @@
+"""Protocol constants. {{ header }}."""
+
+ENCAPSULATED_KEY_HEADER = {{ k.EncapsulatedKeyHeader }}
+RESPONSE_NONCE_HEADER = {{ k.ResponseNonceHeader }}
+KEYS_MEDIA_TYPE = {{ k.KeysMediaType }}
+KEYS_PATH = {{ k.KeysPath }}
+PROBLEM_JSON_MEDIA_TYPE = {{ k.ProblemJsonMediaType }}
+KEY_CONFIG_PROBLEM_TYPE = {{ k.KeyConfigProblemType }}
+
+KEY_ID = 0  # the core always writes key id 0 (MarshalConfig)
+KEM_X25519_HKDF_SHA256 = {{ k.KemX25519 }}
+KDF_HKDF_SHA256 = {{ k.KdfHkdfSha256 }}
+AEAD_AES_256_GCM = {{ k.AeadAes256Gcm }}
+
+HPKE_REQUEST_INFO = b{{ k.HpkeRequestInfo }}
+EXPORT_LABEL = b{{ k.ExportLabel }}
+
+EXPORT_LENGTH = {{ k.ExportLength }}
+REQUEST_ENC_LENGTH = {{ k.RequestEncLength }}
+RESPONSE_NONCE_LENGTH = {{ k.ResponseNonceLength }}
+AES256_KEY_LENGTH = {{ k.KeyLength }}
+AES_GCM_NONCE_LENGTH = {{ k.NonceLength }}
+LENGTH_PREFIX_SIZE = 4
+REQUEST_FRAME_SIZE = {{ k.RequestFrameBytes }}

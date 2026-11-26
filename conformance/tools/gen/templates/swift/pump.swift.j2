@@ -1,0 +1,66 @@
+{% macro perform(cases) %}
+    /// Maps one action to one binding call and returns the result event.
+    func perform(_ a: Action) async -> Control {
+        switch a {
+{% for c in cases %}
+{% if c.tag == "BeginSession" %}
+        case {{ c.test }}:
+            let generation = {{ c.call }}
+            lock.withLock { out.generation = generation }
+            return .event({{ c.event }})
+{% elif c.kind == "event" %}
+        case {{ c.test }}: return .event({{ c.event_inline }})
+{% elif c.kind == "none" %}
+        case {{ c.test }}: {{ c.call }}; return .none
+{% elif c.kind == "open" %}
+        case {{ c.test }}:
+            let ({{ c.locals }}) = {{ c.call }}
+            return .event({{ c.event }})
+{% elif c.kind == "chunk" %}
+        case {{ c.test }}:
+            guard let ({{ c.locals }}) = {{ c.call }} else { return .event({{ c.failed }}) }
+            return .event({{ c.event }})
+{% elif c.kind == "write" %}
+        case {{ c.test }}: return {{ c.call }} ? .none : .stop
+{% endif %}
+{% endfor %}
+        default: return .none
+        }
+    }
+{%- endmacro %}
+
+{% macro run(terminals) %}
+    /// Feeds events to Step until a terminal action. A Send with a body hands
+    /// the rest of its action list, the upload, to a second lane (a Task) so
+    /// the transaction can await the response head; this lane stops there.
+    func run(_ first: [Action]) async {
+        var acts = first
+        var events: [Event] = []
+        while true {
+            lane: for (i, a) in acts.enumerated() {
+                let settled: Bool = lock.withLock {
+                    switch a {
+{% for t in terminals %}
+                    case {{ t.test }}: {{ t.body|join("; ") }}; {{ t.exit }}
+{% endfor %}
+                    case .send(_, _, _, true):
+                        let rest = Array(acts[(i + 1)...])
+                        out.lane = Task { await self.run(rest) }
+                        return false
+                    default: return false
+                    }
+                }
+                if case .emitPlaintext = a { continue }
+                if settled { return }
+                switch await perform(a) {
+                case .stop: return
+                case .event(let e): events.append(e)
+                case .none: break
+                }
+                if case .send(_, _, _, true) = a { break lane }
+            }
+            guard let e = events.popLast() else { return }
+            acts = state.step(e)
+        }
+    }
+{%- endmacro %}

@@ -2,40 +2,54 @@ package sh.tinfoil.ehbp
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import org.bouncycastle.crypto.engines.AESEngine
+import org.bouncycastle.crypto.hpke.HPKE
 import org.bouncycastle.crypto.hpke.HPKEContext
-import sh.tinfoil.ehbp.identity.ExportLabel
-import sh.tinfoil.ehbp.identity.ExportLength
-import sh.tinfoil.ehbp.identity.HPKERequestInfo
-import sh.tinfoil.ehbp.identity.Identity
-import sh.tinfoil.ehbp.identity.ResponseAEAD
-import sh.tinfoil.ehbp.identity.deriveResponseKeys
-import sh.tinfoil.ehbp.identity.newHpke
+import org.bouncycastle.crypto.modes.GCMBlockCipher
+import org.bouncycastle.crypto.params.AEADParameters
+import org.bouncycastle.crypto.params.KeyParameter
+import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import sh.tinfoil.ehbp.protocol.EncapsulatedKeyHeader
 import sh.tinfoil.ehbp.protocol.ResponseNonceHeader
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.util.HexFormat
+import org.bouncycastle.crypto.AsymmetricCipherKeyPair
+
+const val HPKERequestInfo = "ehbp request"
+const val ExportLabel = "ehbp response"
+const val ExportLength = 32
+
+// The test server's HPKE recipient is BouncyCastle's; the library has no HPKE library (the core schedules it).
+fun newHpke() = HPKE(HPKE.mode_base, HPKE.kem_X25519_SHA256, HPKE.kdf_HKDF_SHA256, HPKE.aead_AES_GCM256)
 
 fun hex(s: String): ByteArray = HexFormat.of().parseHex(s)
 fun ByteArray.toHex(): String = HexFormat.of().formatHex(this)
 
-/** Shared golden vectors live one directory up, as for the Go tests. */
-fun vector(name: String): Map<String, String> =
-    Json.parseToJsonElement(File("../test-vectors/$name").readText()).jsonObject
-        .mapValues { it.value.jsonPrimitive.content }
+/** A fresh server key pair; the test server is the only holder of a private key. */
+fun newKeyPair(): AsymmetricCipherKeyPair = X25519PrivateKeyParameters(SecureRandom()).let { AsymmetricCipherKeyPair(it.generatePublicKey(), it) }
+fun AsymmetricCipherKeyPair.config(): ByteArray = Core.marshalConfig((public as org.bouncycastle.crypto.params.X25519PublicKeyParameters).encoded)
 
 fun frame(ct: ByteArray): ByteArray = ByteBuffer.allocate(4 + ct.size).putInt(ct.size).put(ct).array()
 
+/** Seals response chunks as the Go DerivedResponseWriter does: AES-256-GCM under nonceBase XOR seq. */
+class Sealer(private val key: ByteArray, private val nonceBase: ByteArray) {
+    var seq = 0uL
+    fun seal(plaintext: ByteArray): ByteArray {
+        val gcm = GCMBlockCipher.newInstance(AESEngine.newInstance())
+        gcm.init(true, AEADParameters(KeyParameter(key), 128, Core.nonceFor(nonceBase, seq++)))
+        val out = ByteArray(gcm.getOutputSize(plaintext.size))
+        val n = gcm.processBytes(plaintext, 0, plaintext.size, out, 0)
+        return out.copyOf(n + gcm.doFinal(out, n))
+    }
+}
+
 /** Encrypts a response body as the Go DerivedResponseWriter would: one frame per write. */
-fun sealFrames(aead: ResponseAEAD, vararg chunks: ByteArray): ByteArray =
-    chunks.fold(ByteArray(0)) { acc, c -> acc + frame(aead.seal(c)) }
+fun sealFrames(sealer: Sealer, vararg chunks: ByteArray): ByteArray =
+    chunks.fold(ByteArray(0)) { acc, c -> acc + frame(sealer.seal(c)) }
 
 /** Opens an EHBP framed body with an HPKE context, as the Go server reader does. */
 fun openFrames(ctx: HPKEContext, framed: InputStream): ByteArray {
@@ -58,7 +72,7 @@ fun openFrames(ctx: HPKEContext, framed: InputStream): ByteArray {
  * body; [tweak] can rewrite the encrypted reply before it is sent.
  */
 class EhbpTestServer(
-    val identity: Identity,
+    val keys: AsymmetricCipherKeyPair = newKeyPair(),
     private val handler: (HttpExchange, ByteArray) -> Pair<Int, ByteArray>,
 ) : AutoCloseable {
     private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -73,7 +87,7 @@ class EhbpTestServer(
     init {
         server.createContext("/.well-known/hpke-keys") { ex ->
             ex.responseHeaders.set("Content-Type", "application/ohttp-keys")
-            val cfg = identity.marshalConfig()
+            val cfg = keys.config()
             ex.sendResponseHeaders(200, cfg.size.toLong())
             ex.responseBody.use { it.write(cfg) }
         }
@@ -90,12 +104,13 @@ class EhbpTestServer(
             return
         }
         val enc = hex(encHex)
-        val recipient = newHpke().setupBaseR(enc, identity.privateKey(), HPKERequestInfo.toByteArray())
+        val recipient = newHpke().setupBaseR(enc, keys, HPKERequestInfo.toByteArray())
         val plaintext = openFrames(recipient, ex.requestBody)
         val (status, body) = handler(ex, plaintext)
 
         val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val aead = deriveResponseKeys(recipient.export(ExportLabel.toByteArray(), ExportLength), enc, nonce).newResponseAEAD()
+        val (key, nonceBase) = Core.deriveKeys(recipient.export(ExportLabel.toByteArray(), ExportLength), enc, nonce)
+        val aead = Sealer(key, nonceBase)
         val chunks = body.toList().chunked(8192).map { it.toByteArray() }.ifEmpty { listOf(ByteArray(0)) }
         val framed = tweak(ex, sealFrames(aead, *chunks.toTypedArray()))
         if (!suppressNonce && !ex.responseHeaders.containsKey(ResponseNonceHeader)) ex.responseHeaders.set(ResponseNonceHeader, nonce.toHex())

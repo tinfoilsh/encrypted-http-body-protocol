@@ -66,7 +66,7 @@
   },
   {
     "id": "server-middleware-trailing-tamper",
-    "description": "Request frames authenticate and are released one at a time (SPEC 4.3). A tampered trailing frame fails in the handler's read: the authenticated prefix (two 8 KiB frames) was delivered, nothing from the bad frame is.",
+    "description": "Request frames authenticate and are released one at a time (SPEC 4.3). A tampered trailing frame fails in the handler's read: the authenticated prefix (two 64 KiB frames) was delivered, nothing from the bad frame is.",
     "category": "server",
     "operation": "middleware_request",
     "runners": [
@@ -79,7 +79,7 @@
       "outcome": "error",
       "error_code": "AEAD_DECRYPT_FAILED",
       "plaintext_emitted_before_error": true,
-      "bytes_emitted_before_error": 16384
+      "bytes_emitted_before_error": 131072
     }
   }
 ]

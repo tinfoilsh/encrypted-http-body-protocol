@@ -1,183 +1,71 @@
-"""Synchronous EHBP client transport built on httpx.
+"""Synchronous EHBP client: the API shim over the event-driven Dafny core.
 
-The client encrypts request bodies to the server's HPKE public key and decrypts
-the bound response body. It passes through nonce-less non-success responses,
-fails closed on nonce-less successes or invalid nonces, and enforces several
-defensive constraints (single configured origin, no credentials in URLs,
-reserved protocol headers cannot be overridden, redirects disabled, response
-size capped).
+Every protocol decision is made by the core (dafny/ehbp_events.dfy); this
+module only hands it the caller's values and drives it through the pump in
+:mod:`ehbp._residue` (handler.md section 7).
 """
 
 from __future__ import annotations
 
-import json
-import threading
+import io
 from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import IO, Any, Optional, Union
+from itertools import chain
+from typing import IO, Optional, Union
 
 import httpx
-from httpx._client import UseClientDefault
-from httpx._types import TimeoutTypes
 
-from ._http import (
-    DEFAULT_MAX_RESPONSE_BYTES,
-    DEFAULT_TIMEOUT,
-)
-from ._http import (
-    raise_for_key_config_mismatch as _raise_for_key_config_mismatch,
-)
-from ._http import (
-    is_success as _is_success,
-    response_nonce_for_status as _response_nonce_for_status,
-)
-from .errors import ChunkTooLargeError, InvalidInputError, InvalidKeyConfigError
-from .identity import REQUEST_FRAME_SIZE, EncryptedRequestStream, ServerIdentity
-from .protocol import (
-    ENCAPSULATED_KEY_HEADER,
-    KEYS_MEDIA_TYPE,
-    KEYS_PATH,
-    RESPONSE_NONCE_HEADER,
-)
-from .session import SessionRecoveryToken
+from . import _residue as r
+from . import identity
+from ._gen import EHBP
+from ._gen import EHBPEvents as ev
+from .errors import InvalidInputError
 
-_RESERVED_REQUEST_HEADERS = frozenset(
-    {
-        "content-length",
-        "transfer-encoding",
-        "host",
-        ENCAPSULATED_KEY_HEADER.lower(),
-        RESPONSE_NONCE_HEADER.lower(),
-    }
-)
+DEFAULT_TIMEOUT = 30.0
 
-# bytes-like and str are buffered; an iterable of bytes or a binary file is
+# bytes-like is buffered; an iterable of bytes or a binary file is
 # stream-encrypted frame by frame without ever being held in memory.
-Body = Union[bytes, bytearray, str, Iterable[bytes], IO[bytes], None]
-HeadersInput = Optional[Mapping[str, str]]
-# Per-request timeout: anything httpx accepts, or USE_CLIENT_DEFAULT to keep
-# the http_client's.
-TimeoutInput = Union[TimeoutTypes, UseClientDefault]
+Body = Union[bytes, bytearray, Iterable[bytes], IO[bytes], None]
+
+# constructor: a Client over one server origin and the key a KeySource yields.
 
 
-@dataclass
-class Response:
-    status_code: int
-    headers: httpx.Headers
-    content: bytes
-
-    def text(self, encoding: str = "utf-8") -> str:
-        return self.content.decode(encoding)
-
-    def json(self) -> Any:
-        return json.loads(self.content)
+class Discover:
+    """Fetch the server's key configuration from /.well-known/hpke-keys."""
 
 
-@dataclass
-class StreamingResponse:
-    status_code: int
-    headers: httpx.Headers
-    _chunks: Iterator[bytes]
+@dataclass(frozen=True)
+class Config:
+    """An RFC 9458 key configuration."""
 
-    def __iter__(self) -> Iterator[bytes]:
-        return self._chunks
+    data: bytes
 
-    def iter_bytes(self) -> Iterator[bytes]:
-        return self._chunks
+
+@dataclass(frozen=True)
+class PublicKey:
+    """The server's 32-byte X25519 public key."""
+
+    data: bytes
+
+
+Keys = Union[type[Discover], Discover, Config, PublicKey]
 
 
 class Client:
     def __init__(
-        self,
-        base_url: Union[str, httpx.URL],
-        identity: ServerIdentity,
-        *,
-        http_client: Optional[httpx.Client] = None,
-        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        self, server: str, keys: Keys, *, http_client: Optional[httpx.Client] = None
     ) -> None:
-        self._base_url = _normalize_base_url(base_url)
-        self._identity = identity
-        self._http = http_client or _default_http_client()
-        self._max_response_bytes = max_response_bytes
-        self._token_lock = threading.Lock()
-        self._last_token: Optional[SessionRecoveryToken] = None
-        self._request_generation = 0
-
-    @classmethod
-    def discover(
-        cls,
-        base_url: str,
-        *,
-        http_client: Optional[httpx.Client] = None,
-        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    ) -> Client:
-        """Fetch the server key configuration and build a client."""
-        base = _normalize_base_url(base_url)
-        http = http_client or _default_http_client()
-        response = http.get(base.join(KEYS_PATH), follow_redirects=False)
-        if response.status_code // 100 != 2:
-            raise InvalidKeyConfigError(
-                f"server returned status {response.status_code} while fetching key configuration"
-            )
-        content_type = response.headers.get("content-type", "")
-        if content_type != KEYS_MEDIA_TYPE:
-            raise InvalidKeyConfigError(f"server returned invalid key content type: {content_type}")
-        identity = ServerIdentity.unmarshal_public_config(response.content)
-        return cls(
-            base,
-            identity,
-            http_client=http,
-            max_response_bytes=max_response_bytes,
-        )
-
-    @classmethod
-    def with_config(
-        cls,
-        base_url: str,
-        hpke_config: bytes,
-        *,
-        http_client: Optional[httpx.Client] = None,
-        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    ) -> Client:
-        identity = ServerIdentity.unmarshal_public_config(hpke_config)
-        return cls(
-            base_url,
-            identity,
-            http_client=http_client,
-            max_response_bytes=max_response_bytes,
-        )
-
-    @classmethod
-    def with_public_key_hex(
-        cls,
-        base_url: str,
-        public_key_hex: str,
-        *,
-        http_client: Optional[httpx.Client] = None,
-        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-    ) -> Client:
-        identity = ServerIdentity.from_public_key_hex(public_key_hex)
-        return cls(
-            base_url,
-            identity,
-            http_client=http_client,
-            max_response_bytes=max_response_bytes,
-        )
-
-    @property
-    def server_identity(self) -> ServerIdentity:
-        return self._identity
-
-    def get_session_recovery_token(self) -> Optional[SessionRecoveryToken]:
-        with self._token_lock:
-            return self._last_token
-
-    def take_session_recovery_token(self) -> Optional[SessionRecoveryToken]:
-        with self._token_lock:
-            token = self._last_token
-            self._last_token = None
-            return token
+        self._base_url, self._origin = _parse_base(server)
+        self._http = http_client or httpx.Client(follow_redirects=False, timeout=DEFAULT_TIMEOUT)
+        if isinstance(keys, Config):
+            self._public_key = identity.parse_config(keys.data)
+        elif isinstance(keys, PublicKey):
+            self._public_key = identity.check_public_key(keys.data)
+        elif keys is Discover or isinstance(keys, Discover):
+            self._public_key = discover(server, http_client=self._http)
+        else:
+            raise InvalidInputError("keys must be Discover, Config(bytes) or PublicKey(bytes)")
+        self._session = r.Session()
 
     def close(self) -> None:
         self._http.close()
@@ -188,306 +76,115 @@ class Client:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+
+    # token: the exchange in flight.
+
+    def session_recovery_token(self) -> Optional[identity.SessionRecoveryToken]:
+        """The token of the exchange in flight, or None (SPEC 6)."""
+        token = self._session.token()
+        if token is None:
+            return None
+        return identity.SessionRecoveryToken(r.bytes_(token.exportedSecret), r.bytes_(token.requestEnc))
+
+
+    # request: the one entry point; the core validates, seals, classifies and decrypts.
+
     def request(
         self,
         method: str,
-        path_or_url: str,
+        path: str,
         *,
+        headers: Optional[Mapping[str, str]] = None,
         body: Body = None,
-        json_body: Any = None,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
     ) -> Response:
-        """Send a request and return the whole decrypted response.
+        """Send a request; the response body decrypts as it is iterated or read.
 
-        ``timeout`` applies to this request only and overrides the
-        ``http_client``'s timeout. httpx's read timeout is an idle timeout:
-        it bounds each wait between reads, not the whole response.
+        The ``http_client``'s read timeout is an idle timeout: it bounds each
+        gap between response chunks, not the whole response.
         """
-        url = self._resolve_url(path_or_url)
-        request_headers, source = self._prepare_body(headers, body, json_body)
-        generation = self._begin_request()
-        encrypted = self._encrypt(source)
-
-        if encrypted is None:
-            with self._http.stream(
-                method,
-                url,
-                headers=request_headers,
-                content=None,
-                follow_redirects=False,
-                timeout=timeout,
-            ) as resp:
-                raw = self._read_body_capped(resp)
-                return Response(resp.status_code, resp.headers, raw)
-
-        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
-        token = encrypted.token
-        self._publish_token(generation, token)
-        try:
-            with self._http.stream(
-                method,
-                url,
-                headers=request_headers,
-                content=encrypted.frames,
-                follow_redirects=False,
-                timeout=timeout,
-            ) as resp:
-                status = resp.status_code
-                response_headers = resp.headers
-                raw = self._read_body_capped(resp)
-            _raise_for_key_config_mismatch(status, response_headers, raw)
-            response_nonce = _response_nonce_for_status(status, response_headers)
-            if response_nonce is None:
-                self._clear_token_if_current(generation)
-                return Response(status, response_headers, raw)
-            decrypted = token.decrypt_response_body(
-                response_nonce, raw, require_frame=_is_success(status)
-            )
-        except BaseException:
-            self._clear_token_if_current(generation)
-            raise
-        self._clear_token_if_current(generation)
-        return Response(status, response_headers, decrypted)
-
-    def get(
-        self,
-        path_or_url: str,
-        *,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
-    ) -> Response:
-        return self.request("GET", path_or_url, headers=headers, timeout=timeout)
-
-    def delete(
-        self,
-        path_or_url: str,
-        *,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
-    ) -> Response:
-        return self.request("DELETE", path_or_url, headers=headers, timeout=timeout)
-
-    def post(
-        self,
-        path_or_url: str,
-        *,
-        body: Body = None,
-        json_body: Any = None,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
-    ) -> Response:
-        return self.request(
-            "POST", path_or_url, body=body, json_body=json_body, headers=headers, timeout=timeout
+        u = self._base_url.join(path)
+        chunks = _as_chunks(body)
+        start = ev.Event_Start(
+            r.str_(method), r.str_(str(u)), r.str_(u.scheme), r.str_(u.host),
+            u.port or 0, u.port is not None, bool(u.username or u.password),
+            r.header_seq(list((headers or {}).items())), chunks is not None,
         )
+        initial = ev.default__.Initial(self._origin, r.seq(self._public_key))
+        x = r.Exchange(initial, self._session, self._http, chunks)
+        r.feed(x, start)
+        if x.failure is not None:
+            raise x.failure
+        body_iter = chain([x.prefix], x.chunks) if x.passthrough else identity.decrypted_body(x)
+        return Response(x, body_iter)
 
-    def put(
-        self,
-        path_or_url: str,
-        *,
-        body: Body = None,
-        json_body: Any = None,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
-    ) -> Response:
-        return self.request(
-            "PUT", path_or_url, body=body, json_body=json_body, headers=headers, timeout=timeout
-        )
 
-    @contextmanager
-    def stream(
-        self,
-        method: str,
-        path_or_url: str,
-        *,
-        body: Body = None,
-        json_body: Any = None,
-        headers: HeadersInput = None,
-        timeout: TimeoutInput = httpx.USE_CLIENT_DEFAULT,
-    ) -> Iterator[StreamingResponse]:
-        """Send a request and yield its response, decrypted as it is read.
+class Response:
+    """The response; its body is decrypted (or passed through) as it is read.
+    Reading to the end, a failure or ``close`` ends the exchange (SPEC 6.3)."""
 
-        ``timeout`` behaves as in :meth:`request`; its read timeout bounds
-        each gap between response chunks, so a long-lived stream that goes
-        quiet needs a read timeout longer than its longest silence.
-        """
-        url = self._resolve_url(path_or_url)
-        request_headers, source = self._prepare_body(headers, body, json_body)
-        generation = self._begin_request()
-        encrypted = self._encrypt(source)
+    def __init__(self, x: r.Exchange, body: Iterator[bytes]) -> None:
+        self.status_code, self.headers = x.status, httpx.Headers(x.headers)
+        self._x: Optional[r.Exchange] = x
+        self._body = self._closing(body)
 
-        if encrypted is None:
-            with self._http.stream(
-                method,
-                url,
-                headers=request_headers,
-                content=None,
-                follow_redirects=False,
-                timeout=timeout,
-            ) as resp:
-                yield StreamingResponse(resp.status_code, resp.headers, resp.iter_bytes())
-            return
-
-        request_headers[ENCAPSULATED_KEY_HEADER] = encrypted.encapsulated_key.hex()
-        token = encrypted.token
-        self._publish_token(generation, token)
+    def _closing(self, body: Iterator[bytes]) -> Iterator[bytes]:
         try:
-            with self._http.stream(
-                method,
-                url,
-                headers=request_headers,
-                content=encrypted.frames,
-                follow_redirects=False,
-                timeout=timeout,
-            ) as resp:
-                status = resp.status_code
-                response_headers = resp.headers
-                if RESPONSE_NONCE_HEADER not in response_headers:
-                    raw = self._read_body_capped(resp)
-                    self._clear_token_if_current(generation)
-                    _raise_for_key_config_mismatch(status, response_headers, raw)
-                    response_nonce = _response_nonce_for_status(status, response_headers)
-                    if response_nonce is None:
-                        yield StreamingResponse(status, response_headers, iter((raw,)))
-                        return
-                else:
-                    response_nonce = _response_nonce_for_status(status, response_headers)
-                assert response_nonce is not None
-                yield StreamingResponse(
-                    status,
-                    response_headers,
-                    self._decrypt_stream(resp, token, response_nonce, generation, status),
-                )
-        except GeneratorExit:
-            raise
-        except BaseException:
-            self._clear_token_if_current(generation)
-            raise
+            yield from body
+        finally:
+            self.close()
 
-    def _decrypt_stream(
-        self,
-        resp: httpx.Response,
-        token: SessionRecoveryToken,
-        response_nonce: bytes,
-        generation: int,
-        status: int,
-    ) -> Iterator[bytes]:
-        decryptor = token.create_response_decryptor(
-            response_nonce,
-            max_chunk_length=self._max_response_bytes,
-            require_frame=_is_success(status),
-        )
-        try:
-            for chunk in resp.iter_bytes():
-                yield from decryptor.push(chunk)
-            decryptor.finish()
-            self._clear_token_if_current(generation)
-        except GeneratorExit:
-            raise
-        except BaseException:
-            self._clear_token_if_current(generation)
-            raise
+    def __iter__(self) -> Iterator[bytes]:
+        return self._body
 
-    def _prepare_body(
-        self, headers: HeadersInput, body: Body, json_body: Any
-    ) -> tuple[httpx.Headers, Union[bytes, Iterable[bytes]]]:
-        request_headers = self._prepare_headers(headers)
-        if json_body is not None:
-            if body is not None:
-                raise InvalidInputError("provide either body or json_body, not both")
-            request_headers["content-type"] = "application/json"
-            return request_headers, json.dumps(json_body).encode("utf-8")
-        return request_headers, _as_body_source(body)
+    def read(self) -> bytes:
+        return b"".join(self)
 
-    def _encrypt(self, source: Union[bytes, Iterable[bytes]]) -> Optional[EncryptedRequestStream]:
-        """Frame-by-frame encryption for bytes and iterables alike; None when bodyless."""
-        chunks = (source,) if isinstance(source, bytes) else source
-        return self._identity.encrypt_request_stream(chunks)
-
-    def _prepare_headers(self, headers: HeadersInput) -> httpx.Headers:
-        prepared = httpx.Headers(headers or {})
-        for name in prepared:
-            if name.lower() in _RESERVED_REQUEST_HEADERS:
-                raise InvalidInputError(
-                    f"reserved request header cannot be set by callers: {name}"
-                )
-        return prepared
-
-    def _read_body_capped(self, resp: httpx.Response) -> bytes:
-        chunks = []
-        total = 0
-        for chunk in resp.iter_bytes():
-            total += len(chunk)
-            if total > self._max_response_bytes:
-                raise ChunkTooLargeError("response body exceeds maximum allowed size")
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    def _resolve_url(self, path_or_url: str) -> httpx.URL:
-        url = self._base_url.join(path_or_url)
-        if not _same_origin(self._base_url, url):
-            raise InvalidInputError(
-                f"request URL must use the configured origin: "
-                f"{self._base_url.scheme}://{self._base_url.netloc.decode('ascii')}"
-            )
-        if url.username or url.password:
-            raise InvalidInputError("request URL must not include credentials")
-        return url
-
-    def _begin_request(self) -> int:
-        with self._token_lock:
-            self._request_generation += 1
-            self._last_token = None
-            return self._request_generation
-
-    def _publish_token(self, generation: int, token: SessionRecoveryToken) -> None:
-        with self._token_lock:
-            if self._request_generation == generation:
-                self._last_token = token
-
-    def _clear_token_if_current(self, generation: int) -> None:
-        with self._token_lock:
-            if self._request_generation == generation:
-                self._last_token = None
+    def close(self) -> None:
+        if self._x is not None:
+            x, self._x = self._x, None
+            r.feed(x, ev.Event_CallerClose())
 
 
-def _default_http_client() -> httpx.Client:
-    return httpx.Client(follow_redirects=False, timeout=DEFAULT_TIMEOUT)
-
-
-def _as_body_source(body: Body) -> Union[bytes, Iterable[bytes]]:
+def _as_chunks(body: Body) -> Optional[Iterator[bytes]]:
+    """The caller's body as the residue's source: bytes buffered, a file or iterable pulled frame by frame."""
     if body is None:
-        return b""
-    if isinstance(body, str):
-        return body.encode("utf-8")
+        return None
     if isinstance(body, (bytes, bytearray)):
-        return bytes(body)
+        body = io.BytesIO(body)
     read = getattr(body, "read", None)
     if callable(read):
-        return iter(lambda: read(REQUEST_FRAME_SIZE), b"")
+        return iter(lambda: read(EHBP.default__.RequestFrameBytes), b"")
     if isinstance(body, Iterable):
-        return body
-    raise InvalidInputError("body must be bytes, str, an iterable of bytes, a binary file, or None")
+        return iter(body)
+    raise InvalidInputError("body must be bytes, an iterable of bytes, a binary file, or None")
 
 
-def _normalize_base_url(raw: Union[str, httpx.URL]) -> httpx.URL:
-    url = httpx.URL(raw)
-    if not url.host:
-        raise InvalidInputError("base URL must include an HTTP origin")
-    if url.username or url.password:
-        raise InvalidInputError("base URL must not include credentials")
-    if url.scheme not in ("http", "https"):
-        raise InvalidInputError("base URL scheme must be http or https")
-    path = url.path or "/"
-    if not path.endswith("/"):
-        path = path + "/"
-    return httpx.URL(scheme=url.scheme, host=url.host, port=url.port, path=path)
+def _parse_base(raw: str) -> tuple[httpx.URL, EHBP.Origin]:
+    """Hands the parsed parts of ``raw`` to the core, which validates them."""
+    u = httpx.URL(raw)
+    port = EHBP.Option_Some(u.port) if u.port is not None else EHBP.Option_None()
+    origin = r.unwrap(EHBP.default__.MakeOrigin(r.str_(u.scheme), r.str_(u.host), port, bool(u.username or u.password)))
+    path = u.path if u.path.endswith("/") else u.path + "/"
+    return httpx.URL(scheme=u.scheme, host=u.host, port=u.port, path=path), origin
 
 
-def _origin(url: httpx.URL) -> tuple[str, Optional[str], int]:
-    port = url.port if url.port is not None else (443 if url.scheme == "https" else 80)
-    return (url.scheme, url.host, port)
+# discover: the same discovery the constructor runs; the 32-byte public key.
 
 
-def _same_origin(left: httpx.URL, right: httpx.URL) -> bool:
-    return _origin(left) == _origin(right)
+def discover(server: str, *, http_client: Optional[httpx.Client] = None) -> bytes:
+    """Fetch the server key configuration (SPEC 3.1); the 32-byte key to build a Client with."""
+    _, origin = _parse_base(server)
+    http = http_client or httpx.Client(follow_redirects=False, timeout=DEFAULT_TIMEOUT)
+    x = r.Exchange(ev.default__.Initial(origin, r.seq(b"")), r.Session(), http, None)
+    r.feed(x, ev.Event_DiscoverStart())
+    if x.failure is not None:
+        raise x.failure
+    return x.public_key
+
+
+# selfCheck: the core's primitive vectors through this residue.
+
+
+def self_check() -> list[str]:
+    """Runs the core's primitive vectors through this residue; the failures."""
+    return r.self_check()

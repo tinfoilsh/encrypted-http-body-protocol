@@ -3,10 +3,12 @@
 EHBP (Encrypted HTTP Body Protocol) encrypts the HTTP message body while leaving the rest of the message unmodified.
 Proxies can inspect and route upon request metadata without seeing the body.
 
-The protocol uses HPKE, with a Go reference implementation (server middleware and client transport), a JavaScript/TypeScript client, a Swift client, and a Kotlin client (JVM and Android).
+The protocol uses HPKE, with a Go reference implementation (server middleware and client transport) and JavaScript/TypeScript, Python, Rust, Swift and Kotlin (JVM and Android) clients, all over one verified Dafny core (`dafny/`, described in [conformance/spec/handler.md](conformance/spec/handler.md)).
 
 - Protocol specification: [SPEC.md](SPEC.md)
 - JavaScript client: [js/README.md](js/README.md)
+- Python client: [python/](python/)
+- Rust client: [rust/](rust/)
 - Swift client: [swift/](swift/)
 - Kotlin client: [kotlin/README.md](kotlin/README.md)
 
@@ -95,7 +97,7 @@ import (
 )
 
 func main() {
-  tr, err := client.NewTransport("http://localhost:8080")
+  tr, err := client.New("http://localhost:8080", client.Discovered())
   if err != nil {
     log.Fatalf("client exited: %v", err)
   }

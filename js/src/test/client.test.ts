@@ -1,141 +1,40 @@
+// Fetch- and stream-specific behaviour of the Transport: what the conformance
+// fixtures cannot see from outside (custom fetch, cancellation, redirect modes,
+// fetch option forwarding, browser upload spooling). Protocol decisions are the
+// core's and are pinned by test-vectors/conformance.
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert';
-import {
-  Identity,
-  Transport,
-  createTransport,
-  InvalidInputError,
-  KeyConfigMismatchError,
-  FramingTruncatedError,
-  MissingResponseNonceError,
-  UnexpectedRedirectError,
-} from '../index.js';
-import { encryptFrames, setSpoolThresholdForTests, type SessionRecoveryToken } from '../identity.js';
-import { PROTOCOL } from '../protocol.js';
-import { CipherSuite, KDF_HKDF_SHA256, AEAD_AES_256_GCM } from 'hpke';
-import { KEM_DHKEM_X25519_HKDF_SHA256 } from '@panva/hpke-noble';
-import {
-  bytesToHex,
-  deriveResponseKeys,
-  encryptChunk,
-  hexToBytes,
-  EXPORT_LABEL,
-  EXPORT_LENGTH,
-  HPKE_REQUEST_INFO,
-  RESPONSE_NONCE_LENGTH,
-} from '../derive.js';
-
-function encodeSingleChunk(payload: Uint8Array): Uint8Array {
-  const chunkLength = new Uint8Array(4);
-  new DataView(chunkLength.buffer).setUint32(0, payload.byteLength, false);
-
-  const body = new Uint8Array(4 + payload.byteLength);
-  body.set(chunkLength, 0);
-  body.set(payload, 4);
-  return body;
-}
-
-function toArrayBuffer(bytes: Uint8Array<ArrayBufferLike>): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
-
-async function buildEncryptedResponse(
-  request: Request,
-  serverIdentity: Identity,
-  status = 200,
-  responseBody?: Uint8Array
-): Promise<Response> {
-  const requestEncHex = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER);
-  assert(requestEncHex, `Missing ${PROTOCOL.ENCAPSULATED_KEY_HEADER} header`);
-  const requestEnc = hexToBytes(requestEncHex);
-
-  const encryptedRequestBody = new Uint8Array(await request.arrayBuffer());
-  assert(encryptedRequestBody.byteLength >= 4, 'Encrypted request body must include chunk length');
-
-  const chunkLength = new DataView(
-    encryptedRequestBody.buffer,
-    encryptedRequestBody.byteOffset,
-    encryptedRequestBody.byteLength
-  ).getUint32(0, false);
-  assert.strictEqual(
-    encryptedRequestBody.byteLength,
-    4 + chunkLength,
-    'Expected exactly one encrypted request chunk'
-  );
-  const ciphertext = encryptedRequestBody.slice(4);
-
-  const suite = new CipherSuite(
-    KEM_DHKEM_X25519_HKDF_SHA256,
-    KDF_HKDF_SHA256,
-    AEAD_AES_256_GCM
-  );
-  const infoBytes = new TextEncoder().encode(HPKE_REQUEST_INFO);
-  const recipientContext = await suite.SetupRecipient(serverIdentity.getPrivateKey(), requestEnc, {
-    info: infoBytes,
-  });
-
-  const decryptedRequest = await recipientContext.Open(ciphertext);
-  const decryptedText = new TextDecoder().decode(decryptedRequest);
-  const responseText = `processed:${decryptedText}`;
-
-  const responseNonce = new Uint8Array(RESPONSE_NONCE_LENGTH);
-  crypto.getRandomValues(responseNonce);
-
-  const exportLabelBytes = new TextEncoder().encode(EXPORT_LABEL);
-  const exportedSecret = await recipientContext.Export(exportLabelBytes, EXPORT_LENGTH);
-  const keyMaterial = await deriveResponseKeys(exportedSecret, requestEnc, responseNonce);
-
-  const responseCiphertext = await encryptChunk(
-    keyMaterial,
-    0,
-    responseBody ?? new TextEncoder().encode(responseText)
-  );
-
-  return new Response(toArrayBuffer(encodeSingleChunk(responseCiphertext)), {
-    status,
-    headers: {
-      [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(responseNonce),
-    },
-  });
-}
+import { Transport, InvalidInputError, UnexpectedRedirectError, PROTOCOL, Code, EhbpError, codeOf, core } from '../index.js';
+import { core as pure } from '../core.js';
+import { code, error } from '../residue.js';
+import { setSpoolThresholdForTests } from '../spool.js';
+import { type Key } from 'hpke';
+import { serverKeys, encryptedResponse, openFrames, hex, buf } from './support.js';
 
 describe('Transport', () => {
-  let serverIdentity: Identity;
-
-  before(async () => {
-    serverIdentity = await Identity.generate();
-  });
+  let publicKey: Uint8Array;
+  let privateKey: Key;
+  before(async () => ({ publicKey, privateKey } = await serverKeys()));
+  const transport = (fetch: typeof globalThis.fetch) => new Transport('https://server.test', { publicKey }, { fetch });
 
   it('uses an isolated custom fetch for encrypted requests and streamed responses', async (t) => {
     t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
-    const makeTransport = (label: string) => new Transport(serverIdentity, 'https://example.com', {
-      fetch: async (input, init) => {
-        const request = new Request(input, init);
-        assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
-        assert.strictEqual(request.headers.get('authorization'), `Bearer ${label}`);
-        assert.strictEqual(request.credentials, 'omit');
-        assert.strictEqual(request.redirect, 'error');
-        assert(!(await request.clone().text()).includes(`private-${label}`));
-        const encrypted = await buildEncryptedResponse(request, serverIdentity);
-        const bytes = new Uint8Array(await encrypted.arrayBuffer());
-        return new Response(new ReadableStream({
-          start(controller) {
-            controller.enqueue(bytes.slice(0, 3));
-            controller.enqueue(bytes.slice(3));
-            controller.close();
-          },
-        }), { headers: encrypted.headers });
-      },
+    const make = (label: string) => transport(async (input, init) => {
+      const request = new Request(input, init);
+      assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
+      assert.strictEqual(request.headers.get('authorization'), `Bearer ${label}`);
+      assert.strictEqual(request.credentials, 'omit');
+      assert.strictEqual(request.redirect, 'error');
+      assert(!(await request.clone().text()).includes(`private-${label}`));
+      const encrypted = await encryptedResponse(privateKey, request);
+      const bytes = new Uint8Array(await encrypted.arrayBuffer());
+      return new Response(new ReadableStream({
+        start(c) { c.enqueue(bytes.slice(0, 3)); c.enqueue(bytes.slice(3)); c.close(); },
+      }), { headers: encrypted.headers });
     });
-    const clients = ['one', 'two'].map(makeTransport);
-    const results = await Promise.all(clients.map(async (client, index) => {
-      const label = ['one', 'two'][index];
-      const response = await client.post('https://example.com/test', `private-${label}`, {
-        headers: { authorization: `Bearer ${label}` },
-        credentials: 'omit',
-        redirect: 'error',
+    const results = await Promise.all(['one', 'two'].map(async (label) => {
+      const response = await make(label).post('https://server.test/test', `private-${label}`, {
+        headers: { authorization: `Bearer ${label}` }, credentials: 'omit', redirect: 'error',
       });
       return response.text();
     }));
@@ -144,955 +43,289 @@ describe('Transport', () => {
 
   it('calls an injected fetch without a receiver for encrypted and bodyless requests', async () => {
     const receivers: unknown[] = [];
-    const transport = new Transport(serverIdentity, 'https://example.com', {
-      fetch: async function (this: unknown, input, init) {
-        receivers.push(this);
-        assert.strictEqual(this, undefined, 'fetch must not receive the Transport as its receiver');
-        const request = new Request(input, init);
-        return request.body ? buildEncryptedResponse(request, serverIdentity) : new Response('bodyless');
-      },
+    const tp = transport(async function (this: unknown, input, init) {
+      receivers.push(this);
+      const request = new Request(input, init);
+      return request.body ? encryptedResponse(privateKey, request) : new Response('bodyless');
     });
-    const encrypted = await transport.post('https://example.com/test', 'hello');
-    assert.strictEqual(await encrypted.text(), 'processed:hello');
-    const bodyless = await transport.get('https://example.com/test');
-    assert.strictEqual(await bodyless.text(), 'bodyless');
+    assert.strictEqual(await (await tp.post('https://server.test/test', 'hello')).text(), 'processed:hello');
+    assert.strictEqual(await (await tp.get('https://server.test/test')).text(), 'bodyless');
     assert.deepStrictEqual(receivers, [undefined, undefined]);
   });
 
-  it('preserves origin checks before invoking custom fetch', async () => {
-    const transport = new Transport(serverIdentity, 'https://example.com', {
-      fetch: async () => { assert.fail('must reject before networking'); },
-    });
-    await assert.rejects(transport.post('https://other.example/test', 'secret'), InvalidInputError);
-  });
-
-  it('uses custom fetch for bodyless requests and forwards cancellation', async (t) => {
-    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
+  it('forwards cancellation to a bodyless request', async () => {
     const controller = new AbortController();
-    const transport = new Transport(serverIdentity, 'https://example.com', {
-      fetch: async (input, init) => {
-        const request = new Request(input, init);
-        assert.strictEqual(request.body, null);
-        assert.strictEqual(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER), false);
-        controller.abort();
-        assert.strictEqual(request.signal.aborted, true);
-        request.signal.throwIfAborted();
-        return new Response();
-      },
-    });
-    await assert.rejects(transport.get('https://example.com/test', { signal: controller.signal }),
-      { name: 'AbortError' });
-  });
-
-  it('propagates custom fetch errors and clears the recovery token', async () => {
-    const failure = new Error('network unavailable');
-    const transport = new Transport(serverIdentity, 'https://example.com', {
-      fetch: async () => { throw failure; },
-    });
-    await assert.rejects(transport.post('https://example.com/test', 'secret'), error => error === failure);
-    assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/);
-  });
-
-  it('uses custom fetch for key discovery and subsequent requests through both factories', async (t) => {
-    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
-    for (const create of [Transport.create, createTransport]) {
-      const urls: string[] = [];
-      const transport = await create('https://example.com', { credentials: 'omit' }, {
-        fetch: async function (this: unknown, input, init) {
-          assert.strictEqual(this, undefined, 'key discovery and API requests must use the same receiver');
-          const request = new Request(input, init);
-          urls.push(request.url);
-          if (request.url.endsWith(PROTOCOL.KEYS_PATH)) {
-            assert.strictEqual(request.credentials, 'omit');
-            return new Response(toArrayBuffer(await serverIdentity.marshalConfig()), {
-              headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
-            });
-          }
-          return buildEncryptedResponse(request, serverIdentity);
-        },
-      });
-      const response = await transport.post('https://example.com/test', 'hello');
-      assert.strictEqual(await response.text(), 'processed:hello');
-      assert.deepStrictEqual(urls, [`https://example.com${PROTOCOL.KEYS_PATH}`, 'https://example.com/test']);
-    }
-  });
-
-  it('should create transport with server public key', () => {
-    const transport = new Transport(
-      serverIdentity,
-      'localhost:8080'
-    );
-
-    assert(transport instanceof Transport, 'Should create transport instance');
-  });
-
-  it('should encrypt and decrypt request', async () => {
-    const originalBody = new TextEncoder().encode('Hello, World!');
-    const request = new Request('http://localhost:8080/test', {
-      method: 'POST',
-      body: originalBody
-    });
-
-    const { request: encryptedRequest, context } = await serverIdentity.encryptRequestWithContext(request);
-
-    assert(encryptedRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER), 'Encapsulated key header should be set');
-
-    // Check that context was returned for response decryption
-    assert(context, 'Context should be returned');
-    assert(context.senderContext, 'Context should have sender context');
-    assert(context.requestEnc, 'Context should have request enc');
-
-    // Check that body is encrypted (different from original)
-    const encryptedBody = await encryptedRequest.arrayBuffer();
-    assert(encryptedBody.byteLength > 0, 'Encrypted body should not be empty');
-    assert(encryptedBody.byteLength !== originalBody.length, 'Encrypted body should have different length');
-  });
-
-  it('should handle request without body', async () => {
-    const request = new Request('http://localhost:8080/test', {
-      method: 'GET'
-    });
-
-    const { request: resultRequest, context } = await serverIdentity.encryptRequestWithContext(request);
-
-    // Bodyless requests pass through unmodified - no EHBP headers set
-    // See SPEC.md Section 5.1
-    assert.strictEqual(
-      resultRequest.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER),
-      null,
-      'Encapsulated key header should NOT be set for bodyless requests'
-    );
-
-    // Context is null for bodyless requests (no HPKE context to derive response keys from)
-    assert.strictEqual(context, null, 'Context should be null for bodyless requests');
-  });
-
-  it('should connect to actual server and POST to /secure endpoint', async (t) => {
-    const serverURL = 'http://localhost:8080';
-
-    try {
-      const keysResponse = await fetch(`${serverURL}${PROTOCOL.KEYS_PATH}`);
-      if (!keysResponse.ok) {
-        t.skip('Server not running at localhost:8080');
-        return;
-      }
-    } catch {
-      t.skip('Server not running at localhost:8080');
-      return;
-    }
-
-    const transport = await createTransport(serverURL);
-
-    const testName = 'Integration Test User';
-
-    const serverPubKeyHex = await transport.getServerPublicKeyHex();
-    assert.strictEqual(serverPubKeyHex.length, 64, 'Server public key should be 64 hex chars (32 bytes)');
-
-    // Make actual POST request to /secure endpoint
-    const response = await transport.post(`${serverURL}/secure`, testName, {
-      headers: { 'Content-Type': 'text/plain' }
-    });
-
-    // Verify response
-    assert(response.ok, `Response should be ok, got status: ${response.status}`);
-
-    const responseText = await response.text();
-    assert.strictEqual(responseText, `Hello, ${testName}`, 'Server should respond with Hello, {name}');
-
-    console.log(`✓ Integration test passed: ${responseText}`);
-  });
-
-  it('should throw KeyConfigMismatchError on 422 key mismatch response', async () => {
-    const serverURL = 'https://server.test';
-    const serverIdentity = await Identity.generate();
-    const config = await serverIdentity.marshalConfig();
-
-    const originalFetch = globalThis.fetch;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      const requestURL = new URL(request.url);
-
-      if (requestURL.pathname === PROTOCOL.KEYS_PATH) {
-        return new Response(toArrayBuffer(config), {
-          status: 200,
-          headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
-        });
-      }
-
-      // Server returns 422 key-config mismatch
-      return new Response(
-        JSON.stringify({
-          type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
-          title: 'key configuration mismatch',
-        }),
-        {
-          status: 422,
-          headers: {
-            'content-type': `${PROTOCOL.PROBLEM_JSON_MEDIA_TYPE}; charset=utf-8`,
-          },
-        }
-      );
-    }) as typeof fetch;
-
-    try {
-      const transport = await createTransport(serverURL);
-      await assert.rejects(
-        () => transport.post(`${serverURL}/secure`, 'hello'),
-        (err: unknown) => {
-          assert(err instanceof KeyConfigMismatchError, `Expected KeyConfigMismatchError, got ${(err as Error).constructor.name}`);
-          assert.strictEqual(err.message, 'KEY_CONFIG_MISMATCH: key configuration mismatch');
-          return true;
-        }
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should reject cross-origin URLs and caller-set reserved headers', async () => {
-    const transport = new Transport(serverIdentity, 'https://server.test');
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
-    try {
-      await assert.rejects(transport.post('https://other.test/secure', 'hello'), InvalidInputError);
-      await assert.rejects(transport.post('http://server.test/secure', 'hello'), InvalidInputError);
-      await assert.rejects(
-        transport.request('https://server.test/secure', {
-          method: 'POST', body: 'hello', headers: { [PROTOCOL.ENCAPSULATED_KEY_HEADER]: 'deadbeef' },
-        }),
-        InvalidInputError,
-      );
-      // Rejection happens before the body is read.
-      let bodyRead = false;
-      const body = new ReadableStream<Uint8Array>({ pull() { bodyRead = true; } }, { highWaterMark: 0 });
-      await assert.rejects(
-        transport.request('https://other.test/secure', { method: 'POST', body, duplex: 'half' } as RequestInit),
-        InvalidInputError,
-      );
-      assert.strictEqual(bodyRead, false);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should keep an explicit port when configured host-only', async () => {
-    const transport = new Transport(serverIdentity, 'server.test:80');
-    const originalFetch = globalThis.fetch;
-    let fetched = false;
-    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
-    try {
-      // https on 443 is not the configured port 80.
-      await assert.rejects(transport.post('https://server.test/secure', 'hello'), InvalidInputError);
-      await assert.rejects(transport.post('http://server.test:8080/secure', 'hello'), InvalidInputError);
-      assert.strictEqual(fetched, false);
-      // http's default port is the configured 80, so this one is dispatched.
-      await assert.rejects(transport.post('http://server.test/secure', 'hello'), /stop/);
-      assert.strictEqual(fetched, true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should reject credential-bearing URLs with the canonical code', async () => {
-    const transport = new Transport(serverIdentity, 'https://server.test');
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => { throw new Error('fetch must not be called'); }) as typeof fetch;
-    try {
-      await assert.rejects(transport.post('https://user:pass@server.test/secure', 'hello'), InvalidInputError);
-      await assert.rejects(transport.post('//user:pass@server.test/secure', 'hello'), InvalidInputError);
-      assert.throws(() => new Transport(serverIdentity, 'https://user:pass@server.test'), InvalidInputError);
-      await assert.rejects(Transport.create('https://user:pass@server.test'), InvalidInputError);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should compare the configured host case-insensitively', async () => {
-    const transport = new Transport(serverIdentity, 'SERVER.TEST');
-    const originalFetch = globalThis.fetch;
-    let fetched = false;
-    globalThis.fetch = (async () => { fetched = true; throw new Error('stop'); }) as typeof fetch;
-    try {
-      await assert.rejects(transport.post('https://server.test/secure', 'hello'), /stop/);
-      assert.strictEqual(fetched, true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should pass through nonce-less 4xx and 5xx responses', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let responseStatus = 400;
-    let rawResponse!: Response;
-
-    globalThis.fetch = (async (): Promise<Response> => {
-      rawResponse = new Response(`upstream error ${responseStatus}`, {
-        status: responseStatus,
-        headers: { 'content-type': 'text/plain' },
-      });
-      return rawResponse;
-    }) as typeof fetch;
-
-    try {
-      for (const status of [400, 503]) {
-        responseStatus = status;
-        const response = await transport.post('https://server.test/secure', 'hello');
-
-        assert.strictEqual(response, rawResponse);
-        assert.strictEqual(response.status, status);
-        assert.strictEqual(response.headers.get('content-type'), 'text/plain');
-        assert.strictEqual(await response.text(), `upstream error ${status}`);
-        assert.throws(
-          () => transport.getSessionRecoveryToken(),
-          /No session recovery token available/
-        );
-      }
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should bound key mismatch problem parsing without consuming pass-through', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-    const oversizedProblem = JSON.stringify({
-      type: PROTOCOL.KEY_CONFIG_PROBLEM_TYPE,
-      title: 'x'.repeat(64 * 1024),
-    });
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (): Promise<Response> => {
-      return new Response(oversizedProblem, {
-        status: 422,
-        headers: { 'content-type': PROTOCOL.PROBLEM_JSON_MEDIA_TYPE },
-      });
-    }) as typeof fetch;
-
-    try {
-      const response = await transport.post('https://server.test/secure', 'hello');
-      assert.strictEqual(response.status, 422);
-      assert.strictEqual(await response.text(), oversizedProblem);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should refuse a redirect in response to an encrypted request', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-    const originalFetch = globalThis.fetch;
-
-    const cases: { name: string; response: () => Response }[] = [
-      { name: 'see other', response: () => new Response(null, { status: 303, headers: { location: '/followed' } }) },
-      { name: 'temporary redirect with a body', response: () => new Response('forged', { status: 307, headers: { location: '/followed' } }) },
-      {
-        name: 'made-up nonce',
-        response: () => new Response(null, { status: 303, headers: { location: '/followed', [PROTOCOL.RESPONSE_NONCE_HEADER]: 'ab'.repeat(32) } }),
-      },
-      {
-        // What a fetch that followed the redirect anyway hands back.
-        name: 'already followed',
-        response: () => Object.defineProperty(new Response('forged', { status: 200 }), 'redirected', { value: true }),
-      },
-    ];
-
-    try {
-      for (const { name, response } of cases) {
-        const redirectModes: (string | undefined)[] = [];
-        globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-          redirectModes.push(init?.redirect);
-          return response();
-        }) as typeof fetch;
-
-        await assert.rejects(
-          () => transport.post('https://server.test/secure', 'hello'),
-          (err: unknown) => {
-            assert(err instanceof UnexpectedRedirectError, name);
-            assert.match(err.message, /UNEXPECTED_REDIRECT/);
-            return true;
-          }
-        );
-        assert.deepStrictEqual(redirectModes, ['manual'], name);
-        assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token/, name);
-      }
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should reject a nonce-less 2xx response', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-
-    globalThis.fetch = (async (): Promise<Response> => {
-      return new Response('plaintext success', { status: 200 });
-    }) as typeof fetch;
-
-    try {
-      await assert.rejects(
-        () => transport.post('https://server.test/secure', 'hello'),
-        (err: unknown) => {
-          assert(err instanceof MissingResponseNonceError);
-          assert.match(err.message, /MISSING_RESPONSE_NONCE/);
-          return true;
-        }
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should encrypt, send, and decrypt a full round-trip', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      return buildEncryptedResponse(request, serverIdentity);
-    }) as typeof fetch;
-
-    try {
-      const response = await transport.post('https://server.test/secure', 'hello');
-      assert(transport.getSessionRecoveryToken());
-      const responseText = await response.text();
-      assert.strictEqual(responseText, 'processed:hello');
-      assert.throws(
-        () => transport.getSessionRecoveryToken(),
-        /No session recovery token available/
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should publish the recovery token before the request is sent', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let seenInFlight: SessionRecoveryToken | undefined;
-    let sentEnc = '';
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      sentEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
-      // SPEC 6: readable while the request is on the wire.
-      seenInFlight = transport.getSessionRecoveryToken();
-      return new Response('upstream down', { status: 502 });
-    }) as typeof fetch;
-
-    try {
-      await transport.post('https://server.test/secure', 'hello');
-      assert(seenInFlight);
-      assert.strictEqual(bytesToHex(seenInFlight.requestEnc), sentEnc);
-      // A nonce-less pass-through consumes it.
-      assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token available/);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should clear the recovery token when the transport fails', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (): Promise<Response> => { throw new TypeError('connection reset'); }) as typeof fetch;
-
-    try {
-      await assert.rejects(() => transport.post('https://server.test/secure', 'hello'), /connection reset/);
-      assert.throws(() => transport.getSessionRecoveryToken(), /No session recovery token available/);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should refuse a success that carries no authenticated chunk', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-    const madeUpNonce = bytesToHex(new Uint8Array(RESPONSE_NONCE_LENGTH));
-    const originalFetch = globalThis.fetch;
-
-    try {
-      // An empty body, or only zero-length frames: nothing authenticates.
-      for (const body of [new Uint8Array(0), new Uint8Array(8)]) {
-        globalThis.fetch = (async (): Promise<Response> =>
-          new Response(toArrayBuffer(body), { status: 200, headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: madeUpNonce } })) as typeof fetch;
-        const response = await transport.post('https://server.test/secure', 'hello');
-        await assert.rejects(() => response.arrayBuffer(), (err: unknown) => {
-          assert(err instanceof FramingTruncatedError);
-          return true;
-        });
-      }
-
-      // An authenticated error may be empty; only success needs a chunk.
-      globalThis.fetch = (async (): Promise<Response> =>
-        new Response(new Uint8Array(0), { status: 403, headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: madeUpNonce } })) as typeof fetch;
-      const forbidden = await transport.post('https://server.test/secure', 'hello');
-      assert.strictEqual(forbidden.status, 403);
-      assert.strictEqual((await forbidden.arrayBuffer()).byteLength, 0);
-
-      // A chunk sealing an empty plaintext authenticates an empty success.
-      globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> =>
-        buildEncryptedResponse(input as Request, serverIdentity, 200, new Uint8Array(0))) as typeof fetch;
-      const empty = await transport.post('https://server.test/secure', 'hello');
-      assert.strictEqual(empty.status, 200);
-      assert.strictEqual((await empty.arrayBuffer()).byteLength, 0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should refuse a nonce-bearing null-body response and publish no token', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      assert(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER));
-      return new Response(null, {
-        status: 204,
-        headers: {
-          [PROTOCOL.RESPONSE_NONCE_HEADER]: bytesToHex(
-            new Uint8Array(RESPONSE_NONCE_LENGTH)
-          ),
-        },
-      });
-    }) as typeof fetch;
-
-    try {
-      await assert.rejects(
-        () => transport.post('https://server.test/secure', 'hello'),
-        (err: unknown) => {
-          assert(err instanceof FramingTruncatedError);
-          return true;
-        }
-      );
-      assert.throws(
-        () => transport.getSessionRecoveryToken(),
-        /No session recovery token available/
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should reject a malformed nonce on a null-body response', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (): Promise<Response> => new Response(null, {
-      status: 204,
-      headers: { [PROTOCOL.RESPONSE_NONCE_HEADER]: '00' },
-    })) as typeof fetch;
-
-    try {
-      await assert.rejects(
-        () => transport.post('https://server.test/secure', 'hello'),
-        /INVALID_RESPONSE_NONCE/
-      );
-      assert.throws(
-        () => transport.getSessionRecoveryToken(),
-        /No session recovery token available/
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should retain the recovery token when the consumer cancels before EOF', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      const encrypted = await buildEncryptedResponse(request, serverIdentity);
-      const body = new Uint8Array(await encrypted.arrayBuffer());
-      return new Response(new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(body.slice(0, body.length - 1));
-        },
-      }), {
-        status: encrypted.status,
-        headers: encrypted.headers,
-      });
-    }) as typeof fetch;
-
-    try {
-      const response = await transport.post('https://server.test/secure', 'hello');
-      const token = transport.getSessionRecoveryToken();
-
-      await response.body!.cancel('consumer stopped');
-
-      assert.deepStrictEqual(transport.getSessionRecoveryToken(), token);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should not let older stream completion clear the latest recovery token', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let requestCount = 0;
-    let finishFirstResponse!: () => void;
-    let secondRequestEnc = '';
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      const encrypted = await buildEncryptedResponse(request, serverIdentity);
-      requestCount++;
-      if (requestCount === 2) {
-        secondRequestEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
-        return encrypted;
-      }
-
-      const body = new Uint8Array(await encrypted.arrayBuffer());
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(body);
-          finishFirstResponse = () => controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: encrypted.status,
-        headers: encrypted.headers,
-      });
-    }) as typeof fetch;
-
-    try {
-      const first = await transport.post('https://server.test/secure', 'first');
-      const second = await transport.post('https://server.test/secure', 'second');
-      assert.strictEqual(
-        bytesToHex(transport.getSessionRecoveryToken().requestEnc),
-        secondRequestEnc
-      );
-
-      const firstText = first.text();
-      finishFirstResponse();
-      assert.strictEqual(await firstText, 'processed:first');
-      assert.strictEqual(
-        bytesToHex(transport.getSessionRecoveryToken().requestEnc),
-        secondRequestEnc
-      );
-
-      await second.body!.cancel('test complete');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should preserve fetch options on the encrypted request', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let capturedRequest!: Request;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      capturedRequest = input as Request;
-      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
-    }) as typeof fetch;
-
-    try {
-      const controller = new AbortController();
-      const response = await transport.post('https://server.test/secure', 'hello', {
-        cache: 'no-store',
-        credentials: 'include',
-        integrity: 'sha256-test',
-        mode: 'cors',
-        redirect: 'manual',
-        referrer: 'https://client.test/page',
-        referrerPolicy: 'origin',
-        signal: controller.signal,
-      });
-      assert.strictEqual(await response.text(), 'processed:hello');
-
-      assert.strictEqual(capturedRequest.cache, 'no-store');
-      assert.strictEqual(capturedRequest.credentials, 'include');
-      assert.strictEqual(capturedRequest.integrity, 'sha256-test');
-      assert.strictEqual(capturedRequest.mode, 'cors');
-      assert.strictEqual(capturedRequest.redirect, 'manual');
-      assert.strictEqual(capturedRequest.referrer, 'https://client.test/page');
-      assert.strictEqual(capturedRequest.referrerPolicy, 'origin');
-
-      // The outgoing request's signal must follow the caller's signal
-      assert.strictEqual(capturedRequest.signal.aborted, false);
+    const tp = transport(async (input, init) => {
+      const request = new Request(input, init);
+      assert.strictEqual(request.body, null);
+      assert.strictEqual(request.headers.has(PROTOCOL.ENCAPSULATED_KEY_HEADER), false);
       controller.abort();
-      assert.strictEqual(capturedRequest.signal.aborted, true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should preserve fetch options when input is a Request instance', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let capturedRequest!: Request;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      capturedRequest = input as Request;
-      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
-    }) as typeof fetch;
-
-    try {
-      const request = new Request('https://server.test/secure', {
-        method: 'POST',
-        body: 'hello',
-        credentials: 'include',
-        duplex: 'half',
-      } as RequestInit);
-      const response = await transport.request(request);
-      assert.strictEqual(await response.text(), 'processed:hello');
-      assert.strictEqual(capturedRequest.credentials, 'include');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should let init options override a Request input, like fetch()', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let capturedRequest!: Request;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      capturedRequest = input as Request;
-      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
-    }) as typeof fetch;
-
-    try {
-      const request = new Request('https://server.test/secure', {
-        method: 'POST',
-        body: 'hello',
-        cache: 'reload',
-        credentials: 'include',
-        integrity: 'sha256-request',
-        mode: 'cors',
-        redirect: 'manual',
-        referrer: 'https://client.test/request',
-        referrerPolicy: 'strict-origin',
-        duplex: 'half',
-      } as RequestInit);
-      const expectedRequest = new Request(request.clone(), { credentials: 'omit' });
-      const response = await transport.request(request, { credentials: 'omit' });
-      assert.strictEqual(await response.text(), 'processed:hello');
-
-      // init overrides the Request; unset init members fall back to it
-      assert.strictEqual(capturedRequest.cache, expectedRequest.cache);
-      assert.strictEqual(capturedRequest.credentials, expectedRequest.credentials);
-      assert.strictEqual(capturedRequest.integrity, expectedRequest.integrity);
-      assert.strictEqual(capturedRequest.mode, expectedRequest.mode);
-      assert.strictEqual(capturedRequest.redirect, expectedRequest.redirect);
-      assert.strictEqual(capturedRequest.referrer, expectedRequest.referrer);
-      assert.strictEqual(capturedRequest.referrerPolicy, expectedRequest.referrerPolicy);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should let init override Request method, headers, and body, like fetch()', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let capturedRequest!: Request;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      capturedRequest = input as Request;
-      return buildEncryptedResponse(capturedRequest.clone(), serverIdentity);
-    }) as typeof fetch;
-
-    try {
-      const request = new Request('https://server.test/secure', {
-        method: 'POST',
-        headers: { 'x-source': 'request', 'x-replaced': 'request' },
-        body: 'request body',
-        duplex: 'half',
-      } as RequestInit);
-      const response = await transport.request(request, {
-        method: 'PUT',
-        headers: { 'x-init': 'init', 'x-replaced': 'init' },
-        body: 'init body',
-      });
-
-      assert.strictEqual(await response.text(), 'processed:init body');
-      assert.strictEqual(capturedRequest.method, 'PUT');
-      assert.strictEqual(capturedRequest.headers.get('x-init'), 'init');
-      assert.strictEqual(capturedRequest.headers.get('x-replaced'), 'init');
-      assert.strictEqual(capturedRequest.headers.get('x-source'), null);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should seal large bodies as a sequence of 64 KiB frames', async () => {
-    const original = new Uint8Array(200 * 1024).map((_, i) => i & 0xff);
-    const request = new Request('https://server.test/upload', { method: 'POST', body: original });
-    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
-    assert(context);
-    const body = new Uint8Array(await encrypted.arrayBuffer());
-
-    const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
-    const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
-      info: new TextEncoder().encode(HPKE_REQUEST_INFO),
+      request.signal.throwIfAborted();
+      return new Response();
     });
-    const frameSizes: number[] = [];
-    const plain: Uint8Array[] = [];
-    for (let offset = 0; offset < body.byteLength;) {
-      const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
-      const opened = new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len)));
-      frameSizes.push(opened.byteLength);
-      plain.push(opened);
-      offset += 4 + len;
-    }
-    assert.deepStrictEqual(frameSizes, [65536, 65536, 65536, 8 * 1024]);
-    assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
+    await assert.rejects(tp.get('https://server.test/test', { signal: controller.signal }), { name: 'AbortError' });
   });
 
-  it('should fall back to a single Blob body where uploads cannot stream', async () => {
-    // Force the browser path: canStreamUpload() keys off process.versions.node.
-    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
-    Object.defineProperty(process, 'versions', { value: {}, configurable: true });
-    // Observe the fallback itself: it must build exactly one Blob from the
-    // frame parts, not a stream and not a second body-sized buffer.
-    const RealBlob = globalThis.Blob;
-    const blobs: number[] = [];
-    globalThis.Blob = class extends RealBlob {
-      constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
-        super(parts, options);
-        blobs.push(parts?.length ?? 0);
-      }
-    } as typeof Blob;
-    try {
-      const original = new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
-      const request = new Request('https://server.test/upload', { method: 'POST', body: original });
-      const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
-      assert(context);
-      assert.deepStrictEqual(blobs, [4], 'one Blob built from the four frame parts');
-      const body = new Uint8Array(await encrypted.arrayBuffer());
-
-      const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
-      const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), context.requestEnc, {
-        info: new TextEncoder().encode(HPKE_REQUEST_INFO),
-      });
-      const plain: Uint8Array[] = [];
-      let frames = 0;
-      for (let offset = 0; offset < body.byteLength; frames++) {
-        const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
-        plain.push(new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len))));
-        offset += 4 + len;
-      }
-      assert.strictEqual(frames, 4);
-      assert.deepStrictEqual(Buffer.concat(plain), Buffer.from(original));
-    } finally {
-      globalThis.Blob = RealBlob;
-      Object.defineProperty(process, 'versions', versions);
-    }
+  it('propagates custom fetch errors as-is and clears the recovery token', async () => {
+    const failure = new Error('network unavailable');
+    const tp = transport(async () => { throw failure; });
+    await assert.rejects(tp.post('https://server.test/test', 'secret'), (err) => err === failure);
+    assert.strictEqual(tp.sessionRecoveryToken(), undefined);
   });
 
-  // Browser-mode helpers: force the no-upload-streaming path and fake OPFS.
-  function browserMode(thresholdBytes: number | null = 100 * 1024) {
-    // Default: a 100 KiB framed threshold so 200 KiB bodies cross it and the
-    // spill path runs; pass null to test the real 64 MiB default.
-    setSpoolThresholdForTests(thresholdBytes ?? undefined);
-    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
-    Object.defineProperty(process, 'versions', { value: {}, configurable: true });
-    return () => {
-      setSpoolThresholdForTests(undefined);
-      Object.defineProperty(process, 'versions', versions);
-    };
-  }
-  function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[]; failClose?: boolean } = {}) {
-    const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0, openedAtWrites: -1 };
-    const chunks: Uint8Array[] = [];
-    const handle = {
-      async createWritable() {
-        state.openedAtWrites = state.writes.length;
-        let errored = false;
-        return {
-          async write(v: Uint8Array) {
-            if (opts.failAfterWrites !== undefined && state.writes.length >= opts.failAfterWrites) {
-              errored = true; throw new DOMException('quota exceeded mid-body', 'QuotaExceededError');
-            }
-            state.writes.push(v.byteLength); chunks.push(new Uint8Array(v));
-          },
-          async abort() { state.aborted++; },
-          async close() {
-            if (errored) { state.closedAfterError++; throw new TypeError('Cannot close a ERRORED writable stream'); }
-            if (opts.failClose) throw new DOMException('disk full at close', 'QuotaExceededError');
-          },
-        };
+  it('discovers keys through the same fetch, with discoverInit, never following redirects', async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected global fetch'); });
+    const urls: string[] = [];
+    const tp = await Transport.create('https://server.test', { discover: true }, {
+      discoverInit: { credentials: 'include' },
+      fetch: async function (this: unknown, input, init) {
+        assert.strictEqual(this, undefined);
+        const request = new Request(input, init);
+        urls.push(request.url);
+        if (!request.url.endsWith(PROTOCOL.KEYS_PATH)) return encryptedResponse(privateKey, request);
+        assert.strictEqual(request.credentials, 'include');
+        assert.strictEqual(request.redirect, 'manual'); // SPEC 3.1: discovery never follows redirects
+        return new Response(buf(core.marshalConfig(publicKey)), { headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE } });
       },
-      async getFile() { return new File(chunks as BlobPart[], 'spool'); },
-    };
-    const root = {
-      async getFileHandle() { return handle; },
-      async removeEntry(name: string) { state.removed.push(name); },
-      async *keys() { for (const n of opts.existing ?? []) yield n; },
-    };
-    const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-    Object.defineProperty(globalThis, 'navigator', {
-      value: { storage: { getDirectory: async () => root, estimate: async () => ({ quota: opts.quota ?? 1e12, usage: 0 }) } },
-      configurable: true,
     });
-    const g = globalThis as Record<string, unknown>;
-    const prevHandle = g.FileSystemFileHandle;
-    g.FileSystemFileHandle = class { createWritable() {} };
-    const restore = () => {
-      if (nav) Object.defineProperty(globalThis, 'navigator', nav); else delete g.navigator;
-      g.FileSystemFileHandle = prevHandle;
-    };
-    return { state, restore };
-  }
-  // Captures what fetch was handed and answers a nonce-less 502 (pass-through).
-  function captureFetch() {
-    const captured = { body: undefined as Uint8Array | undefined, enc: '', removedAtFetch: -1 };
-    const originalFetch = globalThis.fetch;
-    const install = (state?: { removed: string[] }) => {
-      globalThis.fetch = (async (req: Request) => {
-        captured.removedAtFetch = state?.removed.length ?? -1;
-        captured.enc = req.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER) ?? '';
-        captured.body = new Uint8Array(await req.arrayBuffer());
-        return new Response('upstream', { status: 502 });
-      }) as typeof fetch;
-    };
-    return { captured, install, restore: () => { globalThis.fetch = originalFetch; } };
-  }
-  async function openFrames(body: Uint8Array, encHex: string) {
-    const suite = new CipherSuite(KEM_DHKEM_X25519_HKDF_SHA256, KDF_HKDF_SHA256, AEAD_AES_256_GCM);
-    const recipient = await suite.SetupRecipient(serverIdentity.getPrivateKey(), hexToBytes(encHex), {
-      info: new TextEncoder().encode(HPKE_REQUEST_INFO),
-    });
-    const plain: Uint8Array[] = [];
-    for (let offset = 0; offset < body.byteLength;) {
-      const len = new DataView(body.buffer, body.byteOffset + offset).getUint32(0, false);
-      plain.push(new Uint8Array(await recipient.Open(body.slice(offset + 4, offset + 4 + len))));
-      offset += 4 + len;
-    }
-    return { frames: plain.length, plain: Buffer.concat(plain) };
-  }
-  const original200k = () => new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
+    assert.strictEqual(await (await tp.post('https://server.test/test', 'hello')).text(), 'processed:hello');
+    assert.deepStrictEqual(urls, [`https://server.test${PROTOCOL.KEYS_PATH}`, 'https://server.test/test']);
+  });
 
-  it('should spool frames to OPFS incrementally and upload the file where uploads cannot stream', async () => {
-    const restoreMode = browserMode();
-    const { state, restore } = fakeOpfs();
-    const f = captureFetch(); f.install(state);
+  it('requires an http(s) origin and a resolved key', async () => {
+    for (const server of ['server.test', 'server.test:80', 'ftp://server.test', 'https://user:pass@server.test']) {
+      assert.throws(() => new Transport(server, { publicKey }), InvalidInputError);
+    }
+    assert.throws(() => new Transport('https://server.test', { publicKey: publicKey.slice(1) }));
+    const fromConfig = await Transport.create('https://server.test', { config: core.marshalConfig(publicKey) });
+    assert.strictEqual(await (await fromConfig.get('data:,plain')).text(), 'plain');
+  });
+
+  it('refuses a redirect to an encrypted request, in every form fetch can report one', async () => {
+    const cases: [string, () => Response][] = [
+      ['see other', () => new Response(null, { status: 303, headers: { location: '/followed' } })],
+      ['temporary redirect with a body', () => new Response('forged', { status: 307, headers: { location: '/followed' } })],
+      ['made-up nonce', () => new Response(null, { status: 303, headers: { location: '/followed', [PROTOCOL.RESPONSE_NONCE_HEADER]: 'ab'.repeat(32) } })],
+      // What a fetch that followed the redirect anyway hands back.
+      ['already followed', () => Object.defineProperty(new Response('forged', { status: 200 }), 'redirected', { value: true })],
+    ];
+    for (const [name, response] of cases) {
+      const modes: (string | undefined)[] = [];
+      const tp = transport(async (_input, init) => { modes.push(init?.redirect); return response(); });
+      await assert.rejects(tp.post('https://server.test/secure', 'hello'), UnexpectedRedirectError, name);
+      assert.deepStrictEqual(modes, ['manual'], name);
+      assert.strictEqual(tp.sessionRecoveryToken(), undefined, name);
+    }
+  });
+
+  it('clears the recovery token when the consumer cancels before EOF', async () => {
+    const tp = transport(async (input, init) => {
+      const encrypted = await encryptedResponse(privateKey, new Request(input, init));
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+      return new Response(new ReadableStream({ start(c) { c.enqueue(body.slice(0, -1)); } }), { headers: encrypted.headers });
+    });
+    const response = await tp.post('https://server.test/secure', 'hello');
+    assert(tp.sessionRecoveryToken());
+    await response.body!.cancel('consumer stopped');
+    assert.strictEqual(tp.sessionRecoveryToken(), undefined); // SPEC 6.3: abandoning the body ends the exchange
+  });
+
+  it('does not let an older stream completion clear the latest recovery token', async () => {
+    let finishFirst!: () => void;
+    let secondEnc = '';
+    let count = 0;
+    const tp = transport(async (input, init) => {
+      const request = new Request(input, init);
+      const encrypted = await encryptedResponse(privateKey, request);
+      if (++count === 2) { secondEnc = request.headers.get(PROTOCOL.ENCAPSULATED_KEY_HEADER)!; return encrypted; }
+      const body = new Uint8Array(await encrypted.arrayBuffer());
+      return new Response(new ReadableStream({ start(c) { c.enqueue(body); finishFirst = () => c.close(); } }), { headers: encrypted.headers });
+    });
+    const first = await tp.post('https://server.test/secure', 'first');
+    const second = await tp.post('https://server.test/secure', 'second');
+    assert.strictEqual(hex(tp.sessionRecoveryToken()!.requestEnc), secondEnc);
+    const firstText = first.text();
+    finishFirst();
+    assert.strictEqual(await firstText, 'processed:first');
+    assert.strictEqual(hex(tp.sessionRecoveryToken()!.requestEnc), secondEnc);
+    await second.body!.cancel('test complete');
+  });
+
+  it('preserves fetch options on encrypted and pass-through requests', async () => {
+    let captured!: Request;
+    const tp = transport(async (input) => {
+      captured = input as Request;
+      return captured.body ? encryptedResponse(privateKey, captured.clone()) : new Response('plain');
+    });
+    const controller = new AbortController();
+    const options: RequestInit = {
+      cache: 'no-store', credentials: 'include', integrity: 'sha256-test', mode: 'cors', redirect: 'manual',
+      referrer: 'https://client.test/page', referrerPolicy: 'origin', signal: controller.signal,
+    };
+    assert.strictEqual(await (await tp.post('https://server.test/secure', 'hello', options)).text(), 'processed:hello');
+    for (const [k, v] of Object.entries(options)) if (k !== 'signal') assert.strictEqual(captured[k as keyof Request], v, k);
+    assert.strictEqual(captured.signal.aborted, false);
+    controller.abort();
+    assert.strictEqual(captured.signal.aborted, true, 'the outgoing signal follows the caller\'s');
+    assert.strictEqual(await (await tp.get('https://server.test/status', { credentials: 'include' })).text(), 'plain');
+    assert.strictEqual(captured.credentials, 'include');
+  });
+
+  it('combines a Request input with init like fetch(): init wins, the rest falls back', async () => {
+    let captured!: Request;
+    const tp = transport(async (input) => { captured = input as Request; return encryptedResponse(privateKey, captured.clone()); });
+    const request = new Request('https://server.test/secure', {
+      method: 'POST', body: 'request body', headers: { 'x-source': 'request', 'x-replaced': 'request' },
+      cache: 'reload', credentials: 'include', integrity: 'sha256-request', mode: 'cors', redirect: 'manual',
+      referrer: 'https://client.test/request', referrerPolicy: 'strict-origin', duplex: 'half',
+    } as RequestInit);
+    const expected = new Request(request.clone(), { credentials: 'omit' });
+    assert.strictEqual(await (await tp.request(request.clone(), { credentials: 'omit' })).text(), 'processed:request body');
+    for (const k of ['cache', 'credentials', 'integrity', 'mode', 'redirect', 'referrer', 'referrerPolicy'] as const) assert.strictEqual(captured[k], expected[k], k);
+    const response = await tp.request(request, { method: 'PUT', headers: { 'x-init': 'init', 'x-replaced': 'init' }, body: 'init body' });
+    assert.strictEqual(await response.text(), 'processed:init body');
+    assert.strictEqual(captured.method, 'PUT');
+    assert.deepStrictEqual([captured.headers.get('x-init'), captured.headers.get('x-replaced'), captured.headers.get('x-source')], ['init', 'init', null]);
+  });
+
+  it('pulls a stream body incrementally rather than buffering it', async () => {
+    let pulls = 0;
+    const chunks = 8;
+    const source = new ReadableStream<Uint8Array>({
+      pull(c) { if (++pulls > chunks) c.close(); else c.enqueue(new Uint8Array(65536).fill(pulls)); },
+    }, { highWaterMark: 0 });
+    const tp = transport(async (input, init) => {
+      const encrypted = new Request(input, init);
+      assert(encrypted.body, 'Node sends the encrypted frames as a stream');
+      const reader = encrypted.body.getReader();
+      const first = await reader.read();
+      assert(!first.done && first.value.byteLength === 65536 + (4 + 16), 'first read is the first 64 KiB source chunk sealed as one 64 KiB frame');
+      assert(pulls < chunks, `source should not be drained up front (pulled ${pulls} of ${chunks})`);
+      await reader.cancel();
+      return new Response(null, { status: 502 });
+    });
+    await tp.request('https://server.test/upload', { method: 'POST', body: source, duplex: 'half' } as RequestInit);
+  });
+
+  it('preserves the request payload when Request.body is unavailable (Firefox), through the default global fetch', async (t) => {
+    t.mock.method(globalThis, 'fetch', async (input: Request) => encryptedResponse(privateKey, input.clone()));
+    const originalBody = Object.getOwnPropertyDescriptor(Request.prototype, 'body')!;
+    Object.defineProperty(Request.prototype, 'body', { configurable: true, get: () => null });
     try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
+      const response = await new Transport('https://server.test', { publicKey }).post('https://server.test/secure', 'firefox body');
+      assert.strictEqual(await response.text(), 'processed:firefox body');
+    } finally {
+      Object.defineProperty(Request.prototype, 'body', originalBody);
+    }
+  });
+
+  it('maps every core code to an error class carrying the spelling the core gives it', () => {
+    for (const c of pure.Codes) {
+      const err = error(c, 'x');
+      assert.ok(err instanceof EhbpError, code(c));
+      assert.equal(codeOf(err), code(c));
+      assert.equal(Code[code(c) as Code], code(c));
+    }
+    assert.equal(pure.Codes.length, Object.keys(Code).length);
+  });
+
+  // Browser uploads: where fetch cannot stream a request body, the sealed
+  // frames are buffered, spooled to OPFS past a threshold, or re-sealed.
+  describe('where uploads cannot stream', () => {
+    const original200k = () => new Uint8Array(200 * 1024).map((_, i) => (i * 7) & 0xff);
+    // Forces the browser path (canStreamUpload keys off process.versions.node) with a
+    // 100 KiB framed spool threshold so 200 KiB bodies cross it; null keeps the 64 MiB default.
+    function browserMode(thresholdBytes: number | null = 100 * 1024) {
+      setSpoolThresholdForTests(thresholdBytes ?? undefined);
+      const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
+      Object.defineProperty(process, 'versions', { value: {}, configurable: true });
+      return () => { setSpoolThresholdForTests(undefined); Object.defineProperty(process, 'versions', versions); };
+    }
+    function fakeOpfs(opts: { quota?: number; failAfterWrites?: number; existing?: string[]; failClose?: boolean } = {}) {
+      const state = { writes: [] as number[], removed: [] as string[], aborted: 0, closedAfterError: 0, openedAtWrites: -1 };
+      const chunks: Uint8Array[] = [];
+      const handle = {
+        async createWritable() {
+          state.openedAtWrites = state.writes.length;
+          let errored = false;
+          return {
+            async write(v: Uint8Array) {
+              if (opts.failAfterWrites !== undefined && state.writes.length >= opts.failAfterWrites) {
+                errored = true; throw new DOMException('quota exceeded mid-body', 'QuotaExceededError');
+              }
+              state.writes.push(v.byteLength); chunks.push(new Uint8Array(v));
+            },
+            async abort() { state.aborted++; },
+            async close() {
+              if (errored) { state.closedAfterError++; throw new TypeError('Cannot close a ERRORED writable stream'); }
+              if (opts.failClose) throw new DOMException('disk full at close', 'QuotaExceededError');
+            },
+          };
+        },
+        async getFile() { return new File(chunks as BlobPart[], 'spool'); },
+      };
+      const root = {
+        async getFileHandle() { return handle; },
+        async removeEntry(name: string) { state.removed.push(name); },
+        async *keys() { for (const n of opts.existing ?? []) yield n; },
+      };
+      const nav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+      Object.defineProperty(globalThis, 'navigator', {
+        value: { storage: { getDirectory: async () => root, estimate: async () => ({ quota: opts.quota ?? 1e12, usage: 0 }) } },
+        configurable: true,
+      });
+      const g = globalThis as Record<string, unknown>;
+      const prevHandle = g.FileSystemFileHandle;
+      g.FileSystemFileHandle = class { createWritable() {} };
+      const restore = () => {
+        if (nav) Object.defineProperty(globalThis, 'navigator', nav); else delete g.navigator;
+        g.FileSystemFileHandle = prevHandle;
+      };
+      return { state, restore };
+    }
+    type Opfs = ReturnType<typeof fakeOpfs>;
+    // A transport whose fetch captures the sealed request and answers a nonce-less 502 (pass-through).
+    function capturing(state?: Opfs['state']) {
+      const captured = { request: undefined as Request | undefined, removedAtFetch: -1 };
+      const tp = transport(async (req) => {
+        captured.removedAtFetch = state?.removed.length ?? -1;
+        captured.request = (req as Request).clone();
+        await (req as Request).arrayBuffer();
+        return new Response('upstream', { status: 502 });
+      });
+      return { tp, captured, opened: () => openFrames(privateKey, captured.request!) };
+    }
+    // Each case runs in browser mode with a fake OPFS (unless `opfs: false`) and restores both after.
+    const browserIt = (name: string, mode: { threshold?: number | null; opfs?: Parameters<typeof fakeOpfs>[0] | false },
+      body: (ctx: { state: Opfs['state'] } & ReturnType<typeof capturing>) => Promise<void>) =>
+      it(name, async () => {
+        const restoreMode = browserMode(mode.threshold);
+        const opfs = mode.opfs === false ? undefined : fakeOpfs(mode.opfs);
+        try { await body({ state: opfs?.state!, ...capturing(opfs?.state) }); } finally { opfs?.restore(); restoreMode(); }
+      });
+
+    it('falls back to a single Blob built from the frame parts', async () => {
+      const restoreMode = browserMode();
+      const RealBlob = globalThis.Blob;
+      const blobs: number[] = [];
+      globalThis.Blob = class extends RealBlob {
+        constructor(parts?: BlobPart[], options?: BlobPropertyBag) { super(parts, options); blobs.push(parts?.length ?? 0); }
+      } as typeof Blob;
+      try {
+        const original = original200k();
+        const { tp, opened } = capturing();
+        await tp.request('https://server.test/upload', { method: 'POST', body: original });
+        assert.strictEqual(blobs.length, 1, 'one Blob built from the frame parts');
+        const { frames, plain } = await opened();
+        assert.strictEqual(frames, 4);
+        assert.deepStrictEqual(plain, Buffer.from(original));
+      } finally {
+        globalThis.Blob = RealBlob;
+        restoreMode();
+      }
+    });
+
+    browserIt('spools frames to OPFS incrementally and uploads the file', {}, async ({ tp, state, captured, opened }) => {
       const original = original200k();
       let streamed = 0;
       const source = new ReadableStream<Uint8Array>({
@@ -1101,395 +334,139 @@ describe('Transport', () => {
           c.enqueue(original.subarray(streamed, streamed + 50 * 1024)); streamed += 50 * 1024;
         },
       });
-      const response = await transport.request('https://server.test/upload', { method: 'POST', body: source });
+      const response = await tp.request('https://server.test/upload', { method: 'POST', body: source });
       assert.strictEqual(response.status, 502);
-      assert.deepStrictEqual(state.writes.map((n) => n - 20), [65536, 65536, 65536, 8192], 'one OPFS write per sealed frame');
-      assert.strictEqual(f.captured.removedAtFetch, 0, 'the spool file is alive while fetch runs');
+      assert.deepStrictEqual(state.writes, new Array(4).fill(50 * 1024 + 20), 'one OPFS write per sealed read (a 50 KiB chunk is one frame)');
+      assert.strictEqual(captured.removedAtFetch, 0, 'the spool file is alive while fetch runs');
       assert.strictEqual(state.removed.length, 1, 'the spool file is removed after the response');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      const { frames, plain } = await opened();
       assert.strictEqual(frames, 4);
       assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
+    });
 
-  it('should fall back to a Blob when OPFS quota cannot hold a body of known size', async () => {
-    const restoreMode = browserMode();
-    const { state, restore } = fakeOpfs({ quota: 1024 });
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
+    browserIt('falls back to a Blob when the quota cannot hold a body of known size', { opfs: { quota: 1024 } }, async ({ tp, state, opened }) => {
       const original = original200k();
       let streamCalls = 0;
       const blob = new Blob([original]);
       const realStream = blob.stream.bind(blob);
       blob.stream = () => { streamCalls++; return realStream(); };
       blob.arrayBuffer = async () => { throw new Error('must not buffer the source'); };
-      await transport.request('https://server.test/upload', { method: 'POST', body: blob });
+      await tp.request('https://server.test/upload', { method: 'POST', body: blob });
       assert.strictEqual(state.writes.length, 0, 'no spool when quota is short');
       assert.strictEqual(streamCalls, 1, 'the Blob source is read as a stream');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      const { frames, plain } = await opened();
       assert.strictEqual(frames, 4);
       assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
+    });
 
-  it('should fall back to a Blob when the quota only fits the plaintext, not the framed body', async () => {
-    const restoreMode = browserMode();
-    const original = original200k();
-    const { state, restore } = fakeOpfs({ quota: original.byteLength + 10 }); // 4 frames add 80 bytes
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+    browserIt('falls back to a Blob when the quota only fits the plaintext, not the framed body', { opfs: { quota: 200 * 1024 + 10 } }, async ({ tp, state, opened }) => {
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()]) });
       assert.strictEqual(state.writes.length, 0, 'framed size exceeds quota: no spool');
-      const { frames } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.strictEqual(frames, 4);
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
+      assert.strictEqual((await opened()).frames, 4);
+    });
 
-  it('should re-seal a Blob source into memory when the OPFS write fails mid-body', async () => {
-    const restoreMode = browserMode();
-    const { state, restore } = fakeOpfs({ failAfterWrites: 2 });
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
+    browserIt('re-seals a Blob source into memory when the OPFS write fails mid-body', { opfs: { failAfterWrites: 0 } }, async ({ tp, state, opened }) => {
       const original = original200k();
-      const response = await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      const response = await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
       assert.strictEqual(response.status, 502);
       assert.strictEqual(state.aborted, 1, 'the errored writer is aborted, not closed');
       assert.strictEqual(state.closedAfterError, 0);
       assert.strictEqual(state.removed.length, 1, 'the partial spool is removed');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
+      const { frames, plain } = await opened();
       assert.strictEqual(frames, 4);
       assert.deepStrictEqual(plain, Buffer.from(original), 'the retry sealed the whole body under a fresh context');
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
+    });
 
-  it('should surface the OPFS failure for a stream source that cannot be replayed', async () => {
-    const restoreMode = browserMode();
-    const { state, restore } = fakeOpfs({ failAfterWrites: 1 });
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
+    browserIt('surfaces the OPFS failure for a stream source that cannot be replayed', { opfs: { failAfterWrites: 0 } }, async ({ tp, state }) => {
       let cancelled: unknown;
-      const source = new ReadableStream<Uint8Array>({
-        start(c) { c.enqueue(original200k()); },
-        cancel(reason) { cancelled = reason; },
-      });
-      await assert.rejects(
-        transport.request('https://server.test/upload', { method: 'POST', body: source }),
-        (err: unknown) => err instanceof DOMException && err.name === 'QuotaExceededError',
-      );
+      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original200k()); }, cancel(reason) { cancelled = reason; } });
+      await assert.rejects(tp.request('https://server.test/upload', { method: 'POST', body: source }),
+        (err: unknown) => err instanceof DOMException && err.name === 'QuotaExceededError');
       assert.strictEqual(state.aborted, 1);
       assert.strictEqual(state.removed.length, 1);
       assert.ok(cancelled instanceof DOMException, 'the caller stream is cancelled with the failure');
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
+    });
 
-  it('should remove orphaned spool files older than an hour and keep fresh ones', async () => {
-    const restoreMode = browserMode();
     const old = `ehbp-spool-${Date.now() - 2 * 60 * 60 * 1000}-dead`;
     const fresh = `ehbp-spool-${Date.now() - 1000}-live`;
-    const { state, restore } = fakeOpfs({ existing: [old, fresh, 'unrelated-file'] });
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()]) });
+    browserIt('removes orphaned spool files older than an hour and keeps fresh ones', { opfs: { existing: [old, fresh, 'unrelated-file'] } }, async ({ tp, state }) => {
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()]) });
       assert.ok(state.removed.includes(old), 'stale spool swept');
       assert.ok(state.writes.length > 0, 'sweep happens before the quota check, so the upload still spools');
       assert.ok(!state.removed.includes(fresh), 'a concurrent upload\'s spool is left alone');
       assert.ok(!state.removed.includes('unrelated-file'));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should reject a GET or HEAD with a body before touching it, and keep a typed Blob\'s Content-Type', async () => {
-    const restoreMode = browserMode();
-    const { state, restore } = fakeOpfs();
-    const captured = { contentType: null as string | null };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (req: Request) => { captured.contentType = req.headers.get('content-type'); return new Response('x', { status: 502 }); }) as typeof fetch;
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      let pulled = false;
-      const source = new ReadableStream<Uint8Array>({ pull(c) { pulled = true; c.close(); } }, { highWaterMark: 0 });
-      await assert.rejects(transport.request('https://server.test/x', { method: 'GET', body: source }), InvalidInputError);
-      assert.strictEqual(pulled, false);
-      assert.strictEqual(state.writes.length, 0);
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()], { type: 'application/octet-stream' }) });
-      assert.strictEqual(captured.contentType, 'application/octet-stream');
-    } finally {
-      globalThis.fetch = originalFetch; restore(); restoreMode();
-    }
-  });
-
-  it('should keep bodies under the 64 MiB threshold in memory and never touch OPFS', async () => {
-    const restoreMode = browserMode(null);
-    const { state, restore } = fakeOpfs();
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const original = original200k();
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
-      assert.strictEqual(state.openedAtWrites, -1, 'no spool file was created');
-      assert.strictEqual(state.writes.length, 0);
-      assert.strictEqual(state.removed.length, 0, 'no sweep, no cleanup');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.strictEqual(frames, 4);
-      assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should spill a stream only once it crosses the threshold, writing the buffered prefix first', async () => {
-    const restoreMode = browserMode(100 * 1024); // crossed after the second 64 KiB frame
-    const { state, restore } = fakeOpfs();
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const original = original200k();
-      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original); c.close(); } });
-      await transport.request('https://server.test/upload', { method: 'POST', body: source });
-      assert.strictEqual(state.openedAtWrites, 0, 'file opened once the buffer exceeded the threshold');
-      assert.deepStrictEqual(state.writes.map((n) => n - 20), [65536, 65536, 65536, 8192], 'buffered frames first, in order, then the rest');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.strictEqual(frames, 4);
-      assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should spill a known-size Blob above the threshold from the first frame', async () => {
-    const restoreMode = browserMode(1024);
-    const { state, restore } = fakeOpfs();
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const original = original200k();
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
-      assert.strictEqual(state.openedAtWrites, 0);
-      assert.strictEqual(state.writes.length, 4);
-      const { plain } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should stay in memory when the quota cannot take the spill', async () => {
-    const restoreMode = browserMode(1024);
-    const { state, restore } = fakeOpfs({ quota: 1500 }); // below twice the 1 KiB threshold estimate
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const original = original200k();
-      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original); c.close(); } });
-      await transport.request('https://server.test/upload', { method: 'POST', body: source });
-      assert.strictEqual(state.writes.length, 0, 'spill refused once, then buffered to the end');
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.strictEqual(frames, 4);
-      assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should remove the spool when finalization fails and surface that error', async () => {
-    const restoreMode = browserMode(1024);
-    const { state, restore } = fakeOpfs({ failClose: true });
-    const f = captureFetch(); f.install(state);
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const source = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(original200k()); c.close(); } });
-      await assert.rejects(
-        transport.request('https://server.test/upload', { method: 'POST', body: source }),
-        (err: unknown) => err instanceof DOMException && err.message === 'disk full at close',
-      );
-      assert.strictEqual(state.removed.length, 1, 'the spool file is removed after a failed close');
-      assert.strictEqual(state.aborted, 1);
-    } finally {
-      f.restore(); restore(); restoreMode();
-    }
-  });
-
-  it('should fall back to a Blob where OPFS is absent', async () => {
-    const restoreMode = browserMode();
-    const f = captureFetch(); f.install();
-    try {
-      const transport = new Transport(serverIdentity, 'https://server.test');
-      const original = original200k();
-      await transport.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
-      const { frames, plain } = await openFrames(f.captured.body!, f.captured.enc);
-      assert.strictEqual(frames, 4);
-      assert.deepStrictEqual(plain, Buffer.from(original));
-    } finally {
-      f.restore(); restoreMode();
-    }
-  });
-
-  it('should frame a single huge source chunk by cursor without chunk-sized copies', async () => {
-    const chunk = new Uint8Array(1024 * 1024).map((_, i) => i & 0xff);
-    let maxInput = 0;
-    let zeroCopy = 0;
-    const ctx = {
-      async Seal(plaintext: Uint8Array) {
-        maxInput = Math.max(maxInput, plaintext.byteLength);
-        // A full frame is a view into the source chunk itself: no copy was made.
-        if (plaintext.buffer === chunk.buffer) zeroCopy++;
-        return plaintext.slice();
-      },
-    } as unknown as Parameters<typeof encryptFrames>[0];
-    const reader = new ReadableStream<Uint8Array>({ start(c) { c.close(); } }).getReader();
-    const stream = encryptFrames(ctx, reader, chunk);
-    let frames = 0;
-    for (const r = stream.getReader(); ;) {
-      const { done, value } = await r.read();
-      if (done) break;
-      frames++;
-      assert.strictEqual(value.byteLength, 4 + 65536);
-    }
-    assert.strictEqual(frames, 16);
-    assert.strictEqual(maxInput, 65536, 'Seal never sees more than one frame');
-    assert.strictEqual(zeroCopy, 16, 'every full frame was served from the source chunk by offset');
-  });
-
-  it('should cancel the source when sealing fails', async () => {
-    let cancelled: unknown = undefined;
-    const source = new ReadableStream<Uint8Array>({
-      pull(c) { c.enqueue(new Uint8Array(10)); },
-      cancel(reason) { cancelled = reason; },
-    }, { highWaterMark: 0 });
-    const boom = new Error('seal failed');
-    const ctx = { async Seal() { throw boom; } } as unknown as Parameters<typeof encryptFrames>[0];
-    const stream = encryptFrames(ctx, source.getReader(), new Uint8Array(5));
-    await assert.rejects(stream.getReader().read(), boom);
-    assert.strictEqual(cancelled, boom);
-  });
-
-  it('should pull a stream body incrementally rather than buffering it', async () => {
-    let pulls = 0;
-    const chunks = 8;
-    const source = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        pulls++;
-        if (pulls > chunks) controller.close();
-        else controller.enqueue(new Uint8Array(65536).fill(pulls));
-      },
-    }, { highWaterMark: 0 });
-    const request = new Request('https://server.test/upload', { method: 'POST', body: source, duplex: 'half' } as RequestInit);
-    const { request: encrypted, context } = await serverIdentity.encryptRequestWithContext(request);
-    assert(context);
-    assert(encrypted.body, 'Node sends the encrypted frames as a stream');
-    const reader = encrypted.body.getReader();
-    const first = await reader.read();
-    assert(!first.done && first.value.byteLength === 4 + 65536 + 16, 'first frame is one sealed 64 KiB chunk');
-    assert(pulls < chunks, `source should not be drained up front (pulled ${pulls} of ${chunks})`);
-    await reader.cancel();
-  });
-
-  it('should preserve request payload when Request.body is unavailable', async () => {
-    const transport = new Transport(serverIdentity, 'server.test');
-    const originalFetch = globalThis.fetch;
-    const originalBody = Object.getOwnPropertyDescriptor(Request.prototype, 'body');
-    assert(originalBody);
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input as Request;
-      return buildEncryptedResponse(request.clone(), serverIdentity);
-    }) as typeof fetch;
-    Object.defineProperty(Request.prototype, 'body', {
-      configurable: true,
-      get: () => null,
     });
 
-    try {
-      const response = await transport.post('https://server.test/secure', 'firefox body');
-      assert.strictEqual(await response.text(), 'processed:firefox body');
-    } finally {
-      Object.defineProperty(Request.prototype, 'body', originalBody);
-      globalThis.fetch = originalFetch;
-    }
+    browserIt('rejects a GET with a body before touching it, and keeps a typed Blob\'s Content-Type', {}, async ({ tp, state, captured }) => {
+      let pulled = false;
+      const source = new ReadableStream<Uint8Array>({ pull(c) { pulled = true; c.close(); } }, { highWaterMark: 0 });
+      await assert.rejects(tp.request('https://server.test/x', { method: 'GET', body: source }), InvalidInputError);
+      assert.strictEqual(pulled, false);
+      assert.strictEqual(state.writes.length, 0);
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original200k()], { type: 'application/octet-stream' }) });
+      assert.strictEqual(captured.request!.headers.get('content-type'), 'application/octet-stream');
+    });
+
+    browserIt('keeps bodies under the 64 MiB threshold in memory and never touches OPFS', { threshold: null }, async ({ tp, state, opened }) => {
+      const original = original200k();
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(state.openedAtWrites, -1, 'no spool file was created');
+      assert.deepStrictEqual([state.writes.length, state.removed.length], [0, 0], 'no sweep, no cleanup');
+      const { frames, plain } = await opened();
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    });
+
+    browserIt('spills a stream only once it crosses the threshold, writing the buffered prefix first', { threshold: 100 * 1024 }, async ({ tp, state, opened }) => {
+      const original = original200k();
+      await tp.request('https://server.test/upload', { method: 'POST', body: new ReadableStream({ start(c) { c.enqueue(original); c.close(); } }) });
+      assert.strictEqual(state.openedAtWrites, 0, 'file opened once the buffer exceeded the threshold');
+      assert.deepStrictEqual(state.writes, [...new Array(3).fill(64 * 1024 + 20), 8 * 1024 + 20], 'the buffered 64 KiB reads are written first, in order');
+      const { frames, plain } = await opened();
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    });
+
+    browserIt('spills a known-size Blob above the threshold from the first frame', { threshold: 1024 }, async ({ tp, state, opened }) => {
+      const original = original200k();
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      assert.strictEqual(state.openedAtWrites, 0);
+      assert.ok(state.writes.length > 0);
+      assert.deepStrictEqual((await opened()).plain, Buffer.from(original));
+    });
+
+    browserIt('stays in memory when the quota cannot take the spill', { threshold: 1024, opfs: { quota: 1500 } }, async ({ tp, state, opened }) => {
+      const original = original200k();
+      await tp.request('https://server.test/upload', { method: 'POST', body: new ReadableStream({ start(c) { c.enqueue(original); c.close(); } }) });
+      assert.strictEqual(state.writes.length, 0, 'spill refused once, then buffered to the end');
+      const { frames, plain } = await opened();
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    });
+
+    browserIt('removes the spool when finalization fails and surfaces that error', { threshold: 1024, opfs: { failClose: true } }, async ({ tp, state }) => {
+      await assert.rejects(tp.request('https://server.test/upload', { method: 'POST', body: new ReadableStream({ start(c) { c.enqueue(original200k()); c.close(); } }) }),
+        (err: unknown) => err instanceof DOMException && err.message === 'disk full at close');
+      assert.strictEqual(state.removed.length, 1, 'the spool file is removed after a failed close');
+      assert.strictEqual(state.aborted, 1);
+    });
+
+    browserIt('falls back to a Blob where OPFS is absent', { opfs: false }, async ({ tp, opened }) => {
+      const original = original200k();
+      await tp.request('https://server.test/upload', { method: 'POST', body: new Blob([original]) });
+      const { frames, plain } = await opened();
+      assert.strictEqual(frames, 4);
+      assert.deepStrictEqual(plain, Buffer.from(original));
+    });
   });
+});
 
-  it('should preserve fetch options on bodyless passthrough requests', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-    let capturedRequest!: Request;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      capturedRequest = input as Request;
-      return new Response('plain', { status: 200 });
-    }) as typeof fetch;
-
-    try {
-      const response = await transport.get('https://server.test/status', {
-        credentials: 'include',
-      });
-      assert.strictEqual(await response.text(), 'plain');
-      assert.strictEqual(capturedRequest.credentials, 'include');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should pass init to the key fetch in createTransport', async () => {
-    const serverIdentity = await Identity.generate();
-    const config = await serverIdentity.marshalConfig();
-
-    const originalFetch = globalThis.fetch;
-    let capturedInit: RequestInit | undefined;
-
-    globalThis.fetch = (async (
-      _input: RequestInfo | URL,
-      init?: RequestInit
-    ): Promise<Response> => {
-      capturedInit = init;
-      return new Response(toArrayBuffer(config), {
-        status: 200,
-        headers: { 'content-type': PROTOCOL.KEYS_MEDIA_TYPE },
-      });
-    }) as typeof fetch;
-
-    try {
-      await createTransport('https://server.test', { credentials: 'include' });
-      assert.strictEqual(capturedInit?.credentials, 'include');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('should decrypt a response with a nonce regardless of HTTP status', async () => {
-    const serverIdentity = await Identity.generate();
-    const transport = new Transport(serverIdentity, 'server.test');
-
-    const originalFetch = globalThis.fetch;
-
-    globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const request = input instanceof Request ? input : new Request(input);
-      return buildEncryptedResponse(request, serverIdentity, 503);
-    }) as typeof fetch;
-
-    try {
-      const response = await transport.post('https://server.test/secure', 'hello');
-      assert.strictEqual(response.status, 503);
-      assert.strictEqual(await response.text(), 'processed:hello');
-    } finally {
-      globalThis.fetch = originalFetch;
+describe('core', () => {
+  it('rejects a sequence number outside uint64 before the core wraps it', () => {
+    const base = new Uint8Array(12);
+    assert.deepStrictEqual(core.nonceFor(base, 2n ** 64n - 1n).slice(4), new Uint8Array(8).fill(0xff));
+    for (const seqNo of [-1, 1.5, Number.MAX_SAFE_INTEGER + 2, -1n, 2n ** 64n]) {
+      assert.throws(() => core.nonceFor(base, seqNo), (err: unknown) => codeOf(err) === Code.INVALID_INPUT);
     }
   });
 });
